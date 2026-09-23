@@ -11665,6 +11665,17 @@ clay_result clay_voxel_build_plane_pick(const clay_voxel_grid* grid, const float
  * an edit reaches. That is the promise a host most depends on and the one that
  * is silent when it breaks: too tight leaves visibly stale bricks at a blend
  * seam, with nothing on the host's side to point at. */
+/* NOTE (issue #650): this is also DILATED BY THE SMOOTH COMBINES AFTER THE NODE
+ * in its chain -- at each level, the siblings that follow it or the group
+ * holding it -- by the widest one's blend support. The node is the running
+ * value wherever it is the nearest thing, so moving it changes that value far
+ * from its own box, and a smooth sibling after it reads the running value out
+ * to its support and carries the change back into the band. Measured before:
+ * two r = 0.3 spheres, the second smooth at k = 0.3, the first moved 0.1 --
+ * band samples moved by up to 0.044 outside the box plus the band, and a cache
+ * dirtied by it kept 25 stale bricks. Nothing widens for a node with only hard
+ * siblings after it, which includes every node appended last -- a stroke's
+ * dabs -- and every document without a smooth blend. */
 clay_result clay_layer_node_influence_bound(const clay_document* doc, clay_layer_id layer,
                                             clay_node_id node, float out_min[3],
                                             float out_max[3], int32_t* out_has_bounds,

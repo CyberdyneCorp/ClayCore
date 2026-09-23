@@ -1843,6 +1843,14 @@ bool UndoStack::perform(Document& doc, const Command& cmd) {
 
 namespace {
 
+// Whether a command leaves every chain's members and their drag terms as they
+// were, so a ChainDragMemo taken before it still answers after it. A deformer
+// chain and a colour are read by no term; everything else might be, and says
+// no rather than being argued case by case.
+bool command_keeps_chain_drag(const Command& cmd) {
+    return std::holds_alternative<SetDeformersCmd>(cmd) || std::holds_alternative<SetColorCmd>(cmd);
+}
+
 // `head` pulled into `reach`, corner by corner: each corner clamped into
 // `reach`'s box. Where the two overlap on an axis that is their overlap; where
 // they MISS on an axis it is the face of `reach` nearest `head` -- NOT nothing.
@@ -1872,11 +1880,20 @@ math::Aabb head_within(const math::Aabb& reach, const math::Aabb& head) {
 // one Move segment. `command_head_delta_bound` is where the field can actually
 // have changed, and it is clamped into the node's bound (`head_within`) rather
 // than substituted, so the result is never larger than the node's bound either.
-math::Aabb apply_bounded(Document& doc, const Command& cmd, std::optional<Command>* inverse) {
-    math::Aabb reach = command_influence_bound(doc, cmd);
+//
+// `drags` is one memo for the whole step (ChainDragMemo): a node's bound walks
+// the siblings after it (#650), once per command on each side, and a Move step
+// is thousands of commands on one chain. Kept across a command that cannot
+// change what it holds, cleared after any other.
+math::Aabb apply_bounded(Document& doc, const Command& cmd, std::optional<Command>* inverse,
+                         ChainDragMemo* drags) {
+    LayerExtent before(drags);
+    math::Aabb reach = command_influence_bound(doc, cmd, &before);
     const std::optional<math::Aabb> head = command_head_delta_bound(doc, cmd);
     *inverse = scene::apply(doc, cmd);
-    reach.expand(command_influence_bound(doc, cmd));
+    if (!command_keeps_chain_drag(cmd)) drags->clear();
+    LayerExtent after(drags);
+    reach.expand(command_influence_bound(doc, cmd, &after));
     return head ? head_within(reach, *head) : reach;
 }
 
@@ -1888,10 +1905,11 @@ math::Aabb apply_bounded(Document& doc, const Command& cmd, std::optional<Comman
 // caller that did not ask, and costs nothing.
 UndoStack::Entry UndoStack::replay(Document& doc, const Entry& entry, math::Aabb* bound) {
     Entry opposite;
+    ChainDragMemo drags;
     for (auto it = entry.inverses.rbegin(); it != entry.inverses.rend(); ++it) {
         std::optional<Command> inverse;
         if (bound)
-            bound->expand(apply_bounded(doc, *it, &inverse));
+            bound->expand(apply_bounded(doc, *it, &inverse, &drags));
         else
             inverse = scene::apply(doc, *it);
         if (inverse) opposite.inverses.push_back(std::move(*inverse));

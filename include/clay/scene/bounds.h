@@ -9,7 +9,10 @@
 // field arbitrarily far away, so their influence is infinite.
 
 #include <cstddef>
+#include <memory>
 #include <optional>
+#include <unordered_map>
+#include <vector>
 
 #include "clay/math/geom.h"
 #include "clay/scene/document.h"
@@ -197,6 +200,8 @@ class LayerExtentCache {
     std::size_t keeps_ = 0;
 };
 
+class ChainDragMemo;
+
 class LayerExtent {
   public:
     LayerExtent() = default;
@@ -205,6 +210,9 @@ class LayerExtent {
     // (#451). Every caller that already threads a LayerExtent gets that for
     // free; nothing else changes.
     explicit LayerExtent(LayerExtentCache* cache) : cache_(cache) {}
+    // Answering downstream_drag from a memo that outlives this query -- one
+    // the caller keeps valid across several (see ChainDragMemo).
+    explicit LayerExtent(ChainDragMemo* drags) : drags_(drags) {}
 
     const math::Aabb& of(const SdfContent& content, const Layer& layer) {
         if (cache_) return cache_->of(content, layer);
@@ -225,12 +233,19 @@ class LayerExtent {
     // here rather than derived from a timing.
     std::size_t walks() const { return walks_; }
 
+    // The drag of the combines after a node, memoized for the query
+    // (ChainDragMemo::after). Borrowed when the extent was given one.
+    float downstream_drag(const SdfContent& content, const Layer& layer, NodeId parent,
+                          int index);
+
   private:
     LayerExtentCache* cache_ = nullptr;
+    ChainDragMemo* drags_ = nullptr;
     const SdfContent* content_ = nullptr;
     const Layer* layer_ = nullptr;
     math::Aabb extent_;
     std::size_t walks_ = 0;
+    std::shared_ptr<ChainDragMemo> own_drags_;
 };
 
 // World-space INFLUENCE bound: the geometry bound for local ops, the LAYER's
@@ -413,6 +428,49 @@ struct CullPadTerms {
     // on a single pad float stays valid (#362).
     float blend_total(std::size_t n_eff) const;
     float total(std::size_t n_eff) const { return feather + blend_total(n_eff); }
+    // The item maxima at each profile's full SUPPORT: the pre-#335 pad, and the
+    // ceiling blend_total clamps its seam term to.
+    float item_support_ceiling() const;
+    // Every term at its full support, seam included, plus the feather: how far
+    // ONE of these combines can move a result from where its running operand
+    // changed. What the reach of an edit takes for the combines after it
+    // (bounds.cpp, downstream_chain_drag); the cull keeps the envelope.
+    float support_total() const;
+};
+
+// How far the combines after position `index` in the chain `parent` holds (the
+// layer's roots for kNoNode) can drag a change to the running value the node
+// there fed (#650): the term node_reach_bound adds per level, as per-chain
+// suffix maxima of `cull_pad_terms` resolved at full support. The same number
+// the unmemoized walk gives, bit for bit.
+//
+// A walk over the LATER siblings, which a loop over a chain's nodes pays once
+// per node: a drag frontier resolving 1,428 dragged items of a 10,000-item
+// layer went 0.39 -> 65 ms, and undoing a 2,134-warp Move over the same count
+// 0.85 -> 94.6 ms. Filled from the END and only as far forward as a query asks,
+// so a loop walks each chain once -- and a node appended last, which is what a
+// stroke's dabs are, walks nothing at all.
+//
+// VALID WHILE NO CHAIN'S MEMBERS OR THEIR TERMS CHANGE: order, visibility, op,
+// blend, mirror participation, a feathered volume's band or scale, the layer's
+// symmetry. An edit to a node's deformers or colour touches none of them, which
+// is what lets an undo keep one across a whole Move step
+// (command_keeps_chain_drag); anything else calls clear().
+class ChainDragMemo {
+  public:
+    float after(const SdfContent& content, const Layer& layer, NodeId parent, int index);
+    void clear() {
+        from_end_.clear();
+        content_ = nullptr;
+        layer_ = nullptr;
+    }
+
+  private:
+    const SdfContent* content_ = nullptr;
+    const Layer* layer_ = nullptr;
+    // Per chain, the suffix maxima REVERSED: `[j]` is the last j members'
+    // terms raised together, so `[0]` is none.
+    std::unordered_map<NodeId, std::vector<CullPadTerms>> from_end_;
 };
 
 // One node's contribution, so a caller that has GAINED a node can raise a
@@ -545,7 +603,10 @@ float document_cull_pad(const Document& doc);
 
 // Where an edit to `id` can change the layer's field: node_influence_bound,
 // dilated once per enclosing group by that group's blend support, up to the
-// root.
+// root -- and, at every level before that support, by the drag of the SMOOTH
+// combines that follow in that chain (#650; ChainDragMemo, and bounds.cpp's
+// downstream_chain_drag for why). Nothing for a node followed only by hard
+// ones, which is every node appended last.
 //
 // This is the answer to "where does an edit to this node LAND", which is a
 // different question from "where is this node" and used to be answered with
@@ -592,7 +653,8 @@ math::Aabb layer_reach_in_document(const Document& doc, LayerId layer_id,
 // to a host as a region to dirty (issue #325).
 //
 // Per sharing layer this is node_reach_bound -- the node's own bound dilated
-// once per enclosing GROUP -- carried the rest of the way up by
+// by the smooth combines after it and once per enclosing GROUP -- carried the
+// rest of the way up by
 // layer_reach_in_document. `scene::node_command_bound` IS this function, so the
 // query a host asks and the region the command path dirties are one expression
 // and cannot drift.

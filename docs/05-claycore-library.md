@@ -1001,6 +1001,47 @@ What remains is one walk per query rather than none: `apply_edit` takes
 two. Removing that needs a revision-scoped cache on the ABI's document, which
 `clay_document::cached()` is already shaped for.
 
+### An edit reaches as far as the smooth combines after it (#650)
+
+A node's own bound says where ITS combine can move the running value. That is
+not where its RAW value stops changing: the first node of a chain has no combine
+at all -- it is the running value -- and any node is the running value wherever
+it is the nearest thing, so moving it changes that value far from its box.
+Beyond the band a hard union ignores that, `min()` being exact. A SMOOTH combine
+further down does not: it reads the running value out to its support and lowers
+the result by the blend, so a difference beyond the band on both sides comes
+back inside it. Two r = 0.3 spheres, the second smooth at k = 0.3, the first
+moved 0.1: band samples moved by up to 0.044 outside the moved node's box plus
+the band, and a cache dirtied by that box kept 25 stale bricks. Seed 5128 of
+`benchmarks/undo_bound_oracle_probe` is the same mechanism at one ulp -- a
+grab's eased rim changes the node's value far from its surface, and the next
+sibling's blend carries it into the band.
+
+`node_reach_bound` therefore dilates, at each level before the enclosing group's
+own support, by the drag of the combines after the node in that chain: the
+chain pad's terms (`cull_pad_terms`) over the later siblings, resolved at each
+profile's FULL support rather than at the chain envelope the cull uses -- one
+blend provably reaches its whole support, and the envelope left 0.012 moves on
+the fixture above. A later sibling GROUP contributes its own combine only, since
+its children start a chain of their own. Nothing widens for a node with only
+hard siblings after it, which is every node appended last and every document
+without a smooth blend.
+
+The head narrowing of #639 does not take the term: a link that is the identity
+outside its ball leaves the RAW field bit-identical there, and every combine is
+pointwise. What it missed was the clamp into the node's bound, which now holds
+the drag. Over 400 plain and 400 rich trials of the oracle the raw-bound
+violations went 0 / 10 to 0 / 0 and the bricks the undo bounds refill rose 2.5%
+and 2.8%.
+
+The walk is over the LATER siblings, so a loop over a chain's nodes paid it once
+per node: a drag frontier over 1,428 warps of a 10,000-item layer went 0.39 ->
+65 ms, and undoing a 2,134-warp Move there 0.85 -> 94.6 ms. `ChainDragMemo`
+holds the chain's suffix maxima, filled from the end only as far as a query
+asks; `LayerExtent` owns one per query, the drag frontier threads one through
+its loop, and an undo step's replay shares one across its commands, clearing it
+after any command but a deformer or colour edit (0.45 and 1.04 ms).
+
 ### ...and a MOVE of one is bounded by its sweep
 
 The layer-wide answer above is right for the question it answers and ruinous as

@@ -1,6 +1,7 @@
 #include "clay/kernel/ease.h"
 #include "clay/scene/bounds.h"
 
+#include <algorithm>
 #include <bit>
 #include <cmath>
 
@@ -1175,6 +1176,11 @@ float CullPadTerms::blend_total(std::size_t n_eff) const {
     // a seam k either): each item term is <= its own support <= the ceiling,
     // so the whole stays <= the pre-#335 pad everywhere, and where the seam
     // demands more than that pad ever granted the cull is identical to it.
+    const float seam = profile_chain_pad(BlendProfile::Quadratic, blend_k_seam, n_eff);
+    return kernel::cmax(pad, kernel::cmin(seam, item_support_ceiling()));
+}
+
+float CullPadTerms::item_support_ceiling() const {
     float ceiling = blend_fixed;
     ceiling = kernel::cmax(ceiling, kernel::ctape_blend_support(
                                         static_cast<int>(BlendProfile::Quadratic),
@@ -1184,8 +1190,13 @@ float CullPadTerms::blend_total(std::size_t n_eff) const {
     ceiling = kernel::cmax(ceiling, kernel::ctape_blend_support(
                                         static_cast<int>(BlendProfile::Circular),
                                         blend_k_circular));
-    const float seam = profile_chain_pad(BlendProfile::Quadratic, blend_k_seam, n_eff);
-    return kernel::cmax(pad, kernel::cmin(seam, ceiling));
+    return ceiling;
+}
+
+float CullPadTerms::support_total() const {
+    const float seam =
+        kernel::ctape_blend_support(static_cast<int>(BlendProfile::Quadratic), blend_k_seam);
+    return feather + kernel::cmax(item_support_ceiling(), seam);
 }
 
 namespace {
@@ -1710,6 +1721,99 @@ bool group_combine_can_move_result(const SdfContent& content, const Node& group)
     return false;
 }
 
+namespace {
+
+// The chain `parent` holds: the layer's roots for kNoNode.
+const std::vector<NodeId>* chain_of(const SdfContent& content, NodeId parent) {
+    if (parent == kNoNode) return &content.roots;
+    const Node* g = content.find(parent);
+    return g ? &g->children : nullptr;
+}
+
+// HOW FAR THE COMBINES AFTER A NODE CAN CARRY A CHANGE TO THE RUNNING VALUE IT
+// FED (#650): the chain pad, folded over the siblings that follow position
+// `index` in the chain `parent` holds (the roots for kNoNode).
+//
+// A node's own bound says where ITS combine can move the running value, and
+// that is not where its RAW value stops changing. The first node of a chain
+// has no combine at all -- it IS the running value -- and any node is the
+// running value wherever it is the nearest thing: move a sphere and its
+// distance changes everywhere. Beyond the band that is harmless under a hard
+// union, `min()` being exact. A smooth combine further down is not: it reads
+// the running value at up to its support from its own surface and lowers the
+// result by the blend, so a difference that was beyond the band on both sides
+// comes back inside it. Measured: two r = 0.3 spheres, the second blended at
+// k = 0.3, the first moved 0.1 -- in-band samples moved by up to 0.044 at
+// 0.25 past the moved node's box dilated by the band, and a brick cache
+// dirtied by that box kept 25 stale bricks. Seed 5128 of the undo-bound
+// oracle is the same mechanism at one ulp: a grab's eased rim changes the
+// node's raw value far from its surface, and the next sibling's k = 0.297
+// carries it into the band.
+//
+// The terms are `cull_pad`'s, over the combines that actually read this
+// running value and no others: a group's children start a chain of their own,
+// so only a later sibling GROUP's own combine reads it, which is exactly the
+// one term `cull_pad_terms` takes for a group node. A chain whose later
+// members are all hard -- every document without a smooth blend, and every
+// node appended last, which is what a stroke's dabs are -- adds nothing, and
+// its bound is bit for bit what it was.
+//
+// RESOLVED AT FULL SUPPORT, not at the chain envelope the cull uses. One blend
+// provably reaches its whole support -- `csmin(a, b)` reads `a` wherever
+// `|a - b| < support`, and with `b` in the band that is `a` up to band +
+// support -- while the envelope is a k-multiple fitted to what a CULL may drop
+// against an fp16 tolerance. Taken at the envelope, the two-sphere case above
+// still moved in-band samples by 0.012 outside the box.
+float downstream_chain_drag(const SdfContent& content, NodeId parent, int index,
+                            const Layer& layer) {
+    const std::vector<NodeId>* chain = chain_of(content, parent);
+    if (!chain) return 0.0f;
+    CullPadTerms terms;
+    for (std::size_t i = static_cast<std::size_t>(index) + 1; i < chain->size(); ++i)
+        if (const Node* n = content.find((*chain)[i])) terms.raise(cull_pad_terms(*n, layer));
+    return terms.support_total();
+}
+
+Aabb dilated_by_downstream_drag(const SdfContent& content, NodeId parent, int index,
+                                const Layer& layer, const Aabb& b, LayerExtent* extent) {
+    const float drag = extent ? extent->downstream_drag(content, layer, parent, index)
+                              : downstream_chain_drag(content, parent, index, layer);
+    return drag > 0.0f ? b.dilated(drag) : b;
+}
+
+}  // namespace
+
+float ChainDragMemo::after(const SdfContent& content, const Layer& layer, NodeId parent,
+                           int index) {
+    const std::vector<NodeId>* chain = chain_of(content, parent);
+    if (!chain) return 0.0f;
+    if (content_ != &content || layer_ != &layer) {
+        from_end_.clear();
+        content_ = &content;
+        layer_ = &layer;
+    }
+    std::vector<CullPadTerms>& suffix = from_end_[parent];
+    if (suffix.empty()) suffix.emplace_back();
+    const std::size_t later =
+        chain->size() - std::min(static_cast<std::size_t>(index) + 1, chain->size());
+    while (suffix.size() <= later) {
+        CullPadTerms t = suffix.back();
+        const NodeId id = (*chain)[chain->size() - suffix.size()];
+        if (const Node* n = content.find(id)) t.raise(cull_pad_terms(*n, layer));
+        suffix.push_back(t);
+    }
+    return suffix[later].support_total();
+}
+
+float LayerExtent::downstream_drag(const SdfContent& content, const Layer& layer, NodeId parent,
+                                   int index) {
+    if (!drags_) {
+        if (!own_drags_) own_drags_ = std::make_shared<ChainDragMemo>();
+        drags_ = own_drags_.get();
+    }
+    return drags_->after(content, layer, parent, index);
+}
+
 Aabb node_reach_bound(const SdfContent& content, NodeId id, const Layer& layer,
                       LayerExtent* extent) {
     // Where an edit to `id` can change the layer's field: the node's own
@@ -1728,6 +1832,10 @@ Aabb node_reach_bound(const SdfContent& content, NodeId id, const Layer& layer,
     // a sibling's geometry is not something an edit to `id` can reach, so the
     // old answer grew with the size of the GROUP rather than with the size of
     // the edit.
+    //
+    // At every level, before the group's own support, the drag of the combines
+    // that follow in that chain (downstream_chain_drag): they read the running
+    // value the edit changed, and the node's own bound does not cover them.
     Aabb b = node_influence_bound(content, id, layer, extent);
     if (b.empty() || b.is_infinite()) return b;
 
@@ -1740,6 +1848,7 @@ Aabb node_reach_bound(const SdfContent& content, NodeId id, const Layer& layer,
         NodeId parent = kNoNode;
         int index = -1;
         if (!content.locate(cur, &parent, &index)) return Aabb{};
+        b = dilated_by_downstream_drag(content, parent, index, layer, b, extent);
         if (parent == kNoNode) return b;
         const Node* g = content.find(parent);
         if (!g) return Aabb{};

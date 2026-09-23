@@ -1051,7 +1051,7 @@ struct MirroredRidge {
 // included -- so their prefix holds no accumulator and frontier_seed_for
 // correctly refuses them per brick. That is why the cases below hold the
 // mirrored split against the UNMIRRORED fixture's rather than against zero:
-// the claim is that the mirror changes nothing about which bricks resume.
+// the claim is that the mirror costs nothing in which bricks resume.
 std::vector<clay_brick_request> ridge_window(int kx_from, int kx_to) {
     std::vector<clay_brick_request> reqs;
     for (int kx = kx_from; kx <= kx_to; ++kx)
@@ -1084,8 +1084,8 @@ std::uint32_t first_touched_ordinal(clay_document* d, clay_layer_id layer) {
 TEST_CASE("frontier: a mirrored drag on late-history items states a late frontier and resumes") {
     // Acceptance (3) of #363. Under the mirror the drag must state the ridge's
     // own ordinal -- not 0, the base's -- so the pre-drag prefix seeds are
-    // recorded, the applies min-merge onto them and the window resumes
-    // exactly as it does without the mirror. On the mirror-expanded selection
+    // recorded, the applies min-merge onto them and the window resumes at
+    // least as well as it does without the mirror. On the mirror-expanded selection
     // the first REQUIRE fails (the drag's earliest ordinal reads 0), and past
     // it the probe reads MISSING: the entry is erased at every frame,
     // resumed 0 and refilled 16.
@@ -1113,8 +1113,15 @@ TEST_CASE("frontier: a mirrored drag on late-history items states a late frontie
         std::vector<float> got;
         const RefillSplit split = refill_counting(fix.doc.d, window, &got);
         const RefillSplit plain = refill_counting(control.doc.d, window);
-        CHECK(split.resumed == plain.resumed);
-        CHECK(split.refilled == plain.refilled);
+        // AT LEAST as well as without the mirror, and no longer exactly as
+        // well: the frontier prepares prefix seeds over each dragged node's
+        // reach, and since #650 that reach carries the drag of the smooth
+        // ridge balls after it. Under the mirror it spans the reflected copies
+        // too, which takes it over the four corner bricks, so they resume
+        // (16 / 0) where the unmirrored fixture still refuses them (12 / 4).
+        // The parity check below is what says the extra resumes are right.
+        CHECK(split.resumed >= plain.resumed);
+        CHECK(split.refilled <= plain.refilled);
         CHECK(split.resumed > split.refilled);  // the window mostly resumes
         CHECK(probe(fix.doc.d, hot).dirty == kClean);
 
