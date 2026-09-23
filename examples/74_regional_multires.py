@@ -32,15 +32,19 @@ WHAT THE NUMBERS ASSERT: the refined patches carry the uniform hierarchy's own
 positions bit for bit, the memory and the evaluation work follow the refined
 area, and depth is a property of a patch rather than of the surface.
 
-WHAT THIS DOES NOT YET DO, said plainly rather than hidden behind a picture.
-`mesh_at_level(4)` on a regional hierarchy exports the faces that level HAS,
-which is the region and not the model — the pictures below frame it as the patch
-it is. Assembling a mixed-depth hierarchy into ONE mesh needs transition
-polygons on the coarse side of every boundary, because a fine patch's corner
-vertex has taken one more subdivision step than the coarse neighbour's has, and
-the two are a step apart rather than a hairline apart. Those polygons are
-derived display data and are the next piece of this change; the storage and the
-evaluation underneath them are what is finished here.
+WHAT THE PICTURES SHOW, AND WHAT THEY DO NOT. `mesh_at_level(4)` on a regional
+hierarchy exports the faces that level HAS, which is the region and not the
+model — the pictures below frame it as the patch it is. Assembling a mixed-depth
+hierarchy into ONE mesh needs transition polygons on the coarse side of every
+boundary, because a fine patch's corner vertex has taken one more subdivision
+step than the coarse neighbour's has, and the two are a step apart rather than a
+hairline apart. The engine builds those polygons now
+(`MultiresSurface::mixed_mesh_at_level` in C++), but pyclay does not reach them
+yet, so this example cannot show them. Said plainly: the export half had no
+host waiting for it — no host refines a region yet, so every hierarchy a host
+bakes is uniform — while the storage half, the
+frames and the brushes at a boundary, is what an artist sculpting a region is
+using, and that half is finished.
 
 Run: python examples/74_regional_multires.py
 """

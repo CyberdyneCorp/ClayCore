@@ -297,11 +297,17 @@ the diff rather than from the plan, because the two had already parted.
   `complete-regional-multires-neighbours` (commit f40ee3fe), without the gate
   that says so. Section 1 here is that gate — three cases in
   `tests/unit/test_multires_regional.cpp` — and the before/after below.
-- STILL UNTOUCHED, an open task rather than a change of plan:
-  `examples/74_regional_multires.py`, which task 6.4 owns and which still states
-  the export gap in the artist's vocabulary. Neither `clay.h` nor
-  `pyclay_module.cpp` gains a mixed-export symbol, so a host on either binding
-  still assembles per patch; `docs/09` says so where a host reads it.
+- `examples/74_regional_multires.py` (task 6.4) says in the artist's vocabulary
+  that the engine builds the transition polygons and pyclay does not reach them.
+  Neither `clay.h` nor `pyclay_module.cpp` gains a mixed-export symbol, so a host
+  on either binding still assembles per patch; `docs/09` says so where a host
+  reads it, and says who each half is for (task 6.5). The entry point itself
+  (6.1, and the C half of 5.7) is RE-SCOPED to `expose-the-mixed-depth-export`.
+- The two layered smooths, `smooth_detail` and `form_shift`, average a rim
+  vertex over its complete ring (task 3.7), through
+  `CrossLevelNeighborhood::outside_ring` — the same walk the kernel neighbour
+  CSR now reads, in `src/mesh/cross_level.cpp`, `src/mesh/sculpt.cpp` and
+  `src/mesh/layered_sculpt.cpp`.
 - **No serialization change.** The transition topology is a pure function of the
   cage, the rule and the per-level patch sets, all already in a version-3 stream;
   `kSurfaceVersion` does not move and there is no format-minor bump.
@@ -317,5 +323,6 @@ the diff rather than from the plan, because the two had already parted.
   twice while this branch was open: cut at 0.85.0, written as 0.87.0, corrected
   to 0.88.0 when 0.86.0 and 0.87.0 landed, and corrected again when
   `persist-a-multires-hierarchy` took 0.88.0 on main. Nothing caught the second
-  collision, because both sides of the merge read 88 and agreed. 6.1 would add its entry point
-  at this same minor and not move it again.
+  collision, because both sides of the merge read 88 and agreed. The entry
+  point 6.1 described is now `expose-the-mixed-depth-export`'s, and moves the
+  minor that is current when it lands.
