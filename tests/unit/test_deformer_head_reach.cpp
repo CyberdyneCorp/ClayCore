@@ -350,3 +350,67 @@ TEST_CASE("head reach: the command side reads the node's chain before the apply"
     const scene::Command other{scene::SetColorCmd{f.layer_id, f.node, cf3(1, 0, 0)}};
     CHECK_FALSE(scene::command_head_delta_bound(f.doc, other).has_value());
 }
+
+namespace {
+
+// A 2x2x2 cage about the sphere with one corner dragged, so it is not the
+// identity and a change to it is visible.
+scene::Deformer dragged_lattice(float corner_dx) {
+    scene::Deformer d = scene::Deformer::lattice(cf3(-0.7f, -0.7f, -0.7f), cf3(0.7f, 0.7f, 0.7f),
+                                                 2, 2, 2);
+    d.cage[0] = cf3(corner_dx, 0, 0);
+    return d;
+}
+
+std::vector<scene::StrokePoint> guide_through(float bow) {
+    std::vector<scene::StrokePoint> g(3);
+    g[0].pos = cf3(0, -0.7f, 0);
+    g[1].pos = cf3(bow, 0, 0);
+    g[2].pos = cf3(0, 0.7f, 0);
+    return g;
+}
+
+}  // namespace
+
+TEST_CASE("head reach: a lattice or a bend curve in the common tail is stripped") {
+    // The tail sees the same point on both sides, whatever it does with it.
+    const auto head = grab_at(cf3(0, 0.6f, 0), 0.25f, cf3(0, 0.15f, 0));
+    const std::vector<std::vector<scene::Deformer>> tails = {
+        {dragged_lattice(0.1f)},
+        {scene::Deformer::bend_curve(guide_through(0.1f), 0.0f, 1.0f)},
+    };
+    for (const auto& tail : tails) {
+        CAPTURE(static_cast<int>(tail[0].type));
+        Fixture f = sphere_with(tail);
+        check_exact_outside(f, tail, with_head(head, tail));
+    }
+}
+
+TEST_CASE("head reach: a payload link that differs only in its payload is refused") {
+    // Same type, same record: only the cage or the guide moved. Comparing the
+    // record alone would call them one link, strip them as common tail, and
+    // report the grab's ball for a change that reaches the whole item.
+    const auto head = grab_at(cf3(0, 0.6f, 0), 0.25f, cf3(0, 0.15f, 0));
+    SUBCASE("the cage") {
+        const std::vector<scene::Deformer> before = {head, dragged_lattice(0.1f)};
+        const std::vector<scene::Deformer> after = {head, dragged_lattice(0.2f)};
+        Fixture f = sphere_with(before);
+        CHECK_FALSE(reach(f, before, after).has_value());
+    }
+    SUBCASE("the cage's placement") {
+        scene::Deformer moved = dragged_lattice(0.1f);
+        moved.cage_xform.position = cf3(0.05f, 0, 0);
+        const std::vector<scene::Deformer> before = {head, dragged_lattice(0.1f)};
+        const std::vector<scene::Deformer> after = {head, moved};
+        Fixture f = sphere_with(before);
+        CHECK_FALSE(reach(f, before, after).has_value());
+    }
+    SUBCASE("the guide") {
+        const std::vector<scene::Deformer> before = {
+            head, scene::Deformer::bend_curve(guide_through(0.1f), 0.0f, 1.0f)};
+        const std::vector<scene::Deformer> after = {
+            head, scene::Deformer::bend_curve(guide_through(0.2f), 0.0f, 1.0f)};
+        Fixture f = sphere_with(before);
+        CHECK_FALSE(reach(f, before, after).has_value());
+    }
+}

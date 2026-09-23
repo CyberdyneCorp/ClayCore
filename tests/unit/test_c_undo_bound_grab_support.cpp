@@ -783,3 +783,41 @@ TEST_CASE("undoing one segment of the host's Move marks the segment, not the nod
     redo_bound(doc);
     check_undo_and_redo(doc, cube(2.0f));
 }
+
+namespace {
+
+// A sphere whose chain ends in a payload link -- a lattice cage or a bend
+// curve -- with a short grab chain added AHEAD of it, the way a Move lands
+// on a node that already carries one.
+clay_node_id add_payload_tailed_sphere(Doc& doc, bool lattice) {
+    const float at[3] = {0.0f, 0.0f, 0.0f};
+    const clay_node_id node = add_sphere(doc, 0.6f, at);
+    if (lattice) {
+        const float lo[3] = {-0.7f, -0.7f, -0.7f};
+        const float hi[3] = {0.7f, 0.7f, 0.7f};
+        std::vector<float> offsets(2 * 2 * 2 * 3, 0.0f);
+        offsets[0] = 0.1f;  // one corner dragged, so the cage is not the identity
+        ok(clay_layer_add_lattice(doc.d, doc.layer, node, lo, hi, 2, 2, 2, offsets.data(), 0));
+    } else {
+        const float guide[9] = {0.0f, -0.7f, 0.0f, 0.1f, 0.0f, 0.0f, 0.0f, 0.7f, 0.0f};
+        ok(clay_layer_add_bend_curve(doc.d, doc.layer, node, guide, 3, 0, 0.0f, 1.0f, 0));
+    }
+    add_chain(doc, node, 0.6f, 3);
+    add_grab(doc, node, Grab{{0.0f, 0.0f, 0.6f}, 0.2f, {0.0f, 0.0f, 0.1f}});
+    return node;
+}
+
+}  // namespace
+
+TEST_CASE("a grab ahead of a lattice or a bend curve in the common tail is narrowed") {
+    // The tail is the same on both sides of the step and sees the same point,
+    // whatever it does with it; a payload link there must be stripped like
+    // any other rather than end the comparison and refuse.
+    for (const bool lattice : {true, false}) {
+        CAPTURE(lattice);
+        Doc doc;
+        const clay_node_id node = add_payload_tailed_sphere(doc, lattice);
+        check_undo_and_redo(doc, cube(1.4f));
+        check_narrowed(count_undo(doc, node), 4);
+    }
+}

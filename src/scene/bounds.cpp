@@ -2027,26 +2027,56 @@ std::optional<Aabb> link_change_support(const Deformer& d) {
     return b;
 }
 
-// Two links the kernel evaluates identically. Conservative: a payload this
-// does not compare (a guide, a cage, a cage transform) makes the links
-// UNEQUAL, which only lengthens the head that has to qualify -- and none of
-// those kinds qualifies, so the answer is then the node's bound, as before.
+bool same_bits(float a, float b) {
+    return std::bit_cast<std::uint32_t>(a) == std::bit_cast<std::uint32_t>(b);
+}
+
+bool same_point(const cfloat3& a, const cfloat3& b) {
+    return same_bits(a.x, b.x) && same_bits(a.y, b.y) && same_bits(a.z, b.z);
+}
+
+// The payloads that do not fit the record: a bend_curve's guide, a lattice's
+// cage and its placement. Compared in full, so a lattice or a curve in the
+// COMMON TAIL -- a grab put at the front of a chain that ends in one -- is
+// stripped like any other link rather than ending the tail early and refusing.
+bool same_guide(const std::vector<StrokePoint>& a, const std::vector<StrokePoint>& b) {
+    if (a.size() != b.size()) return false;
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        if (!same_point(a[i].pos, b[i].pos) || !same_bits(a[i].radius, b[i].radius) ||
+            a[i].type != b[i].type || !same_point(a[i].in_handle, b[i].in_handle) ||
+            !same_point(a[i].out_handle, b[i].out_handle))
+            return false;
+    }
+    return true;
+}
+
+bool same_cage(const Deformer& a, const Deformer& b) {
+    if (a.cage.size() != b.cage.size()) return false;
+    for (std::size_t i = 0; i < a.cage.size(); ++i)
+        if (!same_point(a.cage[i], b.cage[i])) return false;
+    const math::Transform& ta = a.cage_xform;
+    const math::Transform& tb = b.cage_xform;
+    return same_point(ta.position, tb.position) && same_bits(ta.scale, tb.scale) &&
+           same_bits(ta.rotation.x, tb.rotation.x) && same_bits(ta.rotation.y, tb.rotation.y) &&
+           same_bits(ta.rotation.z, tb.rotation.z) && same_bits(ta.rotation.w, tb.rotation.w);
+}
+
+bool same_stamp(const AlphaStamp& sa, const AlphaStamp& sb) {
+    return sa.width == sb.width && sa.height == sb.height && same_bits(sa.extent, sb.extent) &&
+           same_bits(sa.radius, sb.radius) && same_bits(sa.amplitude, sb.amplitude) &&
+           sa.samples == sb.samples;
+}
+
+// Two links the kernel evaluates identically: every field it reads, bit for
+// bit (`gesture_id` is a host's bookkeeping and is never evaluated).
 bool same_link(const Deformer& a, const Deformer& b) {
     if (a.type != b.type || a.ease != b.ease) return false;
-    if (a.type == kernel::cdeform_lattice || a.type == kernel::cdeform_lattice_xform ||
-        a.type == kernel::cdeform_bend_curve)
-        return false;
-    const auto bits = [](float f) { return std::bit_cast<std::uint32_t>(f); };
-    if (bits(a.k) != bits(b.k) || bits(a.a) != bits(b.a) || bits(a.b) != bits(b.b) ||
-        bits(a.c) != bits(b.c))
+    if (!same_bits(a.k, b.k) || !same_bits(a.a, b.a) || !same_bits(a.b, b.b) ||
+        !same_bits(a.c, b.c))
         return false;
     for (int i = 0; i < 6; ++i)
-        if (bits(a.ext[i]) != bits(b.ext[i])) return false;
-    const AlphaStamp& sa = a.stamp;
-    const AlphaStamp& sb = b.stamp;
-    return sa.width == sb.width && sa.height == sb.height && bits(sa.extent) == bits(sb.extent) &&
-           bits(sa.radius) == bits(sb.radius) && bits(sa.amplitude) == bits(sb.amplitude) &&
-           sa.samples == sb.samples;
+        if (!same_bits(a.ext[i], b.ext[i])) return false;
+    return same_guide(a.guide, b.guide) && same_cage(a, b) && same_stamp(a.stamp, b.stamp);
 }
 
 // The region, in the chain's frame, outside which two chains agree.
