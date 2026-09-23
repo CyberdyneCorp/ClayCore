@@ -676,8 +676,8 @@ std::optional<math::Aabb> item_geometry_reach_in_document(const Document& doc,
 // an infinite repetition grid; a morph or hidden group above; an unbounded
 // result.
 //
-// It is a REGION OF CHANGE, not an influence bound, and it is not clipped to
-// the node's bound here: `scene::command_head_delta_bound` does that, so the
+// It is a REGION OF CHANGE, not an influence bound, and it is not clamped into
+// the node's bound here: `UndoStack::replay` does that (`head_within`), so the
 // undo bound is never larger than what it replaces.
 std::optional<math::Aabb> deformer_head_reach_in_document(const Document& doc,
                                                           const SdfContent& content, NodeId id,

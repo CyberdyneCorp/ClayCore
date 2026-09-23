@@ -23,7 +23,7 @@
       the qualifying kinds, the easing rim, repetition, placement, groups,
       folds, sharers
 - [x] 2.3 `command_head_delta_bound` (commands.h/.cpp), and `UndoStack::replay`
-      clipping each command's before/after union to it
+      clamping it into each command's before/after union
 - [x] 2.4 Radial pose REMOVED from the qualifying list after the raw check
       found it moves outside its ball (design.md D2)
 
@@ -105,8 +105,8 @@
 - **The acceptance's two box clauses conflict for a ball that pokes out of the
   node.** "Covers the support at both ends, dilated by the folds" and "no
   larger than the node's bound" cannot both hold when the grab's ball reaches
-  past the node's influence bound. The bound is clipped to the node's, which is
-  sound by the contract every influence bound already makes, and the test
+  past the node's influence bound. The bound is clamped into the node's (see
+  "What review found" for why clamped and not intersected), and the test
   asserts coverage of the support INTERSECTED with the node's bound.
 - **The displaced end and the dilations are margin, not soundness.** The raw
   identity argument needs only the centre ball; they are kept so an undo never

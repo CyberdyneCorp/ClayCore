@@ -227,9 +227,11 @@ std::uint64_t bricks_marked(const Box& b) {
     return dirty_count(cache);
 }
 
+// Mark what a step reported. "No bounds" marks nothing -- which is what a
+// host does with it, and what the oracle then has to catch if it was wrong.
 void mark(const Cache& cache, const Box& b) {
-    REQUIRE((b.has == 1 && b.infinite == 0));
-    ok(clay_brick_cache_mark_dirty(cache.c, b.lo, b.hi));
+    REQUIRE(b.infinite == 0);
+    if (b.has == 1) ok(clay_brick_cache_mark_dirty(cache.c, b.lo, b.hi));
 }
 
 // The host frame loop: drain, evaluate, submit.
@@ -825,5 +827,34 @@ TEST_CASE("a grab ahead of a twist, a lattice or a bend curve in the common tail
         const clay_node_id node = add_tailed_sphere(doc, tail);
         check_undo_and_redo(doc, cube(1.4f));
         check_narrowed(count_undo(doc, node), 4);
+    }
+}
+
+TEST_CASE("a ball that misses the node's box but lies within the band of it is still refilled") {
+    // The node's bound is reported WITHOUT the band -- every consumer adds it
+    // (mark_dirty dilates by the band). So the field can change in the band
+    // OUTSIDE that box, and a link whose ball sits there changes it. Cutting
+    // the ball down to the part inside the box leaves nothing to dirty; the
+    // band the consumer adds must be able to reach the ball from what is
+    // reported. Found by a randomized oracle: a magnify just past a node's
+    // face, undone, reported no bounds and left one brick stale.
+    const float at[3] = {0.0f, 0.0f, 0.0f};
+    for (const int32_t kind : {CLAY_DEFORM_MAGNIFY, CLAY_DEFORM_GRAB}) {
+        CAPTURE(kind);
+        Doc doc;
+        const clay_node_id node = add_sphere(doc, 0.5f, at);
+        const Box before = node_bound(doc, node);
+        if (kind == CLAY_DEFORM_MAGNIFY)
+            add_deformer(doc, node, kind, {0.0f, 0.0f, 0.62f, 0.1f, -0.6f});
+        else
+            add_deformer(doc, node, kind, {0.0f, 0.0f, 0.66f, 0.08f, 0.0f, 0.0f, -0.03f, 0.0f});
+        // The fixture's premise: the ball is clear of the node's box on z, and
+        // within the band (3 voxels, 0.15) of it.
+        const float ball_lo = kind == CLAY_DEFORM_MAGNIFY ? 0.52f : 0.58f;
+        const float top = node_bound(doc, node).hi[2];
+        CAPTURE(top);
+        REQUIRE((top < ball_lo && before.hi[2] < ball_lo));
+        REQUIRE(ball_lo - top < 0.15f);
+        check_undo_and_redo(doc, cube(1.0f));
     }
 }

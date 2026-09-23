@@ -110,21 +110,36 @@ same segment as its ball dilated by the pull (`move_surface_impl`): an undo that
 reported LESS than the gesture that made the edit is a surprise no host could
 debug. It costs the pull's length along one axis.
 
-## D5. Intersected with the node's bound, never substituted
+## D5. Clamped into the node's bound, never substituted
 
 `apply_bounded` still takes `command_influence_bound` on both sides and then
-CLIPS it to the head's box. Two consequences, both wanted:
+CLAMPS the head's box into it, corner by corner (`head_within`): per axis, the
+overlap where the two overlap, and the face of the node's box nearest the ball
+where they miss.
+
+Not the intersection, which is what this first shipped with and which a
+randomized oracle refuted. The node's bound is reported WITHOUT the band;
+every consumer adds it (`BrickCache::mark_dirty` dilates by it, the seed store
+by band + pad). So the node can change the field within a band OUTSIDE its
+box, and a ball sitting there changes it: a magnify just past a node's face,
+undone, intersected to nothing, the host dirtied nothing and one brick was left
+stale. Per axis, for a ball `[a, b]` and a node box `[c, d]`, what can change
+is `[a, b]` within the band `e` of `[c, d]`; the clamped interval dilated by
+`e` covers that for every `e` -- the overlap `[max(a,c), min(b,d)]` when they
+overlap, the face `[c, c]` when `b < c` -- and the intersection dilated by `e`
+does not when it is empty. Tested: `a ball that misses the node's box but lies
+within the band of it is still refilled`.
+
+Two consequences, both wanted:
 
 - The undo bound is never larger than the node's -- the acceptance's "no larger
-  than the node's bound" -- even for a ball that pokes out of the node's box
-  (the part outside is where the node's field is beyond the band on both sides,
-  which is the contract every influence bound already makes).
-- Every refusal falls back to exactly the old answer: nullopt means no clip.
+  than the node's bound" -- even for a ball that pokes out of the node's box.
+- Every refusal falls back to exactly the old answer: nullopt means no clamp.
 
 ## D6. Mixed steps
 
 The narrowing is per COMMAND, inside `UndoStack::replay`. A step holding a
-grab and a transform of another node reports the grab's clipped box unioned
+grab and a transform of another node reports the grab's clamped box unioned
 with the transform's two ends. A Move commit that also ran the complexity
 policy -- a consolidation inside the same step -- reports that consolidation's
 own bound beside the grabs'. Tested: `a step that also carries another command

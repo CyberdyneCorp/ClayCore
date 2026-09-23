@@ -1843,11 +1843,23 @@ bool UndoStack::perform(Document& doc, const Command& cmd) {
 
 namespace {
 
-// The part of `b` inside `clip`. Empty when they miss; an infinite `b` is the
-// whole of `clip`, because Aabb::infinite() is maximal on every axis.
-math::Aabb clipped(const math::Aabb& b, const math::Aabb& clip) {
-    const math::Aabb out{kernel::cmax(b.min, clip.min), kernel::cmin(b.max, clip.max)};
-    return out.empty() ? math::Aabb{} : out;
+// `head` pulled into `reach`, corner by corner: each corner clamped into
+// `reach`'s box. Where the two overlap on an axis that is their overlap; where
+// they MISS on an axis it is the face of `reach` nearest `head` -- NOT nothing.
+//
+// Not the intersection, and the difference is a correctness one. `reach` is
+// reported without the band, which every consumer adds (mark_dirty dilates by
+// it), so the node can change the field anywhere within a band OUTSIDE its box
+// -- and a head's ball sitting there changes it. The intersection is empty for
+// such a ball and the host dirtied nothing: a magnify just past a node's face,
+// undone, left a brick stale. The clamped box, dilated by any band, covers the
+// part of the ball within that band of `reach`, whatever the band is; and it
+// is still inside `reach`, so never larger than the node's bound. An infinite
+// `reach` leaves `head` as it is; an empty one, or an empty head, is nothing.
+math::Aabb head_within(const math::Aabb& reach, const math::Aabb& head) {
+    if (reach.empty() || head.empty()) return math::Aabb{};
+    return math::Aabb{kernel::cmin(kernel::cmax(head.min, reach.min), reach.max),
+                      kernel::cmax(kernel::cmin(head.max, reach.max), reach.min)};
 }
 
 // Apply one command and return what it touched: its influence bound on both
@@ -1858,14 +1870,14 @@ math::Aabb clipped(const math::Aabb& b, const math::Aabb& clip) {
 // NARROWED for a deformer chain whose head changed (issue #639): the target of
 // that command is the node, whose whole bound is what this used to report for
 // one Move segment. `command_head_delta_bound` is where the field can actually
-// have changed, and it is intersected rather than substituted, so the result is
-// never larger than the node's bound either.
+// have changed, and it is clamped into the node's bound (`head_within`) rather
+// than substituted, so the result is never larger than the node's bound either.
 math::Aabb apply_bounded(Document& doc, const Command& cmd, std::optional<Command>* inverse) {
     math::Aabb reach = command_influence_bound(doc, cmd);
     const std::optional<math::Aabb> head = command_head_delta_bound(doc, cmd);
     *inverse = scene::apply(doc, cmd);
     reach.expand(command_influence_bound(doc, cmd));
-    return head ? clipped(reach, *head) : reach;
+    return head ? head_within(reach, *head) : reach;
 }
 
 }  // namespace

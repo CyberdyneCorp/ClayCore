@@ -1267,10 +1267,13 @@ clay_result clay_document_redo(clay_document* doc, int32_t* out_redone);
  * magnify, blob or alpha links, that command now reports those links' balls
  * (a grab's at its centre AND at its displaced end), placed where the item is
  * — every mirror and radial copy, every instancing layer — dilated by each
- * enclosing group's blend support and by every layer fold above, and clipped
- * to the node's bound, so it is never larger than what it replaces. Those
- * links are exactly the identity outside their balls, so the field there is
- * bit-identical and nothing outside needs a refill. Measured on a radius-1.5
+ * enclosing group's blend support and by every layer fold above, and clamped
+ * into the node's bound, so it is never larger than what it replaces. CLAMPED,
+ * NOT INTERSECTED: the node's bound leaves the band to you (mark_dirty adds
+ * it), so a ball that misses the node's box by less than a band still changes
+ * the field, and reports the face of that box nearest it rather than nothing.
+ * Those links are exactly the identity outside their balls, so the raw field
+ * there is bit-identical and nothing outside needs a refill. Measured on a radius-1.5
  * node, 0.05 voxels, one grab of radius 0.15 undone: 12 bricks at every chain
  * length, against 1,000 / 1,440 / 4,000 at 1 / 10 / 40 grabs before.
  *

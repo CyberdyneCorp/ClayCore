@@ -435,7 +435,7 @@ clay_brick_cache_read_bricks(cache, /*lod*/ 0, keys, key_count, /*apron*/ 1,
   Undoing one Move segment reports the segment's grab, not the node it hangs
   off (issue #639): a step whose deformer chains differ only in a head of grab,
   magnify, blob or alpha links reports their balls, placed and dilated as the
-  item is and clipped to the node's bound. The price of each refilled brick
+  item is and clamped into the node's bound. The price of each refilled brick
   still grows with the chain's length; only the node-size factor is gone.
 
 **Formats.** `r16float` for distance, `rgba8unorm` for colour. Both are

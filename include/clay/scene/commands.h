@@ -339,9 +339,12 @@ std::optional<math::Aabb> command_surface_delta_bound(const Document& doc, const
 // head of the chain per segment -- and what undoing or redoing one replays.
 //
 // nullopt for every other command kind and wherever that function refuses. A
-// caller INTERSECTS this with the command's influence bound on both sides,
-// never replaces it, so the answer can only narrow the old one: an undo bound
-// is then never larger than the node's, and never tighter than what changed.
+// caller CLAMPS this into the command's influence bound on both sides, never
+// replaces it, so the answer can only narrow the old one: an undo bound is then
+// never larger than the node's, and never tighter than what changed. Clamped,
+// not intersected: that bound is reported without the band its consumers add,
+// so a ball that misses it by less than a band still changes the field, and
+// the intersection would be empty (UndoStack::replay's `head_within`).
 std::optional<math::Aabb> command_head_delta_bound(const Document& doc, const Command& cmd);
 
 // What an AddLayerCmd that REINSERTS an existing layer must name as its

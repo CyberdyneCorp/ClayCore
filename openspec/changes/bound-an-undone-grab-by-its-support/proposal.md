@@ -71,12 +71,12 @@ while the branch's 12 are the surface bricks the grab actually moved.
 
 ## What Changes
 
-- **A deformer step reports the deformer's support, clipped to the node.**
+- **A deformer step reports the deformer's support, clamped into the node's bound.**
   When the chains before and after a `SetDeformersCmd` differ only in a HEAD of
   links that are exactly the identity outside their own ball — grab, magnify,
   blob, alpha, under an easing that is exactly zero at the rim on every backend
-  — `UndoStack::replay` intersects that command's before/after bound with those
-  balls (a grab's at its centre and its displaced end), placed as the item is
+  — `UndoStack::replay` clamps those balls into that command's before/after
+  bound (a grab's at its centre and its displaced end), placed as the item is
   placed (every mirror and radial copy, every instancing layer), dilated per
   enclosing group and per layer fold. One rule: `scene::command_head_delta_bound`
   over `scene::deformer_head_reach_in_document` (design.md D1-D5).
