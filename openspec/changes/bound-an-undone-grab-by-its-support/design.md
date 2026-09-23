@@ -144,7 +144,7 @@ deliberately dropped from the bound, it reported ZERO stale bricks. The seed
 store belongs to the document (clay.h, `clay_resume_stats`), and the refill
 resumed from the very seeds the too-narrow bound had failed to drop, reproducing
 the stale values and agreeing with them. The oracle here rebuilds from a
-`clay_document_save_memory` / `load_memory` copy, which has no seeds; with that,
+`clay_document_save_memory` / `clay_document_load_memory` copy, which has no seeds; with that,
 the same mutation reads 8 stale bricks. `test_intersect_delta_oracle.cpp` has
 the same shape and is not changed here -- it is noted as a gate that may not be
 able to fire on its own failure mode.

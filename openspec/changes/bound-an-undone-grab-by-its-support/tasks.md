@@ -61,12 +61,14 @@
 ## 6. Gates
 
 - [x] 6.1 ctest, fresh `cpu-only` with tests and pyclay BUILT: 11/11 (the four
-      unit shards, pyclay_pytest, the rest); the new files add 29 cases
+      unit shards, pyclay_pytest, the rest), before and after merging #637; the
+      new files add 29 cases
 - [x] 6.2 `check_c_abi.py build/cpu-only/libclay_shared.dylib`: OK (hygiene +
       ctypes FFI); `check_binding_parity.py --require-import`: OK, `imported
       .../pyclay.cpython-311-darwin.so`; `check_task_symbols.py`: OK;
       `check_test_shards.py`: 2,885 cases over 4 shards
-- [x] 6.3 `openspec@1.12.0 validate --all --strict`: 66 passed
+- [x] 6.3 `openspec@1.12.0 validate --all --strict`: 65 passed after the
+      merge (66 before; #637 archived its change)
 - [x] 6.4 `release_check.py --skip-slow`: every row PASS except `device`, which
       is stale by construction for a `src/` change (and was already stale on
       origin/main: `clay.h` and `pyclay_module.cpp` changed since the gate ran
@@ -96,7 +98,7 @@
   rebuilt the "fresh" cache on the undone document itself. With the mirror
   image dropped from the bound it reported ZERO stale bricks: the seed store is
   the document's, and the rebuild resumed from the very seeds the narrow bound
-  had failed to drop. Rebuilding on a `save_memory`/`load_memory` copy, the same
+  had failed to drop. Rebuilding on a `clay_document_save_memory` / `clay_document_load_memory` copy, the same
   mutation reads 8 stale bricks. `test_intersect_delta_oracle.cpp` (#471)
   rebuilds on the same document and so has the same blind spot; it is noted,
   not changed, here.
@@ -113,7 +115,11 @@
 - **The chain-length factor stays, measured:** 7.4 -> 28.1 us per refilled
   brick from 1 to 160 grabs on the probe's fixture. Not attempted here.
 - **Merge chain:** the 5-hour wait for #635, #636, #638 and #637 hit its cap
-  with #637 (per-operator bound narrowing) still open; this branch starts from
-  origin/main at `49f4418a` (#635, #636, #638 merged). #637 edits
-  `tape.bounds` rules in bounds.cpp, not the reach functions this uses; expect
-  a textual merge at PR time, resolved by merging origin/main.
+  with #637 (per-operator bound narrowing) still open, so this branch started
+  from origin/main at `49f4418a` (#635, #636, #638 merged). #637 merged minutes
+  later and was merged in (`git merge origin/main`, no conflicts): it narrows
+  `tape.bounds` (`combine_extent`), not the reach functions this change uses,
+  so the rules stay one rule. Every gate below was re-run after that merge.
+- **The task-symbol gate caught this file.** Writing the seed-store finding as
+  the short names save_memory / load_memory failed `check_task_symbols.py` (2 unresolved);
+  the full names resolve.
