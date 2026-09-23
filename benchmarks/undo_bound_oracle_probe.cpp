@@ -28,7 +28,7 @@
 //                clay_layer_move_surface_regions reports, compare with a rebuild.
 //   RV_VERBOSE   trace the fixture and every stale brick.
 //
-// Measured with it, see openspec/changes/bound-an-undone-grab-by-its-support/
+// Measured with it, see openspec/changes/archive/2026-09-23-bound-an-undone-grab-by-its-support/
 // tasks.md ("What review found").
 #include <cmath>
 #include <cstdint>

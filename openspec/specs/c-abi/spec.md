@@ -1583,7 +1583,9 @@ A node inside a group SHALL report the bound of the NODE THE COMMAND NAMES, dila
 
 A command on content shared by instanced layers SHALL report the union over every layer that shares that content.
 
-A node whose subtree combines non-locally — an intersect, an unbounded primitive, an infinite grid repeat — SHALL report the unbounded state, exactly as an influence-bound query does for the same node. The path dilation applies to the local case, and it SHALL NOT be used to turn a non-local subtree into a finite box.
+A node whose subtree combines non-locally — an intersect, an unbounded primitive, an infinite grid repeat — SHALL report the unbounded state, exactly as an influence-bound query does for the same node. The path dilation applies to the local case, and it SHALL NOT be used to turn a non-local subtree into a finite box. The one exception is the deformer-head narrowing below, whose argument does not rest on locality.
+
+A command that replaces an item's deformer chain SHALL contribute, when the old and new chains differ only in a HEAD of links that are exactly the identity outside their own ball — grab, magnify, blob and alpha, under an easing whose value at the rim is exactly zero on every backend — the node's target bound INTERSECTED with those links' balls (a grab's at its centre and at its displaced end), placed as the item is placed including every symmetry copy, dilated once per enclosing group by that group's blend support and by every layer fold from the item's layer up, and unioned over every layer sharing the content. This is what one Move segment is, and reporting the node's whole bound for it made the cost of undoing one segment grow with the size of the node and with the length of its chain (issue #639). A radial pose, a whole-item deformer anywhere in either head, an easing whose rim is not exactly zero, an infinite grid repeat, or a morph or hidden group above the item SHALL keep the node's bound. The narrowing SHALL only ever shrink the node's bound, never replace it with something larger, and SHALL apply per command, so a step that also carries other commands still reports their bounds.
 
 A command that cannot change what the document evaluates to SHALL contribute nothing to the bound, so a step made only of such commands reports that there is nothing to dirty rather than reporting the layer.
 
@@ -1634,6 +1636,32 @@ The existing undo and redo entry points SHALL keep their signatures and their be
 #### Scenario: Nothing to undo is still not an error
 - **WHEN** the reporting variant is called on a document with nothing to undo
 - **THEN** it reports that nothing was undone, reports nothing to dirty, and returns success
+
+#### Scenario: Undoing one grab reports the grab, not its node
+- **GIVEN** a large node carrying a chain of grabs, under a layer composed onto the one beneath with a smooth fold
+- **WHEN** the grab at the head of the chain is undone through the reporting variant
+- **THEN** the reported bound contains that grab's ball at its centre and at its displaced end, each dilated by the fold's support, as far as the node's own bound reaches, and it is contained in the node's bound and a small fraction of it
+
+#### Scenario: The bricks one grab's undo marks do not depend on the node
+- **WHEN** one small grab is undone on nodes of different sizes carrying chains of different lengths
+- **THEN** the number of bricks the reported bound marks is the same in every case, and it is the grab's ball's count rather than the node's
+
+#### Scenario: Refilling a grab's undo bound equals a rebuild
+- **WHEN** a grab is undone or redone at a smooth-union seam, on a mirrored layer, inside a blended group, under a smooth layer fold, on an intersecting item, or with its ball crossing the node's own box, and a brick cache refills only the reported bound
+- **THEN** every brick's state and stored payload equal those of a cache rebuilt from nothing on a copy of the document
+
+#### Scenario: Redo reports what undo did
+- **WHEN** a grab's undo is redone
+- **THEN** the reported bound equals the one the undo reported
+
+#### Scenario: A grab ahead of a whole-item link in the common tail is narrowed
+- **GIVEN** a node whose chain ends in a twist, a lattice or a bend curve
+- **WHEN** a grab added at the front of that chain is undone through the reporting variant
+- **THEN** the reported bound marks a small fraction of the node's bricks, and refilling only it equals a rebuild
+
+#### Scenario: A head the argument does not cover keeps the node's bound
+- **WHEN** the step adds a radial pose at the head of a chain, or a grab behind a twist
+- **THEN** the reported bound marks exactly the bricks the node's own bound marks
 
 ### Requirement: The full mesh validation report crosses the ABI
 The C API SHALL expose every quantity `mesh::ValidationReport` computes, through a versioned output descriptor rather than through individual out-parameters.
