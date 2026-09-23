@@ -305,7 +305,9 @@ int32_t  is_exact; float lipschitz, safe_step; float lo[3], hi[3];
 uint64_t revision;
 clay_tape_info(tape, &is_exact, &lipschitz, &safe_step, lo, hi, &revision);
 
-/* upload instrs / params / blob; step by safe_step; clip against lo..hi */
+/* upload instrs / params / blob; step by safe_step; clip against lo..hi --
+   unless lo is -FLT_MAX: a plane or an unconfined infinite grid has material
+   everywhere, so clip against the view and plan bricks over it instead */
 clay_tape_release(tape);
 ```
 
