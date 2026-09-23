@@ -1235,11 +1235,20 @@ clay_result clay_remove_node(clay_document* doc, clay_layer_id layer, clay_node_
  * together, bit-exact. Through 0.120.0 none of them recorded anything, and an
  * undo after a dial reverted the PASS onto cells the dial had moved.
  *
+ * CREATING A VOXEL SCULPT LAYER IS A STEP, and so is every edit made while one
+ * is recording: clay_voxel_begin_sculpt_layer records the creation, and an edit
+ * inside the layer records its cells AND what it did to the layer's record.
+ * Through 0.120.0 neither recorded the layer: undoing a dab left its cells
+ * listed in the record, so the next dial put them back, and a journal replayed
+ * onto a snapshot older than the layer was refused at the first operation
+ * naming it. Undoing a creation ENDS the recording; redoing it brings the layer
+ * back CLOSED, so a host mid-pass that undoes past the begin begins again. An
+ * edit inside a layer that changed no cell is dropped with its entries in the
+ * record, where with undo off the record still lists them.
+ *
  * WHAT IS STILL NOT A STEP, because nothing records it: creating a MASK — mask
- * EDITS record, since 0.47.0, but the mask's existence does not — creating a
- * voxel SCULPT LAYER (clay_voxel_begin_sculpt_layer; the pass's cells are steps,
- * the layer's record is not), and dropping a resolution level, which destroys
- * history itself. Consolidate IS undoable and is worth naming because it is the
+ * EDITS record, since 0.47.0, but the mask's existence does not — and dropping
+ * a resolution level, which destroys history itself. Consolidate IS undoable and is worth naming because it is the
  * one most often assumed otherwise.
  *
  * ENABLING MID-SESSION starts an EMPTY history and is never refused: what the

@@ -182,18 +182,42 @@ bool History::begin_voxel_step(scene::LayerId layer, voxel::VoxelGrid& grid) {
     open_layer_ = layer;
     voxel_open_ = true;
     grid.set_change_sink(&open_cells_);
+    // And, while a sculpt layer is recording, what the edit does to its record
+    // (#642). Left empty when none is.
+    grid.begin_pass_capture(&open_pass_);
     return true;
 }
 
 void History::end_voxel_step(voxel::VoxelGrid& grid) {
     if (!voxel_open_) return;
     grid.set_change_sink(nullptr);
+    grid.end_pass_capture();
     voxel_open_ = false;
     // A step that changed no cell is dropped. A dab that misses every cell is
     // ordinary here — a sub-cell grab, a flatten meeting a flat region, a
     // dithered stamp — and recording one would be an undo that does nothing,
     // which is the thing this whole change exists to remove.
-    if (open_cells_.empty()) return;
+    //
+    // Inside a sculpt layer such a dab still lists the cells it touched in the
+    // layer's record, and dropping the step would leave those entries where no
+    // later step expects them: every pass record after it would name a length
+    // the record no longer has, and its undo, redo and journal replay would
+    // all be refused. So the record is put back as the dab found it. A dab
+    // that changed nothing is not part of the pass either.
+    if (open_cells_.empty()) {
+        if (!open_pass_.empty()) grid.apply_sculpt_layer_op(open_pass_, /*forward=*/false);
+        open_pass_ = {};
+        return;
+    }
+    // Inside a layer the edit is a pass: its cells AND its record, as one
+    // layer operation, so undoing it takes the cells out of the layer too.
+    if (!open_pass_.empty()) {
+        open_pass_.cells = std::move(open_cells_);
+        open_cells_.clear();
+        record_voxel_layer_property(open_layer_, std::move(open_pass_));
+        open_pass_ = {};
+        return;
+    }
     Step step;
     step.kind = Step::Kind::Voxel;
     step.layer = open_layer_;

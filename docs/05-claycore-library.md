@@ -1491,14 +1491,33 @@ folded upper pass plus what it overwrote in the lower one, not a second copy of
 the lower. The mesh stack has recorded the same operations since 0.76.0
 (`MultiresLayerProperty`); the two stacks now agree.
 
+**Creating a voxel sculpt layer is a step too, and so is every edit made inside
+one** (#642). `clay_voxel_begin_sculpt_layer` / `begin_sculpt_layer` records the
+creation, and an edit made while a layer is recording records its cells *and*
+what it did to the layer's record of the pass. Before that, the layer was the
+one part of a pass the history never saw: undoing a dab reverted its cells and
+left the record listing them, so a later dial of the layer recomposed and put
+the undone cells back; and a journal replayed onto a snapshot taken before the
+layer existed rebuilt the cells and not the stack, and was refused at the first
+operation naming the layer. Now a pass costs two undos — the edit, then the
+layer — and the journal carries both. Three details a host can see:
+
+- **Undoing a creation ends the recording**, since the layer being recorded
+  into is gone; **redoing it brings the layer back closed**. Whether a layer is
+  recording is the state of a gesture, not of the document (it is not saved
+  either), and reopening one on redo would refuse a host's next begin.
+- **An edit inside a layer that changed no cell leaves no trace**, with undo on:
+  it is dropped like any other no-op edit, and its entries in the layer's record
+  are dropped with it. With undo off the record lists them as before.
+  Keeping them would leave entries no step accounts for, and every later
+  edit's undo, redo and journal replay would find the record a different
+  length from the one it recorded and refuse.
+- **Undoing a creation whose record is not empty is refused**, like any step
+  whose layer no longer has the shape it names — the passes inside a layer are
+  later steps and are undone first.
+
 What genuinely is not:
 
-- **Creating a VOXEL sculpt layer.** `begin_sculpt_layer` adds a record the
-  history does not see. The pass's *cells* are steps, so undoing them restores
-  the grid — but the layer's record keeps the cells it recorded, and a later
-  dial of that layer replays them. A journal replayed onto a snapshot taken
-  before the layer existed rebuilds the cells and not the stack, and is refused
-  at the first operation that names the missing layer.
 - **Operations that destroy history itself** — dropping a resolution level.
 - **Creating a mask.** Mask *edits* record; the mask's existence does not. It is
   the same shape of gap that layer creation had until #341 closed it.

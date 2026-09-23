@@ -147,7 +147,11 @@ struct Step {
         // to the stroke before is a history that lied about what it holds.
         MultiresLayerProperty,
         // ONE OPERATION ON A VOXEL GRID'S SCULPT-LAYER STACK: a strength, a
-        // visibility, a reorder, a removal or a merge-down.
+        // visibility, a reorder, a removal or a merge-down — and, since #642,
+        // a layer's creation and every voxel edit made while one is recording.
+        // Such an edit is a Voxel step's cells plus what it did to the layer's
+        // record; recorded as a Voxel step, its undo reverted the cells and
+        // left the record listing them, and the next dial put them back.
         //
         // The voxel half of what MultiresLayerProperty is for the mesh stack,
         // and a separate kind from Voxel for the reason that one gives: a
@@ -273,6 +277,11 @@ class History {
     // A voxel edit, bracketed. Between these the grid's change sink is this
     // history's, so every cell the verbs write is journaled in order. Nested
     // calls are refused rather than nested: a step is one edit.
+    //
+    // While the grid is recording a sculpt layer the step is recorded as a
+    // VoxelLayerProperty step instead, carrying the same cells and what the
+    // edit did to the layer's record, so undoing it takes the cells out of the
+    // pass as well as off the grid.
     //
     // The grid is taken by reference on both sides rather than resolved,
     // because a caller recording a step is holding the grid already.
@@ -632,6 +641,9 @@ class History {
     static std::size_t step_bytes(const Step& s);
     static std::size_t event_bytes(const JournalEvent& e);
     std::vector<voxel::VoxelGrid::SculptChange> open_cells_;
+    // What the open voxel step does to a recording sculpt layer's record; see
+    // VoxelGrid::begin_pass_capture. Empty when no layer is recording.
+    voxel::VoxelGrid::SculptLayerOp open_pass_;
     scene::LayerId open_layer_ = 0;
     bool voxel_open_ = false;
     bool mask_open_ = false;

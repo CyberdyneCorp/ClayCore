@@ -97,7 +97,33 @@ struct Doc {
         REQUIRE(clay_voxel_sculpt_layer_cell_count(grid(), layer, &n) == CLAY_OK);
         return n;
     }
+    size_t occupied() {
+        size_t n = 0;
+        REQUIRE(clay_voxel_occupied_count(grid(), &n) == CLAY_OK);
+        return n;
+    }
+    size_t journal_next() const {
+        size_t next = 0;
+        REQUIRE(clay_document_journal_range(d, nullptr, &next) == CLAY_OK);
+        return next;
+    }
+    Bytes journal_since(size_t from) const {
+        clay_blob* blob = nullptr;
+        REQUIRE(clay_document_journal_since(d, from, &blob, nullptr) == CLAY_OK);
+        Bytes out(clay_blob_data(blob), clay_blob_data(blob) + clay_blob_size(blob));
+        clay_blob_destroy(blob);
+        return out;
+    }
 };
+
+// A document's whole bytes, read the way Doc::bytes reads them.
+Bytes bytes_of(const clay_document* d) {
+    clay_blob* blob = nullptr;
+    REQUIRE(clay_document_save_memory(d, &blob) == CLAY_OK);
+    Bytes out(clay_blob_data(blob), clay_blob_data(blob) + clay_blob_size(blob));
+    clay_blob_destroy(blob);
+    return out;
+}
 
 }  // namespace
 
@@ -109,11 +135,11 @@ TEST_CASE("c abi: undoing a sculpt-layer dial restores the dial, not the pass") 
     doc.pass("wrinkles", 6, 2);
     const Bytes full = doc.bytes();
     const std::size_t cells = doc.layer_cells(0);
-    REQUIRE(doc.depth() == 1);
+    REQUIRE(doc.depth() == 2);  // the layer's creation, and the pass inside it
 
     REQUIRE(clay_voxel_set_sculpt_layer_strength(doc.grid(), 0, 0.4f) == CLAY_OK);
     const Bytes dialled = doc.bytes();
-    CHECK(doc.depth() == 2);
+    CHECK(doc.depth() == 3);
 
     CHECK(doc.undo());
     CHECK(doc.strength(0) == 1.0f);
@@ -159,6 +185,89 @@ TEST_CASE("c abi: visibility, reorder and removal are each one step") {
     // A refused merge records nothing.
     CHECK(clay_voxel_merge_sculpt_layer_down(doc.grid(), 0) != CLAY_OK);
     CHECK(doc.depth() == base + 3);
+}
+
+// -- creating a sculpt layer is a step (#642) --------------------------------
+
+TEST_CASE("c abi: undoing a pass inside a sculpt layer takes it out of the layer") {
+    // Regression (#642). The pass's cells were a step and the layer's record of
+    // them was not, so the undo reverted the cells and left the record listing
+    // them — and the next dial recomposed the layer and put the undone cells
+    // back, at the dithered fraction.
+    Doc doc(true);
+    size_t index = 0;
+    REQUIRE(clay_voxel_begin_sculpt_layer(doc.grid(), "wrinkles", &index) == CLAY_OK);
+    const Bytes opened = doc.bytes();
+    const std::size_t cells = doc.occupied();
+    clay_brush_params brush{};
+    brush.struct_size = sizeof(brush);
+    brush.size = 9;
+    brush.shape = 1; /* sphere */
+    brush.strength = 1.0f;
+    const std::int32_t at[3] = {0, 6, 0};
+    REQUIRE(clay_voxel_sculpt_inflate(doc.grid(), at, &brush, 2) == CLAY_OK);
+    REQUIRE(doc.layer_cells(0) > 0);
+    REQUIRE(doc.occupied() > cells);
+
+    CHECK(doc.undo());
+    CHECK(doc.layer_cells(0) == 0);
+    CHECK(doc.bytes() == opened);
+    // The half a host could see: dialling the now-empty layer moves nothing.
+    REQUIRE(clay_voxel_set_sculpt_layer_strength(doc.grid(), 0, 0.5f) == CLAY_OK);
+    CHECK(doc.occupied() == cells);
+    // Still recording: undoing a dab mid-pass does not end the pass.
+    int32_t recording = 0;
+    REQUIRE(clay_voxel_recording_sculpt_layer(doc.grid(), &recording) == CLAY_OK);
+    CHECK(recording == 1);
+}
+
+TEST_CASE("c abi: undoing a sculpt layer's creation removes it, and redo brings the pass back") {
+    Doc doc(true);
+    const Bytes start = doc.bytes();
+    doc.pass("wrinkles", 6, 2);
+    const Bytes made = doc.bytes();
+    const std::size_t cells = doc.layer_cells(0);
+    REQUIRE(doc.depth() == 2);
+
+    CHECK(doc.undo());  // the pass
+    CHECK(doc.undo());  // the layer
+    CHECK(doc.layers() == 0);
+    CHECK(doc.bytes() == start);
+    CHECK_FALSE(doc.undo());
+
+    CHECK(doc.redo());
+    CHECK(doc.layers() == 1);
+    CHECK(doc.layer_cells(0) == 0);
+    CHECK(doc.redo());
+    CHECK(doc.layer_cells(0) == cells);
+    CHECK(doc.bytes() == made);
+}
+
+TEST_CASE("c abi: a journal replayed onto a snapshot older than the layer rebuilds the stack") {
+    // Regression (#642). Creation was not an event, so a snapshot taken before
+    // the layer existed rebuilt the pass's cells and not the layer, and the
+    // replay was refused at the first dial naming it.
+    Doc doc(true);
+    const Bytes snapshot = doc.bytes();
+    const std::size_t from = doc.journal_next();
+    doc.pass("lower", 6, 2);
+    doc.pass("upper", 8, -1);
+    REQUIRE(clay_voxel_set_sculpt_layer_strength(doc.grid(), 1, 0.3f) == CLAY_OK);
+    const Bytes journal = doc.journal_since(from);
+    const std::size_t next = doc.journal_next();
+    REQUIRE(next - from == 5);  // two creations, two passes, the dial
+
+    clay_document* recovered = nullptr;
+    REQUIRE(clay_document_load_memory(snapshot.data(), snapshot.size(), &recovered) == CLAY_OK);
+    REQUIRE(clay_document_enable_undo(recovered) == CLAY_OK);
+    std::size_t applied = 0;
+    int32_t stopped = -1;
+    CHECK(clay_document_replay_journal(recovered, journal.data(), journal.size(), &applied,
+                                       &stopped) == CLAY_OK);
+    CHECK(applied == next - from);
+    CHECK(stopped == 0);
+    CHECK(bytes_of(recovered) == doc.bytes());
+    clay_document_destroy(recovered);
 }
 
 // -- enabling undo mid-session (2.4) -----------------------------------------
