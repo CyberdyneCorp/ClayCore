@@ -597,6 +597,45 @@ math::Aabb node_influence_bound_in_document(const Document& doc, const SdfConten
 std::optional<math::Aabb> item_geometry_reach_in_document(const Document& doc,
                                                           const SdfContent& content, NodeId id);
 
+// WHERE A CHANGE TO THE HEAD OF ONE ITEM'S DEFORMER CHAIN LANDS IN THE
+// DOCUMENT (issue #639): the item going from chain `before` to chain `after`.
+//
+// A Move is a grab put at the head of a node's chain, and undoing one used to
+// report the node's whole influence bound -- the command's target -- so the
+// host refilled every brick of the node for an edit that moved one ball of it.
+// This answers the narrower question when it can.
+//
+// The chains are compared from the TAIL; what differs is a head on each side.
+// When every link in both heads is a FINITE-SUPPORT link whose weight is
+// exactly zero at its rim, and whose kernel returns its input untouched past
+// it -- grab, magnify, blob, alpha; NOT radial pose, see bounds.cpp -- the
+// field is bit-identical outside the union of their balls, and that union
+// (with a grab's displaced end) is placed the way the item is: its transform,
+// every symmetry copy, its rounding and combine support
+// (the geometry bound's own placement), dilated once per enclosing group by
+// that group's blend support, and carried up by layer_reach_in_document --
+// unioned over every layer sharing the content.
+//
+// Those dilations are not what makes it sound -- the identity is exact, and a
+// combine is pointwise -- but they are the dilations every other reach takes,
+// and taking them keeps the answer inside the band-clamped argument the rest of
+// this file makes rather than beside it. The price is a blend radius or two.
+//
+// AN EMPTY BOX when the chains are the same. NULLOPT, and the caller keeps the
+// node's influence bound, for: a missing node or a group; any other kind in
+// either head (a twist ahead of a grab moves the point before the grab's ball
+// is tested); an easing whose rim value is not exactly zero on every backend;
+// an infinite repetition grid; a morph or hidden group above; an unbounded
+// result.
+//
+// It is a REGION OF CHANGE, not an influence bound, and it is not clipped to
+// the node's bound here: `scene::command_head_delta_bound` does that, so the
+// undo bound is never larger than what it replaces.
+std::optional<math::Aabb> deformer_head_reach_in_document(const Document& doc,
+                                                          const SdfContent& content, NodeId id,
+                                                          const std::vector<Deformer>& before,
+                                                          const std::vector<Deformer>& after);
+
 // Whole-layer bound (union of root node bounds), IN THE LAYER'S OWN FIELD. It
 // takes a Layer and not a Document, so it cannot answer where a change to this
 // layer reaches the DOCUMENT: the folds above it are a property of the stack

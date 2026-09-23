@@ -328,6 +328,22 @@ math::Aabb command_influence_bound(const Document& doc, const Command& cmd,
 // geometry with nothing on the host's side to point at.
 std::optional<math::Aabb> command_surface_delta_bound(const Document& doc, const Command& cmd);
 
+// WHERE REPLACING A DEFORMER CHAIN'S HEAD CAN CHANGE THE FIELD (issue #639),
+// taken on the side BEFORE the apply -- the only side that holds both chains,
+// the node's current one and the command's.
+//
+// For a SetDeformersCmd whose old and new chains differ only in a head of
+// finite-support links, the region is those links' balls, placed and dilated
+// by `deformer_head_reach_in_document`, which is where the argument and its
+// refusals are written. That is what a Move leaves behind -- one grab at the
+// head of the chain per segment -- and what undoing or redoing one replays.
+//
+// nullopt for every other command kind and wherever that function refuses. A
+// caller INTERSECTS this with the command's influence bound on both sides,
+// never replaces it, so the answer can only narrow the old one: an undo bound
+// is then never larger than the node's, and never tighter than what changed.
+std::optional<math::Aabb> command_head_delta_bound(const Document& doc, const Command& cmd);
+
 // What an AddLayerCmd that REINSERTS an existing layer must name as its
 // content source: the first OTHER layer in stack order holding the same edit
 // list, or 0 when this layer holds it alone.
