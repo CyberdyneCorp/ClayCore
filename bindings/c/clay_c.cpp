@@ -7756,6 +7756,10 @@ void drag_frontier(const clay_document* doc, const scene::Layer& layer,
     // parameter edit to the same node_command_bound and never looks at it.
     scene::Command probe_cmd{scene::SetDeformersCmd{layer.id, scene::kNoNode, {}}};
     auto& probe = std::get<scene::SetDeformersCmd>(probe_cmd);
+    // One memo for the loop, for the same reason: each node's bound walks the
+    // siblings after it (#650), and without it a 1,428-warp drag over 10,000
+    // items spent 65 ms there against 0.39 before that term existed.
+    scene::LayerExtent memo;
     for (const brush::PreparedMove& p : prepared) {
         std::uint32_t ordinal = 0;
         if (!root_ordinal_of(*layer.sdf, p.node, &ordinal)) {
@@ -7764,7 +7768,7 @@ void drag_frontier(const clay_document* doc, const scene::Layer& layer,
         }
         df.min_ordinal = std::min(df.min_ordinal, ordinal);
         probe.node = p.node;
-        const math::Aabb bound = scene::command_influence_bound(d, probe_cmd);
+        const math::Aabb bound = scene::command_influence_bound(d, probe_cmd, &memo);
         if (bound.empty()) continue;
         df.spans.emplace_back(ordinal, bound);
     }

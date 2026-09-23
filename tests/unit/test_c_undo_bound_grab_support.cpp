@@ -858,3 +858,37 @@ TEST_CASE("a ball that misses the node's box but lies within the band of it is s
         check_undo_and_redo(doc, cube(1.0f));
     }
 }
+
+TEST_CASE("a ball past the node's band but inside a later sibling's blend is still refilled") {
+    // Issue #650. The ball is clamped into the node's bound, and the node's
+    // bound used to stop at the node's own box: outside it the node's value is
+    // beyond the band, which a hard union leaves alone. A SMOOTH sibling after
+    // the node does not -- it reads the running value out to its support, and
+    // the node is the running value wherever it is the nearest thing. So a
+    // grab well clear of the node's band, sitting on the sibling's surface,
+    // moves the sibling's fillet, and a bound clamped short of it left bricks
+    // stale. Seed 5128 of the undo-bound oracle is the same mechanism inside a
+    // blended group, at one ulp.
+    //
+    // Both shapes: at the layer root, and inside a group that does not combine
+    // (nothing beneath it, #515), the shape the seed has.
+    for (const bool in_group : {false, true}) {
+        CAPTURE(in_group);
+        Doc doc;
+        clay_node_id group = 0;
+        if (in_group)
+            REQUIRE(clay_layer_add_group(doc.d, doc.layer, 0, -1, CLAY_OP_ADD,
+                                         CLAY_BLEND_QUADRATIC, 0.2f, 0.0f, &group) == CLAY_OK);
+        const clay_node_id* parent = in_group ? &group : nullptr;
+        const float at[3] = {0.0f, 0.0f, 0.0f};
+        const clay_node_id node = add_sphere(doc, 0.5f, at, 0.0f, parent);
+        const float sib[3] = {1.3f, 0.0f, 0.0f};
+        add_sphere(doc, 0.5f, sib, 0.3f, parent);
+        // On the sibling's near surface (x = 0.8), clear of the node's box
+        // (x <= 0.5) by more than the band.
+        add_deformer(doc, node, CLAY_DEFORM_GRAB,
+                     {0.8f, 0.0f, 0.0f, 0.12f, -0.1f, 0.0f, 0.0f, 0.0f});
+        REQUIRE(0.8f - 0.12f - 0.5f > 0.15f);
+        check_undo_and_redo(doc, cube(2.0f));
+    }
+}

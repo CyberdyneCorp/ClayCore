@@ -287,3 +287,200 @@ TEST_CASE("a node command is bounded by the node, not by its root") {
     CHECK(b.max.x < whole.max.x);
     CHECK_FALSE(b.contains(cf3(2.0f, 0, 0)));
 }
+
+// -- the combines AFTER a node (#650) -----------------------------------------
+//
+// A node's own bound says where ITS combine can move the running value. The
+// first node of a chain has no combine -- it IS the running value -- and its
+// raw distance changes everywhere when it moves. Beyond the band that is
+// harmless under a hard union; a SMOOTH combine further down reads the running
+// value out to its support and carries the difference back into the band.
+
+namespace {
+
+scene::Node smooth(scene::Node n, float k) {
+    n.blend.profile = scene::BlendProfile::Quadratic;
+    n.blend.k = k;
+    return n;
+}
+
+// Two r = 0.3 spheres 0.3 apart, the FIRST hard and the second as given.
+// `group` puts both inside a blended group whose own combine does not apply
+// (nothing is beneath it), so the only thing dilating the first sphere is
+// what follows it.
+struct Pair {
+    scene::Document doc;
+    scene::LayerId layer_id = 0;
+    scene::NodeId first = 0;
+    scene::NodeId second = 0;
+
+    scene::Layer& layer() { return *doc.find_layer(layer_id); }
+    scene::SdfContent& content() { return *layer().sdf; }
+};
+
+Pair pair(float second_k, bool group) {
+    Pair p;
+    scene::Layer& l = p.doc.add_sdf_layer("l");
+    p.layer_id = l.id;
+    const scene::NodeId parent = group ? l.sdf->insert(group_node(scene::Op::Add, 0.2f))
+                                       : scene::kNoNode;
+    p.first = l.sdf->insert(clay_test::item(scene::Prim::sphere(0.3f), cf3(-0.5f, 0, 0)), parent);
+    scene::Node second = clay_test::item(scene::Prim::sphere(0.3f), cf3(0.4f, 0, 0));
+    p.second = l.sdf->insert(second_k > 0.0f ? smooth(second, second_k) : second, parent);
+    return p;
+}
+
+// Band-clamped samples outside `reach` dilated by the band that moved when
+// the first sphere moved 0.1 along x.
+std::size_t moved_outside(Pair& p, const math::Aabb& reach) {
+    std::vector<kernel::cfloat3> outside;
+    std::vector<float> before;
+    for (kernel::cfloat3 q : lattice(/*extent=*/2.0f, /*side=*/41)) {
+        if (reach.dilated(kBand).contains(q)) continue;
+        outside.push_back(q);
+        before.push_back(clamped(p.doc, q));
+    }
+    REQUIRE(outside.size() > 100);
+    p.content().find_mut(p.first)->xform.position = cf3(-0.6f, 0, 0);
+    std::size_t moved = 0;
+    for (std::size_t i = 0; i < outside.size(); ++i)
+        if (clamped(p.doc, outside[i]) != before[i]) ++moved;
+    return moved;
+}
+
+// The node's reach on both sides of the move, unioned: what a host dirties.
+math::Aabb swept_reach(Pair& p) {
+    math::Aabb reach = scene::node_reach_bound(p.content(), p.first, p.layer());
+    scene::Node* n = p.content().find_mut(p.first);
+    const math::Transform was = n->xform;
+    n->xform.position = cf3(-0.6f, 0, 0);
+    reach.expand(scene::node_reach_bound(p.content(), p.first, p.layer()));
+    n->xform = was;
+    return reach;
+}
+
+}  // namespace
+
+TEST_CASE("a smooth sibling after a node carries its edit past the node's own box") {
+    // The premise, and the regression: at the layer root and inside a group
+    // that does not combine, the first sphere's own bound is not where moving
+    // it lands. Measured before #650: in-band samples moved by up to 0.044,
+    // 0.25 outside the box dilated by the band.
+    for (bool group : {false, true}) {
+        CAPTURE(group);
+        Pair p = pair(/*second_k=*/0.3f, group);
+        math::Aabb own = scene::node_influence_bound(p.content(), p.first, p.layer());
+        scene::Node* n = p.content().find_mut(p.first);
+        n->xform.position = cf3(-0.6f, 0, 0);
+        own.expand(scene::node_influence_bound(p.content(), p.first, p.layer()));
+        n->xform.position = cf3(-0.5f, 0, 0);
+        CHECK(moved_outside(p, own) > 0);
+
+        Pair q = pair(/*second_k=*/0.3f, group);
+        CHECK(moved_outside(q, swept_reach(q)) == 0);
+    }
+}
+
+TEST_CASE("the drag is the sibling's support, and only a LATER smooth combine adds it") {
+    // The half that keeps it tight. A hard sibling after the node drags
+    // nothing, and a smooth one BEFORE it never reads the value the node feeds
+    // -- the node combines into it, which its own bound already covers.
+    Pair hard = pair(/*second_k=*/0.0f, /*group=*/false);
+    const math::Aabb own = scene::node_influence_bound(hard.content(), hard.first, hard.layer());
+    const math::Aabb hard_reach = scene::node_reach_bound(hard.content(), hard.first, hard.layer());
+    CHECK(hard_reach.min.x == own.min.x);
+    CHECK(hard_reach.max.x == own.max.x);
+
+    Pair soft = pair(/*second_k=*/0.3f, /*group=*/false);
+    const math::Aabb soft_reach = scene::node_reach_bound(soft.content(), soft.first, soft.layer());
+    const float support = scene::chain_blend_support(
+        scene::Op::Add, soft.content().find(soft.second)->blend, 0.0f);
+    CHECK(soft_reach.max.x == doctest::Approx(own.max.x + support).epsilon(0.001));
+
+    // The smooth sphere is the one LATER in the chain, so its own reach is
+    // exactly its own bound.
+    const math::Aabb last = scene::node_reach_bound(soft.content(), soft.second, soft.layer());
+    const math::Aabb last_own =
+        scene::node_influence_bound(soft.content(), soft.second, soft.layer());
+    CHECK(last.min.x == last_own.min.x);
+    CHECK(last.max.x == last_own.max.x);
+}
+
+TEST_CASE("a smooth sibling after the node's GROUP drags it too") {
+    // The per-level term: a group's children start a chain of their own, and
+    // the group's result then feeds the chain OUTSIDE it, where a later smooth
+    // sibling reads it.
+    scene::Document doc;
+    scene::Layer& l = doc.add_sdf_layer("l");
+    const scene::NodeId g = l.sdf->insert(group_node(scene::Op::Add, 0.0f));
+    const scene::NodeId child =
+        l.sdf->insert(clay_test::item(scene::Prim::sphere(0.3f), cf3(-0.5f, 0, 0)), g);
+    const math::Aabb alone = scene::node_reach_bound(*l.sdf, child, l);
+    l.sdf->insert(smooth(clay_test::item(scene::Prim::sphere(0.3f), cf3(0.4f, 0, 0)), 0.3f));
+    const math::Aabb dragged = scene::node_reach_bound(*l.sdf, child, l);
+    CHECK(dragged.max.x > alone.max.x + 1.0f);
+}
+
+TEST_CASE("an undo that changes a later sibling's blend re-reads the drag after it") {
+    // One step's replay shares a memo of the chain's drag terms across its
+    // commands -- a Move step is thousands of them on one chain -- and keeps
+    // it only across a command that cannot change those terms. The trap is
+    // one that can, between two that read them: undone here, the step first
+    // re-bounds the node with its sibling hard, then makes the sibling smooth,
+    // then re-bounds the node again. A memo kept across the middle command
+    // would answer the last with the hard sibling's zero drag.
+    Pair p = pair(/*second_k=*/0.3f, /*group=*/false);
+    scene::UndoStack undo;
+    const scene::Blend smooth_blend = p.content().find(p.second)->blend;
+    scene::Blend hard_blend;
+    hard_blend.profile = scene::BlendProfile::Hard;
+    // A twist, not a grab: its bound is the node's whole reach, never a ball.
+    const scene::Deformer twist = scene::Deformer::twist(0.5f);
+    undo.begin_group();
+    REQUIRE(undo.perform(p.doc,
+                         scene::Command{scene::SetDeformersCmd{p.layer_id, p.first, {twist}}}));
+    REQUIRE(undo.perform(p.doc, scene::Command{scene::SetOpBlendCmd{p.layer_id, p.second,
+                                                                    scene::Op::Add, hard_blend}}));
+    REQUIRE(undo.perform(p.doc, scene::Command{scene::SetDeformersCmd{
+                                    p.layer_id, p.first, {twist, twist}}}));
+    undo.end_group();
+
+    math::Aabb bound;
+    REQUIRE(undo.undo(p.doc, &bound));
+    REQUIRE(p.content().find(p.second)->blend.k == smooth_blend.k);
+    const math::Aabb own = scene::node_influence_bound(p.content(), p.first, p.layer());
+    const float support = scene::chain_blend_support(scene::Op::Add, smooth_blend, 0.0f);
+    CHECK(bound.min.x <= own.min.x - support + 1e-4f);
+}
+
+TEST_CASE("the chain-drag memo answers exactly what the walk does") {
+    // A memo is only an optimisation if nothing can tell it fired. Every node
+    // of a nested document with mixed hard and smooth siblings, queried in an
+    // order that makes the memo fill some chains from the middle and extend
+    // them later, against a fresh walk per query.
+    scene::Document doc;
+    scene::Layer& l = doc.add_sdf_layer("l");
+    std::vector<scene::NodeId> ids;
+    const scene::NodeId outer = l.sdf->insert(group_node(scene::Op::Add, 0.1f));
+    const scene::NodeId inner = l.sdf->insert(group_node(scene::Op::Add, 0.05f), outer);
+    ids.push_back(outer);
+    ids.push_back(inner);
+    for (int i = 0; i < 12; ++i) {
+        scene::Node n = clay_test::item(scene::Prim::sphere(0.2f),
+                                        cf3(0.3f * static_cast<float>(i) - 1.5f, 0, 0));
+        if (i % 3 == 1) n = smooth(n, 0.02f * static_cast<float>(i));
+        const scene::NodeId parent = i < 4 ? scene::kNoNode : i < 8 ? outer : inner;
+        ids.push_back(l.sdf->insert(n, parent));
+    }
+    std::reverse(ids.begin() + 6, ids.end());
+    scene::LayerExtent memo;
+    for (scene::NodeId id : ids) {
+        CAPTURE(id);
+        const math::Aabb walked = scene::node_influence_bound_in_document(doc, *l.sdf, id);
+        const math::Aabb memoized = scene::node_influence_bound_in_document(doc, *l.sdf, id, &memo);
+        CHECK(walked.min.x == memoized.min.x);
+        CHECK(walked.max.x == memoized.max.x);
+        CHECK(walked.min.y == memoized.min.y);
+        CHECK(walked.max.z == memoized.max.z);
+    }
+}
