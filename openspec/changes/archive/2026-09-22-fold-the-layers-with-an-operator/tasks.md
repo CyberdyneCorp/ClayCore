@@ -74,26 +74,33 @@
 
 ## 3. Correctness
 
-- [ ] 3.1 Bounds PER OPERATOR, from the item-level logic — subtract is bounded by
-      its left operand, intersect by the intersection. HALF DONE, and the half
-      that was done is the half that can lose surface. `fold_layer_bounds` now
-      dilates the layer's extent by the fold's OWN support, through
-      `scene::chain_blend_support` — one expression, which `group_blend_support`
-      and the new `layer_blend_support` both call and which the item path
-      already applies inside `geometry_bound`. That closes the case a bound can
-      be too SMALL: a smooth or extended fold bulges past the union of both
-      operands, and until this the layer fold reported the plain union (proved
-      by reverting it — 11,618 lattice samples then carry material outside
-      tape.bounds). The NARROWING rows of design.md §3 are deliberately NOT
-      taken and the reason is written beside the code: the item path unions for
-      every operator too, and the parity gate in 3.3 is that a subtracting LAYER
-      and a subtracting ITEM are the same document — narrowing one side alone
-      breaks it, and narrowing both changes the meshing region of every document
-      that already carries a subtract or a paint AND has to be threaded through
-      compile_group's rollback and every resumable entry point that copies a
-      prefix's bounds. Being wider than necessary costs a larger march; being
-      narrower than the surface costs the surface. It belongs in its own change,
-      with its own measurement
+- [x] 3.1 Bounds PER OPERATOR, from the item-level logic — subtract is bounded by
+      its left operand, intersect by the intersection. DONE on the item, group
+      and layer paths AT ONCE, which is the only way the parity gate in 3.3
+      could stay green: `scene::combine_extent` (bounds.h) is the one rule, and
+      compile_list, compile_group, the layer fold and `resume` all call it.
+      Subtract -> left operand (every profile's smin <= min, so -smin(-a, b) >=
+      a; a gate mixes with a, >= a too). Intersect -> the overlap, the right
+      operand dilated by its ring for parity with the item spelling, the left
+      operand when gated or disjoint. Everything else -> the union with the
+      ring. The widening half (the fold's own ring) was already in; the same
+      rule now also gives a smooth GROUP its own ring, the gap compile_group
+      documented. Both needed `TapeCheckpoint` to carry extents (`chain_bound`,
+      `below_bound`, `reach`, per-frame `outer_bound`): compile_document_append
+      no longer copies `prefix.bounds`. The plain union survives as the
+      compiler's `reach_`, which a transition's field info and
+      compile_layer_suffix still read, so no safe step moved.
+      BLOCKED UNTIL the missing gate existed, and it was written first:
+      `test_c_layer_group_parity.cpp`, layer-of-several versus
+      group-carrying-the-composition driven entirely through clay.h, which a
+      binding that flattened the chain fails (mutation: 10 of 11 compositions
+      and the order case). Soundness: `test_fold_bounds.cpp` samples the field
+      in five profiles for item, group, nested-group and layer
+      subtract/intersect, a smooth group abutting its neighbour and a smooth
+      layer over a subtract. Six mutations each fail it (proposal.md). Measured:
+      77x fewer mesh cells, 41x fewer bricks, 8.0x faster meshing for a large
+      subtract carving a small shape; 4x / 3.5x / 1.5x for an offset intersect;
+      a union document unchanged
 - [x] 3.2 Exactness and Lipschitz fold as the item combine folds them — the
       shared `emit_chain_combine` was folding EVERY extended mode through
       `cfi_extended_blend`, which against a field info and itself is

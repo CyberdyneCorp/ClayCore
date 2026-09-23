@@ -69,7 +69,14 @@ void require_identical(const Tape& reused, const Tape& full) {
     CHECK(same_bytes(reused.blob, full.blob));
     CHECK(reused.info.is_exact == full.info.is_exact);
     CHECK(reused.info.lipschitz == doctest::Approx(full.info.lipschitz));
+    // All six faces: a combine can NARROW the box (combine_extent), and a
+    // resume that got one axis right and another wrong is a mesh with a slab
+    // missing.
     CHECK(reused.bounds.min.x == doctest::Approx(full.bounds.min.x));
+    CHECK(reused.bounds.min.y == doctest::Approx(full.bounds.min.y));
+    CHECK(reused.bounds.min.z == doctest::Approx(full.bounds.min.z));
+    CHECK(reused.bounds.max.x == doctest::Approx(full.bounds.max.x));
+    CHECK(reused.bounds.max.y == doctest::Approx(full.bounds.max.y));
     CHECK(reused.bounds.max.z == doctest::Approx(full.bounds.max.z));
 }
 
@@ -636,4 +643,76 @@ TEST_CASE("group append: an insert short of the end of a group is refused") {
     Tape reused;
     TapeCheckpoint next;
     CHECK_FALSE(compile_document_append(prefix, cp, doc, {id}, &reused, &next));
+}
+
+TEST_CASE("prefix reuse: an append that narrows the box reports the full compile's box") {
+    // task 3.1. The prefix's `bounds` is the FINISHED material extent, and a
+    // combine can narrow it, so an append can no longer start from it: an
+    // appended subtract folds against the extent at the checkpoint, and so does
+    // anything inside a group whose own combine narrows or rings. Each case is
+    // paired with the teeth that the box really moved (or really did not grow)
+    // where the old "prefix.bounds united with the appended items" answer
+    // would have been wrong.
+    SUBCASE("a large subtract appended at the root does not grow the box") {
+        Document d;
+        LayerRef a = add_layer(d, "a");
+        a.sdf->insert(dab(0, 0, 0, 0.5f));
+        const Tape before = compile_document(d);
+        check_append(d, a, {dab(1.5f, 0, 0, 1.4f, Op::Subtract, 0.1f)});
+        CHECK(compile_document(d).bounds.max.x == doctest::Approx(before.bounds.max.x));
+    }
+    SUBCASE("an intersect appended at the root shrinks it") {
+        Document d;
+        LayerRef a = add_layer(d, "a");
+        a.sdf->insert(dab(0, 0, 0, 0.8f));
+        const Tape before = compile_document(d);
+        check_append(d, a, {dab(0.9f, 0, 0, 0.5f, Op::Intersect)});
+        CHECK(compile_document(d).bounds.min.x > before.bounds.min.x + 0.2f);
+    }
+    SUBCASE("a dab into an intersecting group") {
+        Document d;
+        LayerRef l = add_layer(d, "l");
+        l.sdf->insert(dab(0, 0, 0, 0.8f));
+        const NodeId g = l.sdf->insert(group_node(Op::Intersect, 0.05f));
+        l.sdf->insert(dab(0.6f, 0, 0, 0.4f), g);
+        check_append_into(d, l, g, {dab(0.7f, 0.3f, 0, 0.3f)});
+    }
+    SUBCASE("a dab into a smooth union group carries the group's own ring") {
+        Document d;
+        LayerRef l = add_layer(d, "l");
+        l.sdf->insert(dab(0, 0, 0, 0.4f));
+        const NodeId g = l.sdf->insert(group_node(Op::Add, 0.1f));
+        l.sdf->insert(dab(0.6f, 0, 0, 0.3f), g);
+        check_append_into(d, l, g, {dab(0.9f, 0.4f, 0, 0.3f)});
+        // Teeth: the ring is 4k beyond the appended dab's own box.
+        CHECK(compile_document(d).bounds.max.y == doctest::Approx(0.7f + 0.4f));
+    }
+    SUBCASE("a subtract dab into an intersecting group nested in a smooth one") {
+        Document d;
+        LayerRef l = add_layer(d, "l");
+        l.sdf->insert(dab(0, 0, 0, 0.6f));
+        const NodeId outer = l.sdf->insert(group_node(Op::Add, 0.05f));
+        l.sdf->insert(dab(0.7f, 0, 0, 0.4f), outer);
+        const NodeId inner = l.sdf->insert(group_node(Op::Intersect), outer);
+        l.sdf->insert(dab(0.8f, 0.1f, 0, 0.4f), inner);
+        check_append_into(d, l, inner, {dab(1.0f, 0.1f, 0, 0.2f, Op::Subtract)});
+    }
+    SUBCASE("a stroke of carving dabs resumes from itself, box and all") {
+        Document d;
+        LayerRef a = add_layer(d, "a");
+        a.sdf->insert(dab(0, 0, 0, 0.6f));
+        TapeCheckpoint cp;
+        Tape tape = compile_document_resumable(d, &cp);
+        for (int i = 0; i < 5; ++i) {
+            CAPTURE(i);
+            const NodeId id =
+                a.sdf->insert(dab(0.5f + 0.1f * float(i), 0.2f, 0, 0.5f, Op::Subtract, 0.05f));
+            Tape next;
+            TapeCheckpoint next_cp;
+            REQUIRE(compile_document_append(tape, cp, d, {id}, &next, &next_cp));
+            require_identical(next, compile_document(d));
+            tape = std::move(next);
+            cp = next_cp;
+        }
+    }
 }

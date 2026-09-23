@@ -251,7 +251,11 @@ def main():
     R.write_png(R.output_path("37_groups.png"), image)
     print("  wrote output/37_groups.png  (four groups, one layer)")
     print(f"  step scale {doc.safe_step_scale():.3f}")
-    R.export_model(doc, "37_groups.ply", resolution=88, decimate=0.08)
+    # resolution counts cells along the longest side of tape.bounds. The
+    # intersecting and carving groups now narrow that box to the material, so
+    # 88 over the tight box would mesh 2.3x the triangles (746 KiB). 58 gives
+    # what 88 gave over the old plain union: 12.5k triangles against 12.4k.
+    R.export_model(doc, "37_groups.ply", resolution=58, decimate=0.08)
 
 
 if __name__ == "__main__":
