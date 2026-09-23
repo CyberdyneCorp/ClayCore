@@ -558,6 +558,12 @@ check(clay_document_undo(doc, &dialUndone) == CLAY_OK && dialUndone == 1, "undid
 var dialStrength: Float = 0
 check(clay_voxel_sculpt_layer_strength(grid, sculptLayer, &dialStrength) == CLAY_OK
         && dialStrength == 1.0, "undo restored the dial, not the pass (\(dialStrength))")
+// And the next undo takes the pass, so the grid is back to what the checks
+// below were written against.
+check(clay_document_undo(doc, &dialUndone) == CLAY_OK && dialUndone == 1, "undid the pass")
+var afterPassUndo = 0
+check(clay_voxel_occupied_count(grid, &afterPassUndo) == CLAY_OK && afterPassUndo == occupied,
+      "the pass undid to the cells before it (\(afterPassUndo))")
 
 check(clay_voxel_grid_destroy(grid) != CLAY_OK, "destroying a borrowed layer handle is refused")
 
