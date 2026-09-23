@@ -489,6 +489,15 @@ if(CLAY_BUILD_BENCHMARKS)
   target_include_directories(declared_vs_actual_probe PRIVATE bindings/c)
   clay_apply_warnings(declared_vs_actual_probe)
 
+  # Also not gated: what undoing ONE Move segment costs a host against the
+  # length of the chain it sits on (issue #639) -- the bricks the undo bound
+  # marks, and the per-brick price that still grows with the chain. Drives the
+  # C ABI only, so one source builds against any revision for an A/B.
+  add_executable(undo_grab_bound_probe benchmarks/undo_grab_bound_probe.cpp)
+  target_link_libraries(undo_grab_bound_probe PRIVATE claycore)
+  target_include_directories(undo_grab_bound_probe PRIVATE bindings/c)
+  clay_apply_warnings(undo_grab_bound_probe)
+
   add_executable(grab_jacobian_chain_probe benchmarks/grab_jacobian_chain_probe.cpp)
   target_link_libraries(grab_jacobian_chain_probe PRIVATE claycore)
   target_include_directories(grab_jacobian_chain_probe PRIVATE bindings/c)
