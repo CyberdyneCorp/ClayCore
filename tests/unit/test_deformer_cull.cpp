@@ -250,3 +250,99 @@ TEST_CASE("deformer cull: a culled march agrees with a dense sign-change truth")
     REQUIRE(truth < kSide * kSide);
     CHECK(marched == truth);
 }
+
+// ACROSS A REPEAT (issue #649). The interpreter folds the local point into its
+// repetition cell BEFORE the chain runs, so every copy samples the one chain at
+// folded points -- and the region test above was made in the UNFOLDED frame. A
+// brick over a copy other than the source cell found the grab out of reach,
+// dropped it, and filled that copy undeformed: random documents measured
+// in-band brick samples off the raw field by up to 0.26.
+namespace {
+
+// A sphere under `repeat` whose one grab sits over the SOURCE cell only -- the
+// canonical +X sector of a radial array, the centre cell of a grid -- so a
+// region over any other copy never overlaps the grab's ball.
+scene::Document repeated_ball(const scene::Repeat& repeat, const cfloat3* grab_at) {
+    scene::Document doc;
+    scene::Layer& l = doc.add_sdf_layer("body");
+    scene::Node n;
+    n.id = l.sdf->reserve_id();
+    n.prim = scene::Prim::sphere(0.4f);
+    n.repeat = repeat;
+    if (grab_at)
+        n.deformers.push_back(scene::Deformer::grab(*grab_at, 0.25f, cf3(0.0f, 0.12f, 0.0f)));
+    l.sdf->insert(n);
+    return doc;
+}
+
+// Largest |whole - culled| over a region, and how many of its samples the
+// grab actually moved -- so a case cannot pass because the grab reaches
+// nothing there.
+struct CullAgreement {
+    float worst = 0.0f;
+    int moved = 0;
+};
+
+CullAgreement agreement(const scene::Repeat& repeat, cfloat3 grab_at, const math::Aabb& region) {
+    const scene::Document doc = repeated_ball(repeat, &grab_at);
+    const scene::Tape whole = scene::compile_document(doc);
+    scene::CullRegion cull{region};
+    const scene::Tape culled = scene::compile_document(doc, &cull);
+    const scene::Tape undeformed = scene::compile_document(repeated_ball(repeat, nullptr));
+    CullAgreement a;
+    for (cfloat3 p : points_in(region, 9)) {
+        const float w = whole.eval(p).d;
+        a.worst = std::fmax(a.worst, std::fabs(w - culled.eval(p).d));
+        if (std::fabs(w - undeformed.eval(p).d) > 1e-3f) ++a.moved;
+    }
+    return a;
+}
+
+}  // namespace
+
+TEST_CASE("deformer cull: a radial copy keeps the grab its source cell carries") {
+    // Four sectors about Y; the grab on the ball's +X side, which is the
+    // canonical sector. A region on the -X side never contains the grab's
+    // ball, yet every sample there is rotated into the +X sector before the
+    // chain runs, and is pulled by it.
+    const math::Aabb region{cf3(-0.6f, -0.2f, -0.2f), cf3(-0.2f, 0.2f, 0.2f)};
+    const CullAgreement a =
+        agreement(scene::Repeat::radial(4, 0.0f), cf3(0.4f, 0.0f, 0.0f), region);
+    REQUIRE(a.moved > 0);
+    CHECK(a.worst == 0.0f);
+}
+
+TEST_CASE("deformer cull: a grid copy keeps the grab its source cell carries") {
+    // Five copies along X, one unit apart; the grab over the centre copy's top
+    // and a region over the copy at x = +2.
+    const math::Aabb region{cf3(1.6f, 0.1f, -0.3f), cf3(2.4f, 0.7f, 0.3f)};
+    const CullAgreement a = agreement(scene::Repeat::grid_finite(1.0f, cf3(2.0f, 0.0f, 0.0f)),
+                                      cf3(0.0f, 0.4f, 0.0f), region);
+    REQUIRE(a.moved > 0);
+    CHECK(a.worst == 0.0f);
+}
+
+TEST_CASE("deformer cull: a grab behind another warp is not tested against the bare region") {
+    // The induction dilates the region by every move a kept link can make, and
+    // only a grab's move is bounded. A magnify ahead of a grab pulls these
+    // samples 0.1 and more toward its centre, into a grab whose ball the region
+    // itself never touches -- dropping the grab there was 0.038 off (#649).
+    scene::Document doc;
+    scene::Layer& l = doc.add_sdf_layer("body");
+    scene::Node n;
+    n.id = l.sdf->reserve_id();
+    n.prim = scene::Prim::sphere(1.0f);
+    n.deformers.push_back(scene::Deformer::magnify(cf3(0.0f, 0.0f, 1.0f), 0.5f, 0.9f));
+    n.deformers.push_back(scene::Deformer::grab(cf3(0.0f, 0.0f, 1.0f), 0.15f, cf3(0, 0, 0.1f)));
+    l.sdf->insert(n);
+
+    const math::Aabb region{cf3(0.2f, -0.05f, 0.85f), cf3(0.35f, 0.05f, 1.1f)};
+    const math::Aabb grab_ball{cf3(-0.15f, -0.15f, 0.85f), cf3(0.15f, 0.15f, 1.15f)};
+    REQUIRE_FALSE(grab_ball.intersects(region));
+
+    const scene::Tape whole = scene::compile_document(doc);
+    scene::CullRegion cull{region};
+    const scene::Tape culled = scene::compile_document(doc, &cull);
+    CHECK(deformer_count(culled) == 2);
+    for (cfloat3 p : points_in(region, 7)) CHECK(whole.eval(p).d == culled.eval(p).d);
+}

@@ -192,15 +192,27 @@ struct Compiler {
     // the next one may be tested against the same region. A warp that is KEPT
     // may move the point, so the region is dilated by the most that warp can
     // move it before the next test — conservative, and it is what keeps this
-    // exact rather than nearly.
+    // exact rather than nearly. Only a grab's move is bounded here, so the
+    // first link of any other kind stops the test (below).
     //
     // GRAB ONLY, for now. `pose` and `magnify` share `cregion_weight` and could
     // join this on the same terms; `pose_line`, the noise and the lattices have
     // no finite support and never can. One verb at a time, each with the test
     // that shows the field did not move.
+    //
+    // NOT ACROSS A REPEAT (issue #649). The interpreter folds the local point
+    // into its repetition cell BEFORE the chain runs (kernel/tape.h,
+    // ctape_repeat_point), so the chain sees the folded point, and the region
+    // below is the UNFOLDED one: a copy away from the source cell samples its
+    // grab at points this test never looked at. Measured on random documents
+    // with a radial or grid repeat carrying a grab: in-band brick samples off
+    // the raw field by up to 0.26, the copies' grab simply missing from every
+    // brick that did not overlap the source cell. A repeated item keeps its
+    // whole chain; a region test in the folded frame would have to cover every
+    // cell the brick reaches, which is the item's whole cell for most of them.
     std::vector<Deformer> cull_deformers(const std::vector<Deformer>& deformers,
-                                         const cfloat4x4& inv) const {
-        if (!cull || deformers.empty()) return deformers;
+                                         const cfloat4x4& inv, const Repeat& repeat) const {
+        if (!cull || deformers.empty() || repeat.active()) return deformers;
         bool any_finite = false;
         for (const Deformer& d : deformers)
             if (d.type == kernel::cdeform_grab) any_finite = true;
@@ -214,10 +226,20 @@ struct Compiler {
 
         std::vector<Deformer> kept;
         kept.reserve(deformers.size());
-        for (const Deformer& d : deformers) {
+        for (std::size_t i = 0; i < deformers.size(); ++i) {
+            const Deformer& d = deformers[i];
+            // Any other link stays, and ENDS the test (issue #649): it may move
+            // the point by an amount this loop has no bound for, and the
+            // induction above holds only while the region is dilated by every
+            // move made so far. A magnify ahead of a grab pulled samples 0.1
+            // into a grab whose ball the region missed, and the culled tape
+            // measured 0.038 off the whole one. So the rest of the chain is
+            // kept as it is. The grabs a Move records sit at the HEAD of a
+            // chain, ahead of anything else, and are still tested.
             if (d.type != kernel::cdeform_grab) {
-                kept.push_back(d);
-                continue;  // no finite support to test; it stays and may move the point
+                kept.insert(kept.end(), deformers.begin() + static_cast<std::ptrdiff_t>(i),
+                            deformers.end());
+                break;
             }
             const kernel::cfloat3 centre = kernel::cf3(d.k, d.a, d.b);
             const float radius = d.c;
@@ -262,7 +284,7 @@ struct Compiler {
         tape.params.push_back(repeat.counts.x);
         tape.params.push_back(repeat.counts.y);
         tape.params.push_back(repeat.counts.z);
-        const std::vector<Deformer> live = cull_deformers(deformers, inv);
+        const std::vector<Deformer> live = cull_deformers(deformers, inv, repeat);
         live_chain_ = live;
         live_chain_src_ = &deformers;
         tape.params.push_back(static_cast<float>(live.size()));
