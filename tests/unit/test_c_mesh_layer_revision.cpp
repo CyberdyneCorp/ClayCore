@@ -573,3 +573,41 @@ TEST_CASE("c abi: the shared adjacency is dropped by every path that replaces tr
     CHECK(vertices == clay_mesh_vertex_count(borrowed));
     clay_mesh_sculptor_destroy(s);
 }
+
+TEST_CASE("c abi: a mesh sculptor stamp is not a document undo step") {
+    // STATED, NOT WANTED. The c-abi spec says so outright: a stamp moves the
+    // layer's vertices and records into the host's clay_mesh_deltas, and the
+    // document's history does not see it — so clay_document_undo after a stamp
+    // reaches the step BEFORE it. The unify-the-undo-history delta used to
+    // claim otherwise, and this is the case that caught it. When the ABI does
+    // record stamps, this is the test to turn around.
+    const TriMesh fine = sphere(1.0f, 8, 16);
+    DocHandle doc;
+    doc.doc = clay_document_create();
+    REQUIRE(doc.doc != nullptr);
+    REQUIRE(clay_document_enable_undo(doc.doc) == CLAY_OK);
+    const clay_layer_id layer = attach_layer(&doc, fine, "kept");
+    std::size_t before = 0;
+    REQUIRE(clay_document_undo_state(doc.doc, nullptr, &before, nullptr) == CLAY_OK);
+
+    clay_mesh* borrowed = nullptr;
+    REQUIRE(clay_document_mesh_layer_by_id(doc.doc, layer, &borrowed) == CLAY_OK);
+    clay_mesh_sculptor* sculptor = nullptr;
+    REQUIRE(clay_mesh_sculptor_create(borrowed, -1.0f, &sculptor) == CLAY_OK);
+    clay_mesh_brush_desc brush{};
+    brush.struct_size = sizeof(brush);
+    REQUIRE(clay_mesh_brush_defaults(&brush) == CLAY_OK);
+    brush.verb = CLAY_MESH_BRUSH_DRAW;
+    brush.center[1] = 1.0f;
+    brush.radius = 0.4f;
+    brush.strength = 0.05f;
+    std::size_t moved = 0;
+    REQUIRE(clay_mesh_sculptor_stamp(sculptor, &brush, nullptr, nullptr, &moved) == CLAY_OK);
+    clay_mesh_sculptor_destroy(sculptor);
+    REQUIRE(moved > 0);
+    REQUIRE_FALSE(layer_holds(doc.doc, layer, fine));  // the layer really moved
+
+    std::size_t after = 0;
+    REQUIRE(clay_document_undo_state(doc.doc, nullptr, &after, nullptr) == CLAY_OK);
+    CHECK(after == before);
+}

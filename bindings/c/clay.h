@@ -1208,7 +1208,10 @@ clay_result clay_remove_node(clay_document* doc, clay_layer_id layer, clay_node_
  * escapes undo. Nothing to undo is reported through *out_undone, not returned
  * as a failure, so a UI can drive the buttons without tracking state. */
 /* Opt-in history. Unchanged in shape, and since ABI 0.43.0 it spans the SDF
- * edit list, VOXEL grids and MESH layers rather than the edit list alone.
+ * edit list, VOXEL grids and MESH layers rather than the edit list alone. On a
+ * mesh layer it records what REPLACES the triangles (attach, replace, remesh);
+ * a clay_mesh_sculptor stamp records into the host's clay_mesh_deltas and is
+ * not a document step.
  *
  * That is a behaviour change and a fix. Before it, a host that sculpted a voxel
  * layer and called clay_document_undo reversed an unrelated SDF edit, or was

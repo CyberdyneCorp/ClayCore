@@ -1407,6 +1407,13 @@ section is the thing that was missing.
 then a voxel smooth, then a mesh grab undo as mesh, voxel, SDF. The entry points
 did not change shape; since ABI 0.43.0 they reverse more than they did.
 
+**One caveat on the mesh row, at the ABI.** The session history records mesh
+vertex deltas, but neither binding hands it a *sculptor stamp*: a
+`clay_mesh_sculptor` over a document's mesh layer records into the host's
+`clay_mesh_deltas`, and `clay_document_undo` after a stamp reaches the step
+before it. What the ABI does record on a mesh layer is whatever replaces its
+triangles — attach, `clay_document_replace_mesh_layer`, a voxel remesh.
+
 | representation | what a step holds | where the inverse comes from |
 |---|---|---|
 | SDF edit list, layer state | one `UndoStack` entry | the command's inverse |

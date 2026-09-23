@@ -11,6 +11,10 @@ The history SHALL be an INDEX over the three existing mechanisms and SHALL NOT m
 
 Each mechanism SHALL keep the behaviour it already has. Consecutive stroke commands on one node SHALL still coalesce into one step, an explicit group SHALL still bundle arbitrary commands into one step, and a voxel sculpt layer SHALL remain independently addressable.
 
+An operation on a voxel sculpt-layer stack — a strength, a visibility, a reorder, a removal or a merge-down — SHALL be a step of its own kind, distinct from the pass it acts on. Its step SHALL carry the property it changed and every cell its recompose rewrote, and undoing or redoing it SHALL restore both without recomposing, so that the grid and its stack return to exactly the state they had. A merge-down SHALL hold the pass it folded, since undoing it means restoring that pass. An operation that changed nothing SHALL NOT be a step.
+
+Enabling the history mid-session SHALL start an empty history and SHALL NOT be refused: what the document holds at that moment is the starting state, and enabling a history that is already enabled SHALL keep it. Closing a group that was never opened SHALL fold nothing, and only the outermost of nested groups SHALL fold.
+
 #### Scenario: One undo crosses representations
 - **WHEN** an SDF item is added, then a voxel region is smoothed, then a mesh layer's vertices are moved
 - **THEN** the first undo restores the mesh vertices, the second restores the voxel cells, and the third removes the SDF item
@@ -27,10 +31,31 @@ Each mechanism SHALL keep the behaviour it already has. Consecutive stroke comma
 - **WHEN** a voxel pass is recorded and its strength is later changed
 - **THEN** the pass remains addressable as a sculpt layer, and the strength change is its own history step rather than being confused with the pass that created it
 
+#### Scenario: A voxel layer dial undoes to its setting
+- **GIVEN** a voxel sculpt layer holding a pass, at full strength
+- **WHEN** its strength is set to 0.4 and the history is undone once
+- **THEN** the strength reads 1.0, the layer and its pass are still present, and the grid and stack are byte-identical to their state before the dial
+- **AND** a redo returns them byte-identically to the dialled state
+
+#### Scenario: Undoing a merge-down restores both layers
+- **WHEN** a voxel sculpt layer is merged down into an overlapping one and the history is undone once
+- **THEN** both layers are present with their names, strengths and recorded cells, and the grid and stack are byte-identical to their state before the merge
+
+#### Scenario: Enabling mid-session starts empty
+- **GIVEN** a document edited while its history was off
+- **WHEN** the history is enabled
+- **THEN** the undo depth is zero and the edits made before are the starting state
+- **AND** enabling it again keeps any steps recorded since
+
+#### Scenario: An unmatched group end folds nothing
+- **GIVEN** three recorded steps and no open group
+- **WHEN** a group is closed
+- **THEN** the undo depth is still three
+
 ### Requirement: The history says what it cannot reverse
 An operation that no history mechanism records SHALL NOT appear as an undoable step, and the history SHALL be able to report that such an operation happened.
 
-Consolidating a layer, rasterizing a document into a grid and converting between representations are destructive and are recorded by none of the three mechanisms. A history that silently omitted them would leave a host offering an undo that jumps over the operation the user most wants back; one that offered a step which did nothing would be worse. The boundary SHALL be stated in the specification and SHALL be observable at runtime rather than discovered.
+Dropping a voxel resolution level destroys the detail it held and is recorded by no mechanism; consolidating a layer and rasterizing into a grid, which are often assumed to be in the same class, ARE recorded — consolidate through the command vocabulary and a rasterization through the cell choke point every voxel verb uses. A history that silently omitted an unrecorded operation would leave a host offering an undo that jumps over the operation the user most wants back; one that offered a step which did nothing would be worse. The boundary SHALL be stated in the specification and SHALL be observable at runtime rather than discovered.
 
 #### Scenario: An unrecorded operation is not a silent gap
 - **WHEN** an operation outside every history mechanism is performed between two recorded steps
