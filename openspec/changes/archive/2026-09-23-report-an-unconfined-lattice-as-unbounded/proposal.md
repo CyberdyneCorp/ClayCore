@@ -38,7 +38,9 @@ covered no material at all.
   too, so it stays byte-identical to the single-item layer it stands in for.
 - **What the infinite box costs a caller**, all of which were already written
   for a plane: `clay_mesh` / the quad mesher / `clay_voxel_rasterize` / the bakes
-  refuse with "unbounded scene; pass a region"; raycast and pick skip the clip;
+  refuse with "unbounded scene; pass a region"; `clay_sdf_smooth_begin` refuses
+  the layer, as it refuses a plane's, rather than laying its working lattice over
+  one cell; raycast and pick skip the clip and pick's per-ray local tape;
   `advised_params` returns no advice; the prefix cache declines and the layer
   walks in full. pyclay's `Volume.from_document`, `moved_topologically_from` and
   `flattened_from` derived a default region without an infinite check and now

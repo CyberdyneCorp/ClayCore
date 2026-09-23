@@ -24,6 +24,7 @@
 #include "clay/scene/bounds.h"
 #include "clay/scene/document.h"
 #include "clay/scene/tape.h"
+#include "clay/session/sdf_sculpt.h"
 
 using namespace clay;
 using namespace clay::scene;
@@ -198,6 +199,44 @@ void check_resumed(bool into_group) {
     check_sound(full);
 }
 
+// A lattice something finite confines: its box, finite, and sound.
+void check_confined(const Document& doc, float max_x) {
+    const Tape t = compile_document(doc);
+    CHECK_FALSE(t.bounds.is_infinite());
+    CHECK(t.bounds.max.x == doctest::Approx(max_x));
+    check_sound(t);
+}
+
+Document shape_minus_lattice() {
+    Document doc;
+    Layer& l = doc.add_sdf_layer("l");
+    l.sdf->insert(box_at(cf3(0, 0, 0), cf3(2, 2, 2)));
+    Node cutter = lattice();
+    cutter.op = Op::Subtract;
+    l.sdf->insert(cutter);
+    return doc;
+}
+
+Document lattice_within_box() {
+    Document doc;
+    Layer& l = doc.add_sdf_layer("l");
+    l.sdf->insert(lattice());
+    l.sdf->insert(box_at(cf3(0, 0, 0), cf3(3, 3, 3), Op::Intersect));
+    return doc;
+}
+
+bool smooth_opens(Document& doc) {
+    session::SdfSculptPolicy policy;
+    policy.cell_size = 0.1f;
+    return session::SdfSmoothTransaction::begin(doc, doc.layers.front().id, policy).has_value();
+}
+
+Document one_sphere() {
+    Document doc;
+    doc.add_sdf_layer("l").sdf->insert(sphere_at(cf3(0, 0, 0), 1.0f));
+    return doc;
+}
+
 }  // namespace
 
 TEST_CASE("lattice bounds: a lattice minus a sphere holds no material outside its bounds") {
@@ -233,25 +272,20 @@ TEST_CASE("lattice bounds: a resumed subtract reports the full compile's box") {
 // a lattice something finite CONFINES stays finite and narrow.
 TEST_CASE("lattice bounds: a confined lattice stays finite") {
     SUBCASE("a finite shape minus the lattice keeps the shape's box") {
-        Document doc;
-        Layer& l = doc.add_sdf_layer("l");
-        l.sdf->insert(box_at(cf3(0, 0, 0), cf3(2, 2, 2)));
-        Node cutter = lattice();
-        cutter.op = Op::Subtract;
-        l.sdf->insert(cutter);
-        const Tape t = compile_document(doc);
-        CHECK_FALSE(t.bounds.is_infinite());
-        CHECK(t.bounds.max.x == doctest::Approx(2.0f));
-        check_sound(t);
+        check_confined(shape_minus_lattice(), 2.0f);
     }
     SUBCASE("a lattice intersected with a box is bounded by the box") {
-        Document doc;
-        Layer& l = doc.add_sdf_layer("l");
-        l.sdf->insert(lattice());
-        l.sdf->insert(box_at(cf3(0, 0, 0), cf3(3, 3, 3), Op::Intersect));
-        const Tape t = compile_document(doc);
-        CHECK_FALSE(t.bounds.is_infinite());
-        CHECK(t.bounds.max.x == doctest::Approx(3.0f));
-        check_sound(t);
+        check_confined(lattice_within_box(), 3.0f);
     }
+}
+
+// A consumer that DERIVES its region from the box refuses the unbounded one
+// rather than working over one cell of it: an SDF smooth lays its working
+// lattice over `tape.bounds`, and on the one-cell box it smoothed cell zero
+// and left every other copy of the lattice out of the transaction.
+TEST_CASE("lattice bounds: a smooth refuses an unconfined lattice layer") {
+    Document lattice_doc = lattice_minus_sphere(BlendProfile::Hard, 0.0f);
+    Document finite = one_sphere();
+    CHECK_FALSE(smooth_opens(lattice_doc));
+    CHECK(smooth_opens(finite));
 }
