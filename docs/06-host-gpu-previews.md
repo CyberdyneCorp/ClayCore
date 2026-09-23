@@ -434,6 +434,11 @@ clay_brick_cache_read_bricks(cache, /*lod*/ 0, keys, key_count, /*apron*/ 1,
   207 ms to undo it). Do NOT try to work it out by diffing the layer's nodes
   across the call: an undone move, resize or colour edit keeps its node id, the
   diff sees nothing, and under-dirtying leaves stale bricks at a blend seam.
+  Undoing one Move segment reports the segment's grab, not the node it hangs
+  off (issue #639): a step whose deformer chains differ only in a head of grab,
+  magnify, blob or alpha links reports their balls, placed and dilated as the
+  item is and clamped into the node's bound. The price of each refilled brick
+  still grows with the chain's length; only the node-size factor is gone.
 
 **Formats.** `r16float` for distance, `rgba8unorm` for colour. Both are
 hardware-filterable in WebGPU, so the trilinear step is free and the shader is a

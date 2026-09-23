@@ -203,6 +203,8 @@ add_executable(clay_unit_tests
   unit/test_c_uniform_gate.cpp
   unit/test_c_brick.cpp
   unit/test_c_undo_bound.cpp
+  unit/test_c_undo_bound_grab_support.cpp
+  unit/test_deformer_head_reach.cpp
   unit/test_c_out_descriptors.cpp
   unit/test_c_brick_atlas.cpp
   unit/test_c_brick_lod_mesh.cpp

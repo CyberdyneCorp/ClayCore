@@ -1279,6 +1279,38 @@ clay_result clay_document_redo(clay_document* doc, int32_t* out_redone);
  * layer sharing it. A step that cannot change the field — a rename — reports
  * no bounds rather than the layer.
  *
+ * A DEFORMER STEP REPORTS THE DEFORMER, NOT ITS NODE (issue #639). A Move
+ * segment is a grab put at the head of a node's chain, and through 0.120.0 its
+ * undo reported the node's whole bound — which every grab also dilates by its
+ * pull — so undoing one segment cost bricks-in-the-node times chain length.
+ * When the chains before and after a command differ only in a HEAD of grab,
+ * magnify, blob or alpha links, that command now reports those links' balls
+ * (a grab's at its centre AND at its displaced end), placed where the item is
+ * — every mirror and radial copy, every instancing layer — dilated by each
+ * enclosing group's blend support and by every layer fold above, and clamped
+ * into the node's bound, so it is never larger than what it replaces. CLAMPED,
+ * NOT INTERSECTED: the node's bound leaves the band to you (mark_dirty adds
+ * it), so a ball that misses the node's box by less than a band still changes
+ * the field, and reports the face of that box nearest it rather than nothing.
+ * Those links are exactly the identity outside their balls, so the raw field
+ * there is bit-identical and nothing outside needs a refill. Measured on a radius-1.5
+ * node, 0.05 voxels, one grab of radius 0.15 undone: 12 bricks at every chain
+ * length, against 1,000 / 1,440 / 4,000 at 1 / 10 / 40 grabs before.
+ *
+ * WHAT IT DOES NOT NARROW, and reports the node's bound for as before: a
+ * RADIAL POSE (its kernel is not the identity past its ball, by an ulp); a
+ * grab behind a twist or any other whole-item deformer, whose ball that
+ * deformer has moved — a grab ADDED AT THE FRONT of such a chain narrows, one
+ * appended behind it does not; an easing whose value at the rim is not exactly
+ * zero on every backend (the sines, out_expo, the circs, in_bounce,
+ * in_out_bounce); an infinite repeat grid; a morph or hidden group above the
+ * item. Other commands in the same step report their own bounds as always.
+ *
+ * WHAT IT DOES NOT MAKE CHEAP: the price of ONE refilled brick still rises
+ * with the chain's length -- on the fixture above, 7.4 us a brick at 1 grab and
+ * 28.1 us at 160, none of which reach those bricks. This removes the node-size
+ * factor, not that one.
+ *
  * The three states are clay_layer_node_influence_bound's, and they line up
  * with what mark_dirty takes:
  *   *out_has_bounds 0            nothing to dirty; out_min/out_max untouched

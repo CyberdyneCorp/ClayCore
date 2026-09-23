@@ -546,6 +546,16 @@ std::optional<math::Aabb> command_surface_delta_bound(const Document& doc, const
     return item_geometry_reach_in_document(doc, *l->sdf, c->node);
 }
 
+std::optional<math::Aabb> command_head_delta_bound(const Document& doc, const Command& cmd) {
+    const auto* c = std::get_if<SetDeformersCmd>(&cmd);
+    if (!c) return std::nullopt;
+    const Layer* l = doc.find_layer(c->layer);
+    if (!l || l->kind != LayerKind::Sdf || !l->sdf) return std::nullopt;
+    const Node* n = l->sdf->find(c->node);
+    if (!n) return std::nullopt;
+    return deformer_head_reach_in_document(doc, *l->sdf, c->node, n->deformers, c->deformers);
+}
+
 math::Aabb command_influence_bound(const Document& doc, const Command& cmd,
                                    LayerExtent* extent) {
     return std::visit(
@@ -1833,25 +1843,57 @@ bool UndoStack::perform(Document& doc, const Command& cmd) {
 
 namespace {
 
-// Both sides of one command, unioned into the step's bound. Unioning with
-// math::Aabb::infinite() yields it back — it is maximal on every axis — so
-// "one command was unbounded" needs no case of its own. A null bound is a
-// caller that did not ask, and costs nothing.
-void widen(math::Aabb* bound, const Document& doc, const Command& cmd) {
-    if (bound) bound->expand(command_influence_bound(doc, cmd));
+// `head` pulled into `reach`, corner by corner: each corner clamped into
+// `reach`'s box. Where the two overlap on an axis that is their overlap; where
+// they MISS on an axis it is the face of `reach` nearest `head` -- NOT nothing.
+//
+// Not the intersection, and the difference is a correctness one. `reach` is
+// reported without the band, which every consumer adds (mark_dirty dilates by
+// it), so the node can change the field anywhere within a band OUTSIDE its box
+// -- and a head's ball sitting there changes it. The intersection is empty for
+// such a ball and the host dirtied nothing: a magnify just past a node's face,
+// undone, left a brick stale. The clamped box, dilated by any band, covers the
+// part of the ball within that band of `reach`, whatever the band is; and it
+// is still inside `reach`, so never larger than the node's bound. An infinite
+// `reach` leaves `head` as it is; an empty one, or an empty head, is nothing.
+math::Aabb head_within(const math::Aabb& reach, const math::Aabb& head) {
+    if (reach.empty() || head.empty()) return math::Aabb{};
+    return math::Aabb{kernel::cmin(kernel::cmax(head.min, reach.min), reach.max),
+                      kernel::cmax(kernel::cmin(head.max, reach.max), reach.min)};
+}
+
+// Apply one command and return what it touched: its influence bound on both
+// sides, unioned -- an add's node is not there before, a removal's is not
+// there after, and a move has two ends. Unioning with math::Aabb::infinite()
+// yields it back, so "one command was unbounded" needs no case of its own.
+//
+// NARROWED for a deformer chain whose head changed (issue #639): the target of
+// that command is the node, whose whole bound is what this used to report for
+// one Move segment. `command_head_delta_bound` is where the field can actually
+// have changed, and it is clamped into the node's bound (`head_within`) rather
+// than substituted, so the result is never larger than the node's bound either.
+math::Aabb apply_bounded(Document& doc, const Command& cmd, std::optional<Command>* inverse) {
+    math::Aabb reach = command_influence_bound(doc, cmd);
+    const std::optional<math::Aabb> head = command_head_delta_bound(doc, cmd);
+    *inverse = scene::apply(doc, cmd);
+    reach.expand(command_influence_bound(doc, cmd));
+    return head ? head_within(reach, *head) : reach;
 }
 
 }  // namespace
 
 // Replay one stack entry onto the document, collecting the inverses for the
 // opposite stack and the region the whole step touched. Undo and redo differ
-// only in which stack they came from, so they share this.
+// only in which stack they came from, so they share this. A null bound is a
+// caller that did not ask, and costs nothing.
 UndoStack::Entry UndoStack::replay(Document& doc, const Entry& entry, math::Aabb* bound) {
     Entry opposite;
     for (auto it = entry.inverses.rbegin(); it != entry.inverses.rend(); ++it) {
-        widen(bound, doc, *it);
-        std::optional<Command> inverse = scene::apply(doc, *it);
-        widen(bound, doc, *it);
+        std::optional<Command> inverse;
+        if (bound)
+            bound->expand(apply_bounded(doc, *it, &inverse));
+        else
+            inverse = scene::apply(doc, *it);
         if (inverse) opposite.inverses.push_back(std::move(*inverse));
     }
     return opposite;

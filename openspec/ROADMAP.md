@@ -156,16 +156,23 @@ because none has a proposal yet:
 - #634: device watch item. `stroke_build` read 0.298 -> 0.488 ms (1.64x) across
   iOS 26.5.2 -> 27.0, and cannot be attributed until a same-OS gate runs.
 
-## Where the engine is (2026-09-22, v0.120.0)
+## Where the engine is (2026-09-23, v0.120.0)
 
-21 capabilities, 235 archived changes, 41 still open. v0.120.0 was published
+21 capabilities, 238 archived changes, 41 still open. v0.120.0 was published
 2026-09-18. On 2026-09-23 `unify-the-undo-history` finished — voxel
 sculpt-layer operations became undo steps, the mid-session enable was decided,
-and the device half of its measurement was re-scoped to #644 — and archived,
-followed by `record-the-layer-a-crossing-creates`, which had waited on it since
-2026-09-06 because its `scene-model` delta modifies a requirement the first
-change adds. Each of the 41 still open has at least
-one open task. Complete enough that the
+and the device half of its measurement was re-scoped to #644 — and archived
+(#647), followed by `record-the-layer-a-crossing-creates`, which had waited on
+it since 2026-09-06 because its `scene-model` delta modifies a requirement the
+first change adds. The same day #646 finished and archived
+`finish-regional-multires` (the layered smooths average over the whole rim
+ring; the mixed-depth export's C
+entry point moved to the new `expose-the-mixed-depth-export`), #645 archived
+`report-an-unconfined-lattice-as-unbounded` (an unconfined infinite grid now
+reports unbounded `tape.bounds`, #640), and #648 archived
+`bound-an-undone-grab-by-its-support` (an undone grab-family deformer step
+reports the grab's support rather than its whole node, #639). Each of the 41
+still open has at least one open task. Complete enough that the
 gaps below are about *sculpting affordances*, not about the field engine — and
 as of the 2026-09-06 reconciliation below, about what a HOST can reach rather
 than about what the engine can do.

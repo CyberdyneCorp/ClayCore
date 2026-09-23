@@ -937,6 +937,43 @@ Aabb item_local_bounds(const Node& item) {
 
 namespace {
 
+// The copies the layer's MIRROR emits of `local`, and the seam's support.
+// The copy's map is on the order emit_item uses: the reflection acts in the
+// layer's LOCAL space, so the layer's per-axis scale is outside it, and the
+// item's per-axis scale is innermost.
+void expand_by_mirror_copies(const Node& item, const Layer& layer, const Aabb& local,
+                             const math::cfloat4x4& lm, Aabb* bound) {
+    if (layer.mirror_axes == 0) return;
+    const math::cfloat4x4 axes = math::scale_matrix(item.scale_axes);
+    for (int axis = 0; axis < 3; ++axis) {
+        if (!(layer.mirror_axes & (1u << axis))) continue;
+        math::cfloat4x4 m = math::mul(
+            lm, math::mul(math::reflection_matrix(axis), math::mul(item.xform.matrix(), axes)));
+        bound->expand(local.transformed(m));
+    }
+    *bound = bound->dilated(kernel::csmin_quadratic_support(layer.mirror_k));
+}
+
+// Every copy the RADIAL mode emits, for the same reason: a bound that misses a
+// copy lets the cull drop an item that is on screen. A rotated box is not
+// axis-aligned, so each copy contributes the AABB OF the rotated box -- it
+// over-covers, which costs cull precision and never correctness.
+void expand_by_radial_copies(const Node& item, const Layer& layer, const Aabb& local,
+                             const math::cfloat4x4& lm, Aabb* bound) {
+    if (layer.radial_count <= 1) return;
+    const math::cfloat4x4 axes = math::scale_matrix(item.scale_axes);
+    const int axis = layer.radial_axis < 3 ? layer.radial_axis : 1;
+    const int count = static_cast<int>(layer.radial_count);
+    for (int k = 1; k < count; ++k) {
+        const float angle =
+            6.2831853071795864769f * static_cast<float>(k) / static_cast<float>(count);
+        math::cfloat4x4 m = math::mul(lm, math::mul(math::rotation_matrix(axis, angle),
+                                                    math::mul(item.xform.matrix(), axes)));
+        bound->expand(local.transformed(m));
+    }
+    *bound = bound->dilated(kernel::csmin_quadratic_support(layer.radial_k));
+}
+
 // The geometry bound, with or without the copies the layer's symmetry emits.
 // One body for both readings so the dilations cannot drift apart: the
 // every-copy bound is what culling and invalidation consult, the item-alone
@@ -946,9 +983,14 @@ namespace {
 // matrix for every item in a layer and building it is 7.4 ns of this function's
 // 45.3 -- so a caller looping over a layer's items, which is what
 // `layer_influence_extent` is, was rebuilding it once per item for no reason.
-Aabb geometry_bound(const Node& item, const Layer& layer, bool with_copies,
-                    const math::cfloat4x4* layer_m = nullptr) {
-    Aabb local = item_local_bounds(item);
+//
+// `local` is the box in the item's own frame that is being placed. It is the
+// item's whole local bound for a geometry bound, and a smaller box -- a
+// deformer's own ball -- for `deformer_head_reach_in_document`, which places
+// a region of the item rather than all of it and must take every copy and
+// every dilation this does, not a second spelling of them.
+Aabb placed_local_bound(const Node& item, const Layer& layer, const Aabb& local, bool with_copies,
+                        const math::cfloat4x4* layer_m = nullptr) {
     if (local.empty()) return local;
     const math::cfloat4x4 lm = layer_m ? *layer_m : layer_matrix(layer);
 
@@ -957,36 +999,10 @@ Aabb geometry_bound(const Node& item, const Layer& layer, bool with_copies,
     // multiplies the result before the layer's placement does. A bound that
     // missed either would be tight around a shape the item no longer is, and
     // the cull would drop a squashed cylinder that is on screen.
-    const math::cfloat4x4 axes = math::scale_matrix(item.scale_axes);
     Aabb bound = local.transformed(math::mul(lm, item_matrix(item)));
-    if (with_copies && item.mirror && layer.mirror_axes != 0) {
-        for (int axis = 0; axis < 3; ++axis) {
-            if (!(layer.mirror_axes & (1u << axis))) continue;
-            // The copy's map, on the order emit_item uses: the reflection acts
-            // in the layer's LOCAL space, so the layer's per-axis scale is
-            // outside it.
-            math::cfloat4x4 m = math::mul(
-                lm, math::mul(math::reflection_matrix(axis), math::mul(item.xform.matrix(), axes)));
-            bound.expand(local.transformed(m));
-        }
-        bound = bound.dilated(kernel::csmin_quadratic_support(layer.mirror_k));
-    }
-    // Every copy the radial mode emits, for the same reason: a bound that
-    // misses a copy lets the cull drop an item that is on screen. A rotated box
-    // is not axis-aligned, so each copy contributes the AABB OF the rotated box
-    // — it over-covers, which costs cull precision and never correctness.
-    if (with_copies && item.mirror && layer.radial_count > 1) {
-        const int axis = layer.radial_axis < 3 ? layer.radial_axis : 1;
-        const int count = static_cast<int>(layer.radial_count);
-        for (int k = 1; k < count; ++k) {
-            const float angle =
-                6.2831853071795864769f * static_cast<float>(k) / static_cast<float>(count);
-            math::cfloat4x4 m =
-                math::mul(lm, math::mul(math::rotation_matrix(axis, angle),
-                                        math::mul(item.xform.matrix(), axes)));
-            bound.expand(local.transformed(m));
-        }
-        bound = bound.dilated(kernel::csmin_quadratic_support(layer.radial_k));
+    if (with_copies && item.mirror) {
+        expand_by_mirror_copies(item, layer, local, lm, &bound);
+        expand_by_radial_copies(item, layer, local, lm, &bound);
     }
     // Rounding is authored in item-local units (tape emits round*scale);
     // erosion (negative rounding) shrinks the surface, never the bound.
@@ -1003,6 +1019,11 @@ Aabb geometry_bound(const Node& item, const Layer& layer, bool with_copies,
                                                             item.blend.k, round_world)
                         : kernel::cmax(item.blend.support(), item.blend.k);
     return bound.dilated(kernel::cmax(round_world, 0.0f) + combine);
+}
+
+Aabb geometry_bound(const Node& item, const Layer& layer, bool with_copies,
+                    const math::cfloat4x4* layer_m = nullptr) {
+    return placed_local_bound(item, layer, item_local_bounds(item), with_copies, layer_m);
 }
 
 }  // namespace
@@ -1928,6 +1949,197 @@ std::optional<Aabb> item_geometry_reach_in_document(const Document& doc,
         out.expand(*in_layer);
     }
     if (out.empty() || out.is_infinite() || !box_is_sane(out)) return std::nullopt;
+    return out;
+}
+
+// -- where a change at the HEAD of a deformer chain lands (issue #639) --------
+
+namespace {
+
+// Does this easing curve return EXACTLY zero at the rim of a region, on every
+// backend? `cregion_weight` is `cease(ease, clamp(1 - d/r, 0, 1))`, so outside
+// the ball the weight is `cease(ease, 0)` -- and the whole argument below is
+// that it is zero there, so the link is the identity.
+//
+// Two conditions, and the second is the one that is easy to miss. The HOST
+// must compute zero -- `ease_out_sine` is `cos(pi/2)` there, which is not
+// zero in float, and bounds.cpp already records one easing that returns
+// 5.96e-08 at its zero end. And the value must not depend on HOW a backend
+// evaluates it: a transcendental (sin, cos, exp2, sqrt) or a multi-term
+// polynomial at the rim can round differently under a GPU's fast math or a
+// fused multiply-add, and the host's zero would then say nothing about the
+// device's. So the families whose rim runs through one are refused outright,
+// whatever the host happens to compute; the rest reach the rim through a
+// product with t = 0, a guarded branch, or `1 - 1*1*...`, which every IEEE
+// backend evaluates exactly.
+bool ease_is_zero_at_rim(std::uint8_t ease) {
+    switch (ease) {
+        case kernel::ease_in_sine:
+        case kernel::ease_out_sine:
+        case kernel::ease_in_out_sine:
+        case kernel::ease_out_expo:
+        case kernel::ease_in_circ:
+        case kernel::ease_out_circ:
+        case kernel::ease_in_out_circ:
+        case kernel::ease_in_bounce:
+        case kernel::ease_in_out_bounce:
+            return false;
+        default:
+            return ease < kernel::ease_count && kernel::cease(ease, 0.0f) == 0.0f;
+    }
+}
+
+// Where one link can change the chain's output, in the chain's own frame --
+// or nullopt when that is not a ball.
+//
+// The links that qualify are the ones whose KERNEL returns its input untouched
+// where the weight is zero: grab and magnify early-out to `p` (a warp), blob
+// and alpha to an offset of exactly 0. That is `link_support`'s finite set
+// less RADIAL POSE, which has the same finite weight and no early-out --
+// outside its ball it returns `centre + (p - centre)` turned by zero, and that
+// is not `p` in float. An ulp is enough to move a stored fp16 brick, so pose
+// keeps the node's bound. Everything else acts everywhere.
+//
+// A GRAB ALSO REPORTS ITS DISPLACED END. The kernel's weight is read at the
+// sample point, so the identity argument needs only the ball at the centre;
+// the far end is margin, and it is the margin clay.h has always promised for a
+// move ("two ends"), and what the live Move reports for the same segment
+// (`move_surface_impl` dilates its ball by the pull). Undo reporting less than
+// the gesture that made the edit would be a surprise nobody could debug.
+//
+// The rim margin covers `1 - d/r` rounding to a hair above zero for a point a
+// hair outside the ball.
+bool link_is_exact_identity_outside(const Deformer& d) {
+    return d.type == kernel::cdeform_grab || d.type == kernel::cdeform_magnify ||
+           d.type == kernel::cdeform_blob || d.type == kernel::cdeform_alpha;
+}
+
+std::optional<Aabb> link_change_support(const Deformer& d) {
+    if (!link_is_exact_identity_outside(d) || !ease_is_zero_at_rim(d.ease)) return std::nullopt;
+    const LinkSupport s = link_support(d);
+    if (!s.finite) return std::nullopt;
+    const float r = s.radius * 1.001f + 1e-5f;
+    Aabb b{s.centre - cf3(r, r, r), s.centre + cf3(r, r, r)};
+    if (d.type == kernel::cdeform_grab) {
+        const cfloat3 end = s.centre + cf3(d.ext[0], d.ext[1], d.ext[2]);
+        b.expand(Aabb{end - cf3(r, r, r), end + cf3(r, r, r)});
+    }
+    return b;
+}
+
+bool same_bits(float a, float b) {
+    return std::bit_cast<std::uint32_t>(a) == std::bit_cast<std::uint32_t>(b);
+}
+
+bool same_point(const cfloat3& a, const cfloat3& b) {
+    return same_bits(a.x, b.x) && same_bits(a.y, b.y) && same_bits(a.z, b.z);
+}
+
+// The payloads that do not fit the record: a bend_curve's guide, a lattice's
+// cage and its placement. Compared in full, so a lattice or a curve in the
+// COMMON TAIL -- a grab put at the front of a chain that ends in one -- is
+// stripped like any other link rather than ending the tail early and refusing.
+bool same_guide(const std::vector<StrokePoint>& a, const std::vector<StrokePoint>& b) {
+    if (a.size() != b.size()) return false;
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        if (!same_point(a[i].pos, b[i].pos) || !same_bits(a[i].radius, b[i].radius) ||
+            a[i].type != b[i].type || !same_point(a[i].in_handle, b[i].in_handle) ||
+            !same_point(a[i].out_handle, b[i].out_handle))
+            return false;
+    }
+    return true;
+}
+
+bool same_cage(const Deformer& a, const Deformer& b) {
+    if (a.cage.size() != b.cage.size()) return false;
+    for (std::size_t i = 0; i < a.cage.size(); ++i)
+        if (!same_point(a.cage[i], b.cage[i])) return false;
+    const math::Transform& ta = a.cage_xform;
+    const math::Transform& tb = b.cage_xform;
+    return same_point(ta.position, tb.position) && same_bits(ta.scale, tb.scale) &&
+           same_bits(ta.rotation.x, tb.rotation.x) && same_bits(ta.rotation.y, tb.rotation.y) &&
+           same_bits(ta.rotation.z, tb.rotation.z) && same_bits(ta.rotation.w, tb.rotation.w);
+}
+
+bool same_stamp(const AlphaStamp& sa, const AlphaStamp& sb) {
+    return sa.width == sb.width && sa.height == sb.height && same_bits(sa.extent, sb.extent) &&
+           same_bits(sa.radius, sb.radius) && same_bits(sa.amplitude, sb.amplitude) &&
+           sa.samples == sb.samples;
+}
+
+// Two links the kernel evaluates identically: every field it reads, bit for
+// bit (`gesture_id` is a host's bookkeeping and is never evaluated).
+bool same_link(const Deformer& a, const Deformer& b) {
+    if (a.type != b.type || a.ease != b.ease) return false;
+    if (!same_bits(a.k, b.k) || !same_bits(a.a, b.a) || !same_bits(a.b, b.b) ||
+        !same_bits(a.c, b.c))
+        return false;
+    for (int i = 0; i < 6; ++i)
+        if (!same_bits(a.ext[i], b.ext[i])) return false;
+    return same_guide(a.guide, b.guide) && same_cage(a, b) && same_stamp(a.stamp, b.stamp);
+}
+
+// The region, in the chain's frame, outside which two chains agree.
+//
+// The chain runs p -> d0 -> d1 -> ... -> prim. Strip the longest common TAIL:
+// what is left is a head on each side. A finite-support link is the identity
+// outside its ball, so a head made only of them hands the tail the point
+// UNCHANGED wherever the point is outside every one of their balls (link 0
+// leaves it alone, so link 1 sees it where it was, and so on) -- and an offset
+// link adds exactly zero there. Both chains then evaluate the same tail at the
+// same point: the field is bit-identical outside the union of the balls.
+//
+// A head that is empty on both sides changes nothing (an empty box). A head
+// holding any other kind is nullopt: a twist ahead of a grab moves the point
+// before the grab's ball is tested, so the region is the twist's preimage of
+// the ball and not the ball.
+std::optional<Aabb> chain_head_change(const std::vector<Deformer>& before,
+                                      const std::vector<Deformer>& after) {
+    std::size_t i = before.size(), j = after.size();
+    while (i > 0 && j > 0 && same_link(before[i - 1], after[j - 1])) {
+        --i;
+        --j;
+    }
+    Aabb local;
+    for (const auto& [chain, head] : {std::pair{&before, i}, std::pair{&after, j}}) {
+        for (std::size_t k = 0; k < head; ++k) {
+            const std::optional<Aabb> s = link_change_support((*chain)[k]);
+            if (!s) return std::nullopt;
+            local.expand(*s);
+        }
+    }
+    return local;
+}
+
+}  // namespace
+
+std::optional<Aabb> deformer_head_reach_in_document(const Document& doc,
+                                                    const SdfContent& content, NodeId id,
+                                                    const std::vector<Deformer>& before,
+                                                    const std::vector<Deformer>& after) {
+    const Node* n = content.find(id);
+    if (!n || n->is_group) return std::nullopt;
+    std::optional<Aabb> local = chain_head_change(before, after);
+    if (!local || local->empty()) return local;
+    // Repetition folds the point BEFORE the chain sees it, so the ball recurs
+    // in every cell -- the sweep item_local_bounds applies to the whole item.
+    if (n->repeat.is_infinite_grid()) return std::nullopt;
+    if (n->repeat.active()) local = repeated_local_bounds(*local, n->repeat);
+
+    // Per placement, the three dilations every other reach takes, from the
+    // functions that define them: the item's own placement, symmetry copies,
+    // rounding and combine support (placed_local_bound, the geometry bound's
+    // own body); once per enclosing group (dilate_by_ancestors, node_reach_bound's
+    // walk); and every fold from the layer up (layer_reach_in_document).
+    Aabb out;
+    for (const Layer& l : doc.layers) {
+        if (l.sdf.get() != &content) continue;
+        Aabb b = placed_local_bound(*n, l, *local, /*with_copies=*/true);
+        if (!dilate_by_ancestors(content, id, l, &b)) return std::nullopt;
+        out.expand(layer_reach_in_document(doc, l.id, b));
+    }
+    if (out.empty()) return out;
+    if (out.is_infinite() || !box_is_sane(out)) return std::nullopt;
     return out;
 }
 
