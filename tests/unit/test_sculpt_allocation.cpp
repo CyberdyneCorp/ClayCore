@@ -37,8 +37,11 @@
 #include "clay/mesh/voxel_remesh.h"
 #include "clay/mesh/topology_ops.h"
 #include "clay/mesh/sculpt_layer.h"
+#include "clay/scene/bounds.h"
+#include "clay/scene/document.h"
 
 #include "clay.h"
+#include "scene_utils.h"
 
 using namespace clay;
 using namespace clay::kernel;
@@ -484,6 +487,61 @@ TEST_CASE("allocation gate: the refused-remesh counter is discriminating") {
 // have to be re-derived when a fixture changes size, and it is set at 6 —
 // above the 5.10 this measures and below the 6.16 the regression cost — so it
 // fails on a return to per-warp vectors and tolerates ordinary churn.
+// THE CHAIN-DRAG MEMO, COUNTED ON ITS OWN (#653). The drag gate below caught
+// the memo on MSVC only: 6.0625 per item against 6.0, because MSVC's
+// unordered_map allocates even when empty. On libc++ the same code passed at
+// 5.75, so that gate cannot hold the memo on every compiler. This one can: a
+// 400-node chain asked for every suffix, as a Move step asks, is one chain and
+// must cost one allocation for the list and one for the chain's reserved
+// suffix vector -- not a hash map node and a vector regrown member by member.
+namespace {
+
+// A root chain of `n` smooth-blended spheres. Smooth, so every member carries a
+// drag term: a hard Add carries none, and a chain of them lets the memo answer
+// 0 without walking.
+void add_smooth_chain(scene::Layer& l, int n) {
+    scene::Blend smooth;
+    smooth.profile = scene::BlendProfile::Quadratic;
+    smooth.k = 0.05f;
+    for (int i = 0; i < n; ++i)
+        l.sdf->insert(clay_test::item(scene::Prim::sphere(0.05f),
+                                      cf3(0.01f * static_cast<float>(i), 0, 0), scene::Op::Add,
+                                      smooth));
+}
+
+// Every suffix of the root chain, asked for the way a Move step asks: the sum
+// of the answers, and the allocations it took.
+struct MemoWalk {
+    float total = 0.0f;
+    std::size_t allocations = 0;
+};
+MemoWalk walk_every_suffix(const scene::Layer& l, int n) {
+    scene::ChainDragMemo memo;
+    MemoWalk w;
+    CountingScope scope;
+    for (int i = 0; i < n; ++i) w.total += memo.after(*l.sdf, l, scene::kNoNode, i);
+    w.allocations = scope.count();
+    return w;
+}
+
+}  // namespace
+
+TEST_CASE("allocation gate: a chain-drag memo allocates per chain, not per member") {
+    scene::Document doc;
+    scene::Layer& l = doc.add_sdf_layer("l");
+    const int kChain = 400;
+    add_smooth_chain(l, kChain);
+    REQUIRE(static_cast<int>(l.sdf->roots.size()) == kChain);
+
+    const MemoWalk w = walk_every_suffix(l, kChain);
+    // A memo that walked nothing would allocate nothing and answer 0: the
+    // chain's blend supports must actually have been raised into the suffix.
+    REQUIRE(w.total > 0.0f);
+    CAPTURE(w.allocations);
+    CHECK(w.allocations <= 2);
+}
+
+
 TEST_CASE("allocation gate: a surface drag's cost per warped item is bounded") {
     clay_document* doc = clay_document_create();
     REQUIRE(doc != nullptr);

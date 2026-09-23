@@ -1783,17 +1783,27 @@ Aabb dilated_by_downstream_drag(const SdfContent& content, NodeId parent, int in
 
 }  // namespace
 
+std::vector<CullPadTerms>& ChainDragMemo::from_end_of(NodeId parent, std::size_t chain_length) {
+    for (Chain& c : chains_)
+        if (c.parent == parent) return c.from_end;
+    Chain& c = chains_.emplace_back();
+    c.parent = parent;
+    // One allocation for the whole chain: `[j]` for j in 0..chain_length.
+    c.from_end.reserve(chain_length + 1);
+    c.from_end.emplace_back();
+    return c.from_end;
+}
+
 float ChainDragMemo::after(const SdfContent& content, const Layer& layer, NodeId parent,
                            int index) {
     const std::vector<NodeId>* chain = chain_of(content, parent);
     if (!chain) return 0.0f;
     if (content_ != &content || layer_ != &layer) {
-        from_end_.clear();
+        chains_.clear();
         content_ = &content;
         layer_ = &layer;
     }
-    std::vector<CullPadTerms>& suffix = from_end_[parent];
-    if (suffix.empty()) suffix.emplace_back();
+    std::vector<CullPadTerms>& suffix = from_end_of(parent, chain->size());
     const std::size_t later =
         chain->size() - std::min(static_cast<std::size_t>(index) + 1, chain->size());
     while (suffix.size() <= later) {

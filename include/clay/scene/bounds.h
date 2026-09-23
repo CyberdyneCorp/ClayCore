@@ -460,17 +460,33 @@ class ChainDragMemo {
   public:
     float after(const SdfContent& content, const Layer& layer, NodeId parent, int index);
     void clear() {
-        from_end_.clear();
+        chains_.clear();
         content_ = nullptr;
         layer_ = nullptr;
     }
 
   private:
-    const SdfContent* content_ = nullptr;
-    const Layer* layer_ = nullptr;
     // Per chain, the suffix maxima REVERSED: `[j]` is the last j members'
     // terms raised together, so `[0]` is none.
-    std::unordered_map<NodeId, std::vector<CullPadTerms>> from_end_;
+    //
+    // A FLAT LIST, searched linearly, and each chain's vector reserved to its
+    // full length on first use. Not a hash map, and not grown a member at a
+    // time: this memo is built on every surface drag, and the drag's
+    // per-item allocation gate (test_sculpt_allocation.cpp) is what caught
+    // the difference -- an unordered_map plus a vector regrown across a
+    // 400-node chain added 13 allocations per drag, and MSVC's unordered_map
+    // allocates even when empty, which took the gate from under 6.0 per item
+    // to 6.0625 there alone. A query touches one or two chains, and an undo
+    // step that keeps the memo across commands keeps it on one.
+    struct Chain {
+        NodeId parent = kNoNode;
+        std::vector<CullPadTerms> from_end;
+    };
+    std::vector<CullPadTerms>& from_end_of(NodeId parent, std::size_t chain_length);
+
+    const SdfContent* content_ = nullptr;
+    const Layer* layer_ = nullptr;
+    std::vector<Chain> chains_;
 };
 
 // One node's contribution, so a caller that has GAINED a node can raise a
