@@ -164,6 +164,17 @@ struct CrossLevelNeighborhood {
     // short by at a depth boundary, and 0 at a real open border.
     int shared_triangles(std::uint32_t a, std::uint32_t b) const;
 
+    // The OUTSIDE neighbours of a weld class whose members are `members`: the
+    // ring ids at or past `vertex_count` any member reaches, each once, in
+    // member order and then ring order. The part of a class's ring its own
+    // level cannot name, and ONE walk for every reader that averages over a
+    // ring — the kernel neighbour CSR, `smooth_detail` and `form_shift` — so
+    // they cannot disagree about which vertices a rim vertex has. A cross-level
+    // neighbour this level stores is not here: it is already in the level's
+    // own ring. Clears `out` first; empty away from a depth boundary.
+    void outside_ring(const std::uint32_t* members, std::size_t count,
+                      std::vector<std::uint32_t>* out) const;
+
     std::size_t bytes() const;
 
    private:

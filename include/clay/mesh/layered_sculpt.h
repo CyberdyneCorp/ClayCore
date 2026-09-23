@@ -226,14 +226,24 @@ class LayeredMultiresSculptor {
     bool write_target(std::uint32_t level, std::uint32_t vertex, const LocalDetail& value);
 
     std::size_t smooth_detail(const MeshBrushSettings& settings, const field::MaskGate& gate);
+    // The target channel's coefficients summed over a class's OWN ring at a
+    // level, adding one to `count` per neighbour. The part of the ring on the
+    // level below is `smooth_detail`'s to add.
+    void sum_ring_detail(const Adjacency& adjacency, std::uint32_t level, std::uint32_t cls,
+                         LocalDetail* sum, std::size_t* count) const;
     std::size_t smooth_form(const MeshBrushSettings& settings, const field::MaskGate& gate);
     // The Laplacian shift for every vertex of the region, computed BEFORE any
     // of it is written. Separate from the write for a reason the implementation
     // spells out: at level 0 the array being read is the array a write moves,
     // so a fused loop would be a Gauss-Seidel sweep whose answer depends on the
     // order the region happens to sit in.
-    void form_shift(const Adjacency& adjacency, const std::vector<kernel::cfloat3>& form,
-                    float strength, std::vector<kernel::cfloat3>* shift) const;
+    //
+    // Both averages — this one and `smooth_detail`'s — run over a vertex's
+    // WHOLE ring: the level's own adjacency plus `cross`, the neighbours a
+    // depth boundary puts on the level below (finish-regional-multires 3.7).
+    void form_shift(const Adjacency& adjacency, const CrossLevelNeighborhood& cross,
+                    const std::vector<kernel::cfloat3>& form, float strength,
+                    std::vector<kernel::cfloat3>* shift) const;
     std::size_t fade_toward_zero(const MeshBrushSettings& settings, const field::MaskGate& gate,
                                  bool base);
 

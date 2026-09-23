@@ -168,6 +168,24 @@ int CrossLevelNeighborhood::shared_triangles(std::uint32_t a, std::uint32_t b) c
     return shared;
 }
 
+void CrossLevelNeighborhood::outside_ring(const std::uint32_t* members, std::size_t count,
+                                          std::vector<std::uint32_t>* out) const {
+    out->clear();
+    if (empty()) return;
+    for (std::size_t k = 0; k < count; ++k) {
+        std::size_t rc = 0;
+        const std::uint32_t* r = ring_of(members[k], &rc);
+        for (std::size_t j = 0; j < rc; ++j) {
+            const std::uint32_t id = r[j];
+            if (inside(id)) continue;
+            // A welded class can reach the same outside vertex through two of
+            // its members; counting it twice would weight it twice in a mean.
+            if (std::find(out->begin(), out->end(), id) != out->end()) continue;
+            out->push_back(id);
+        }
+    }
+}
+
 std::size_t CrossLevelNeighborhood::bytes() const {
     const auto v32 = [](const std::vector<std::uint32_t>& x) {
         return x.capacity() * sizeof(std::uint32_t);
