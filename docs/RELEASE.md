@@ -1082,6 +1082,15 @@ forward-refuse).
    budget** at resolution 88, and now asks for 58. Nothing changes at a fixed
    voxel size.
 
+   **0.120.1 restores regression coverage on the device.** Its gate is the first
+   same-OS comparison since the iOS 27.0 re-baseline (#625), which left 0.120.0
+   comparing a run against itself. It passed: iPad15,5 on iOS 27.0, 75 cases,
+   **median ratio 0.998 against the baseline, none above both the 1.4 tolerance
+   and the 0.125 ms floor**, with the canary drifting x1.65 while thermalState
+   read nominal. `stroke_build`, #634's watch item, read **0.324 ms against the
+   baseline's 0.488** (0.66x, within 1.09x of its 26.5.2 figure); #634 is closed
+   on that, the cause of v0.120.0's high reading left unresolved.
+
    **`clay_document_undo_bound` / `_redo_bound` report a grab, not its node**
    (#648 -- issue #639). A step whose chains differ only in a head of grab,
    magnify, blob or alpha links reports their balls, placed and dilated as the
