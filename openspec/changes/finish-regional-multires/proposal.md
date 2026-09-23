@@ -53,6 +53,28 @@ A coefficient authored at a transition does not mean what the same coefficient
 means densely. That is a **storage** defect, on a path artists use today, and it
 is the root of 3.4 rather than a consequence of 2.3.
 
+### After: the frame at a boundary, re-measured
+
+The numbers above were taken on the tree before f40ee3fe. Re-measured with the
+neighbourhood input reverted (which reproduces every one of them to the printed
+digits) and restored, on fixture A and B above and on a 10x10 grid (fixture C)
+whose level 1 has a rim, which fixture B's does not:
+
+| | before | after |
+|---|---:|---:|
+| A frame normal, levels 1 / 2 / 3 | 0.104052 / 0.0485619 / 0.0293633 | 1.3e-07 / 3.0e-07 / 4.1e-07 |
+| A emitted corners with a different frame, levels 2 / 3 | 124 / 124 of 1024 | 0 / 0 |
+| B frame normal, levels 2 / 3 | 0.170116 / 0.154028 | 1.1e-07 / 1.3e-07 |
+| C frame normal, level 1 | 0.443103 | 1.9e-07 |
+| stored level-3 vertices whose POSITION moves under identical detail, A / B / C | 64 / 60 / 60 of 289 | 0 / 0 / 0 |
+| worst such position, A / B / C | 0.00123 / 0.00537 / 0.00918 | 6.0e-08 at worst |
+
+What is left after the fix is the order in which the same faces are summed,
+float rounding four to five orders of magnitude under the smallest defect. The
+display normal moved with the frame, before and after. The bit-identity claim
+now holds for detail-bearing boundary vertices, and the gate that says so authors
+detail on them.
+
 ### Brushes across a transition are wrong today, and quietly
 
 Fixture B, `MultiresSculptor` bound to level 3, `MeshBrush::Smooth` anchored on a
@@ -214,8 +236,8 @@ own ordering.
 ## Who each half is for, said plainly
 
 **The frame and neighbourhood half has users today.** It is storage, not display:
-a coefficient authored at a boundary reconstructs through a frame up to 10% off
-the dense hierarchy's, and a Smooth stamp across a seam already finishes 0.0256
+a coefficient authored at a boundary reconstructed through a frame up to 10% off
+the dense hierarchy's until f40ee3fe, and a Smooth stamp across a seam already finishes 0.0256
 away from where the same stamp finishes densely. This half is not deferrable.
 
 **The export half has no user waiting.** `mesh_at_level` and
@@ -270,9 +292,12 @@ the diff rather than from the plan, because the two had already parted.
   the `checks` job of `.github/workflows/ci.yml`: written here rather than
   planned, because this change's own tasks file was found citing names that were
   not in the tree.
-- STILL UNTOUCHED, each an open task rather than a change of plan:
-  `src/mesh/surface_frame.cpp` — section 1, the frame at a boundary, the half
-  this proposal calls the one with users today and the one still unbuilt — and
+- `src/mesh/surface_frame.cpp` needed nothing from THIS branch after all:
+  section 1's input fix landed on main through
+  `complete-regional-multires-neighbours` (commit f40ee3fe), without the gate
+  that says so. Section 1 here is that gate — three cases in
+  `tests/unit/test_multires_regional.cpp` — and the before/after below.
+- STILL UNTOUCHED, an open task rather than a change of plan:
   `examples/74_regional_multires.py`, which task 6.4 owns and which still states
   the export gap in the artist's vocabulary. Neither `clay.h` nor
   `pyclay_module.cpp` gains a mixed-export symbol, so a host on either binding
