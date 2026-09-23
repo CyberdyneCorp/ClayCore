@@ -1054,6 +1054,82 @@ forward-refuse).
    v0.116.0 tag and its first commit is the bump, so the gap that produced the
    0.78.0 and 0.103.0 stragglers below did not open this time.
 
+   **0.120.1 is a patch: no symbol added or removed and no struct re-laid out,
+   AND IT IS A RELEASE A CALLER OBSERVES, in seven ways, none announced by any
+   version gate.** Against v0.120.0: 708 `clay_*(` symbols both sides, and the
+   seven `-` lines in the `clay.h` diff are the `CLAY_ABI_PATCH` define and six
+   comment lines, none inside a `typedef struct`. Every added line but the
+   define is a comment. No kernel, `.clayspace`, scene or kernels-fixture
+   change.
+
+   **An unconfined infinite repeat grid reports an unbounded `tape.bounds`**
+   (#645 -- issue #640). It reported one cell, although the copies fill space:
+   a 0.4 box on a 1.5 grid minus a radius-1 sphere had **5,824 of 5,824**
+   material samples outside the box, measured on main at `9616286c`. Now
+   `clay_tape_info` returns +/-FLT_MAX as for a plane, and `clay_mesh`,
+   `clay_voxel_rasterize`, the bakes, pyclay's `Volume` constructors and
+   `clay_sdf_smooth_begin` REFUSE such a document without a region where they
+   used to work on one cell. A random-document probe found 1,269,305 samples
+   outside on main and 0 after; documents with no infinite grid plan
+   byte-identical bricks.
+
+   **`tape.bounds` narrows per operator** (#637): a subtract keeps its left
+   operand, an intersect the overlap, and a smooth group now adds its own blend
+   ring. A carve by a large cutter marched **9,640,000 -> 125,000 cells** and
+   meshed 42.18 -> 5.26 ms (Apple M2 Max, Release, median of 200). A mesh sized
+   by pyclay's `resolution=` meshes finer at the same resolution: the gallery's
+   `37_groups` went 12,418 -> 28,846 triangles and **746 KiB against its 400 KiB
+   budget** at resolution 88, and now asks for 58. Nothing changes at a fixed
+   voxel size.
+
+   **`clay_document_undo_bound` / `_redo_bound` report a grab, not its node**
+   (#648 -- issue #639). A step whose chains differ only in a head of grab,
+   magnify, blob or alpha links reports their balls, placed and dilated as the
+   item is, and clamped into the node's bound: **12 bricks where it was 1,000 /
+   1,440 / 4,000 at 1 / 10 / 40 grabs**, undo p50 1.665 -> 0.089 ms at one grab
+   (Mac M-series, CPU backend, `cpu-only` Release). The per-brick price still
+   grows with the chain, **7.4 -> 28.1 us from 1 to 160 grabs**.
+
+   **`clay_layer_node_influence_bound` and `clay_brick_cache_mark_dirty_nodes`
+   widen behind a smooth sibling** (#653 -- issue #650), by its full blend
+   support: a later smooth combine carries an edit back into the band. Two
+   r = 0.3 spheres blended at k = 0.3, the first moved 0.1: **6,359 band samples
+   outside the bound and 25 stale bricks before, 0 and 0 after**; a randomized
+   oracle refills 2.5% and 2.8% more bricks. A node followed only by hard
+   combines, including every node appended last, is bit-identical.
+
+   **A full brick build keeps a grab the deformer cull cannot judge** (#652,
+   part of issue #649): on a repeated item, and behind a magnify, twist or pose.
+   Rich random documents with a build off the raw field went **62 -> 35, worst
+   0.2632 -> 0.0825**. #649 stays open on two other mechanisms.
+
+   **Voxel sculpt-layer operations are undo steps** (#647 and #651 -- issue
+   #642). Strength, visibility, move, remove and merge-down record one each, as
+   do a layer's creation and every edit inside a recording layer; through
+   0.120.0 none did, and undoing a pass left its **110** cells in the layer's
+   record for the next dial to put back. A pass in a new layer is now two undos.
+   **An unmatched `clay_document_end_undo_group` is a no-op** -- it folded every
+   step since the session began into one -- and **a nested group folds once**.
+   Enabling undo mid-session starts an empty history, as it always did; that is
+   now documented, with #641's advice to save right after. The crash journal
+   gains a session-private event kind, so a v0.120.1 journal carrying one is not
+   replayable by v0.120.0.
+
+   **pyclay's multires Layer brushes move the surface** (#636, #646 -- issues
+   #627, #628): `MultiresSculptor.stamp` and `SculptLayerStroke.stamp` take
+   `layer_height`, default 0.05, where a zero ceiling moved **0 classes against
+   Draw's 37**. The layered smooths average a rim vertex over its whole ring
+   (**64 of 64** rim vertices were off the dense hierarchy), and a multires
+   sculptor rebinds after a restructure (reachable through
+   `clay_multires_remove_highest_level` + `_add_level_for_patches`) and after a
+   C++-only `set_base_mesh` that had left it stamping through a freed level.
+   #635 and #638 are docs, OpenSpec and tests only.
+
+   **All eleven merges carry the already-released 0.120.0 version line and are
+   NOT in v0.120.0**: #635-#638, #645-#648 and #651-#653 merged after the tag
+   without a bump, and ship here. The bump is the release branch's own commit,
+   `7f6cf38f`.
+
    **0.113.0 stops decimation breaking a manifold it was given** (#567).
    meshoptimizer chooses its own collapses and does not apply the link condition
    collapse_edge refuses on, so clay_document_mesh -- documented as the
