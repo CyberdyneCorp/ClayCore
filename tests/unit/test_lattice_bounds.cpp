@@ -98,10 +98,14 @@ Census census(const Tape& t) {
     return c;
 }
 
-// Sound, and not trivially so: the field holds material in many cells.
-void check_sound(const Tape& t) {
+void require_compiled(const Tape& t) {
     REQUIRE_FALSE(t.empty());
     REQUIRE_FALSE(t.bounds.empty());
+}
+
+// Sound, and not trivially so: the field holds material in many cells.
+void check_sound(const Tape& t) {
+    require_compiled(t);
     const Census c = census(t);
     CAPTURE(c.inside);
     CAPTURE(c.outside);
@@ -168,19 +172,25 @@ void check_entry_points() {
     check_sound(compile_item(l, *l.sdf->find(l.sdf->roots.front())));
 }
 
-// The append path finishes `tape.bounds` from the checkpoint's own extents; a
-// lattice in the prefix has to reach the appended subtract's result there too.
-void check_resumed(bool into_group) {
-    Document doc;
-    Layer& l = doc.add_sdf_layer("l");
+// The lattice compiled resumably, then the subtract appended beside it.
+Tape append_subtract(Document* doc, bool into_group) {
+    Layer& l = doc->add_sdf_layer("l");
     NodeId parent = kNoNode;
     if (into_group) parent = l.sdf->insert(group_of(Op::Add));
     l.sdf->insert(lattice(), parent);
     TapeCheckpoint cp;
-    const Tape prefix = compile_document_resumable(doc, &cp);
+    const Tape prefix = compile_document_resumable(*doc, &cp);
     const NodeId added = l.sdf->insert(sphere_at(cf3(0, 0, 0), 1.0f, Op::Subtract), parent);
     Tape reused;
-    REQUIRE(compile_document_append(prefix, cp, doc, {added}, &reused, nullptr));
+    REQUIRE(compile_document_append(prefix, cp, *doc, {added}, &reused, nullptr));
+    return reused;
+}
+
+// The append path finishes `tape.bounds` from the checkpoint's own extents; a
+// lattice in the prefix has to reach the appended subtract's result there too.
+void check_resumed(bool into_group) {
+    Document doc;
+    const Tape reused = append_subtract(&doc, into_group);
     const Tape full = compile_document(doc);
     CHECK(reused.bounds.min.x == full.bounds.min.x);
     CHECK(reused.bounds.max.x == full.bounds.max.x);
