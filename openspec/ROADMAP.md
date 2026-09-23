@@ -158,11 +158,11 @@ because none has a proposal yet:
 
 ## Where the engine is (2026-09-22, v0.120.0)
 
-21 capabilities, 232 archived changes, 44 still open. v0.120.0 was published
-2026-09-18. Of the 44, one — `record-the-layer-a-crossing-creates` — has every
+21 capabilities, 233 archived changes, 43 still open. v0.120.0 was published
+2026-09-18. Of the 43, one — `record-the-layer-a-crossing-creates` — has every
 task ticked and is open only because its `scene-model` delta modifies a
 requirement that `unify-the-undo-history` (9 open tasks) adds; its `tasks.md`
-records why neither workaround is acceptable. The other 43 each have at least
+records why neither workaround is acceptable. The other 42 each have at least
 one open task. Complete enough that the
 gaps below are about *sculpting affordances*, not about the field engine — and
 as of the 2026-09-06 reconciliation below, about what a HOST can reach rather
@@ -983,7 +983,7 @@ Three changes raised by `ClayCore_Field_Stamps_Regional_Multires_Layer_Boolean_I
 |---|---|---|
 | 1 | `stamp-a-captured-field` **landed 2026-09-05** | **Smaller than the guide describes**, because three of its four pillars already exist: `PrimType::Volume` compiles through the tape, the Node holds a volume by `shared_ptr` so "a thousand uses of one 4 MB asset must not consume ~4 GB" is already true, and `clay_item_volume_from_document` already captures a finite world region with redistance. What is missing is an ORIENTED capture frame (today's region is world-axis-aligned), an asset IDENTITY with a standalone form, a placement helper on `calpha_frame`, and stroke integration. First because it is the smallest and touches nothing the other two need |
 | 2 | `refine-one-region-of-a-hierarchy` **landed; its three residuals closed in code by `finish-regional-multires`, one piece of the second still open** | Checked against the tree on 2026-09-22 rather than repeated. **2.3, export transitions:** `mixed_mesh_at_level` and `build_mixed_block` (finish-regional-multires section 5), gated by "regional export: a mixed-depth export closes what the per-patch loop leaves open" (0 open edges where the per-patch loop leaves 72 / 168 / 264). **3.4, cross-level neighbours:** `CrossLevelNeighborhood` (sections 2-3), gated for the brush's normal, relax, smooth, the normal recompute and boundary automasking in `test_multires_sculpt.cpp` ("a smoothing verb is not dragged inward at a depth transition", "relax and a normal-steered verb agree with the uniform hierarchy at a seam", "a depth transition is not a border of the model"); and for the FRAME and display normal — the half with a user — by commit f40ee3fe, gated only since 2026-09-22 by the "regional boundary:" cases in `test_multires_regional.cpp`, which author nonzero detail on the rim and fail at 60 of 289 moved positions with the input reverted. **Still open under 3.4:** the layered sculptor's coefficient and form smoothing (`smooth_detail`, `form_shift`) read `level_adjacency` and so still average a short ring at the rim — finish-regional-multires 3.7. **5.3, crossing brushes:** `stamp_coarse` / `partition_coarse_write` (section 4), gated by "a stamp crossing a depth boundary writes the coarse side too". The boxes in `refine-one-region-of-a-hierarchy/tasks.md` are still unticked; they are closed by the other change's work, not by their own. Earlier text of this row: Mixed-depth export, cross-level neighborhoods and crossing brushes are implemented and exercised by `test_multires_regional.cpp`. See the [2026-09-16 mesh investigation](investigations/2026-09-16-mesh-sculpt/README.md). The following host discussion records the earlier prioritization; hierarchy persistence has also since landed (see the host section). **The host does not need any of the three** — it exports no hierarchies — and names a different multires gap as its rank 2: a `.clayspace` carries no hierarchy and the engine reports a hierarchy's layer as a MESH layer, so a host's side-car is the only record that a row ever was one. See the host section. Originally: the gap `add-mesh-multires` recorded in its own row. Depth becomes a property of a base patch, with 2:1 balance in stable patch-id order, transitions watertight by construction rather than by repair, and refinement monotonic in v1 — removal needs a policy for the detail authored there, and picking one silently is worse than not offering it. Reuses the extreme-poly chunk identity; adds no second table |
-| 3 | `fold-the-layers-with-an-operator` **not started (0/27) — now P0** | **Ordered last here and first by the host, and the host wins.** It is the only open row that changes what an application built on this engine can ship: a subtool IS a layer there, so a subtractive item does not reach the workflow and what ships instead is a resolved boolean that stops tracking its operands. Also where the intersect-drag measurement belongs — `BoundedByLayer` poses per item exactly the question a non-union layer fold poses per layer. Last, and the audit sharpened the reason. The inter-layer hard union is not one line in `compile_document`: it is **eight sites**, including `compile_document_part`'s "the union to fold them with is a HARD Add … anything else is a different field" and the brick refill's own multi-layer fold in `clay_c.cpp`. A layer fold that is not a hard Add breaks the multi-layer resume unless each is taught the operator, and the failure is SILENT — a refill folding wrongly returns a field that never existed. The change decides what each site does before writing any of them, and leans toward REFUSING the split on a non-union fold because it is the only option that cannot be quietly wrong |
+| 3 | `fold-the-layers-with-an-operator` **DONE — 43/43, archived** | Landed in stages through v0.86.0–v0.120.0 and finished by the bounds task (3.1): visible SDF layers fold under a per-layer operator with the item vocabulary, the first visible layer initialises, the eight sites that assumed a hard union each decide what they do (the refill's multi-layer split is refused on a composed top layer; `compile_document_except` callers refuse a composed stack), and `tape.bounds` is narrowed per operator at every level through `scene::combine_extent` — a subtract keeps what it cuts, an intersect the overlap — with a smooth group's own ring added and `TapeCheckpoint` carrying the extents a resume needs. Layer-versus-group parity is gated through the C ABI (`test_c_layer_group_parity.cpp`), not only in C++. Measured: a large subtract carving a small sphere meshes 77x fewer cells (8.0x faster at 200 samples) and plans 41x fewer bricks at 0.16 m; an intersect of two offset spheres 4x/1.5x/3.5x; a union-only document is unchanged |
 
 ## Deferred, but recorded
 
@@ -1078,43 +1078,28 @@ needs them, and listed so they are not mistaken for oversights:
   first `double`s in `clay.h`, because a signed volume cancels heavily and
   narrowing it at the boundary would discard the precision the engine chose.
 
-- **A smooth GROUP's reported extent omits its own blend ring.** Found and
-  measured while building `fold-the-layers-with-an-operator`, deliberately not
-  fixed there. A group's `tape.bounds` is the plain union of its children, so a
-  smooth or extended group combine bulges past the box the tape reports — the
-  same defect the layer fold had until that change added
-  `scene::chain_blend_support`, where reverting the one line left 11,618 lattice
-  samples carrying material outside the reported box (missing surface in a mesh,
-  a lost ray hit in a preview). **The reason it could not be fixed in place is
-  the interesting half:** `resume` unwinds group frames from a
-  `TapeCheckpointFrame` that carries op, blend and rounding and NO EXTENT, so a
-  ring added in `compile_group` lands in a full compile and not in a resumed one
-  — implemented, and `test_tape_prefix_reuse.cpp`'s group-append case went 0.2
-  short in x on every dab. Closing it means giving the checkpoint the subtree's
-  extent, which is a schema change to the resumable checkpoint. Pinned meanwhile
-  by a test asserting the layer form's box contains the group form's and exceeds
-  it by exactly one ring.
-  **Latent rather than live for the one host we can check:** ClaySpaceDesktop
-  creates no item groups at all — `clay_layer_add_group` and
-  `clay_layer_add_item_in_group` have no wrapper and no call site anywhere in its
-  workspace, so every item it adds goes to the layer root. The path it WOULD have
-  come down is its own: `place_layer` refills the union of a layer's extent either
-  side of a move, so an extent missing a blend ring leaves surface unmeshed where
-  the old form stood. That is why the layer fold's widening landing first is the
-  right order — the correctness half arrives before the feature that would expose
-  it.
+- ~~**A smooth GROUP's reported extent omits its own blend ring.**~~ **CLOSED**
+  by `fold-the-layers-with-an-operator` task 3.1. It could not be fixed in place
+  because `resume` unwound group frames that carried no extent; each
+  `TapeCheckpointFrame` now carries the outer chain's `outer_bound` and the
+  checkpoint its `chain_bound`, `below_bound` and `reach`, so `compile_group`
+  and a resume add the same ring through `scene::combine_extent`. Dropping the
+  ring again fails seven cases, among them the sampled abutting-slab fixture in
+  `test_fold_bounds.cpp` and the group appends in `test_tape_prefix_reuse.cpp`.
 
-- **Bounds NARROWED per operator, on both the item and the layer path.**
-  `fold-the-layers-with-an-operator` widens a fold's extent by its own support,
-  which is the half that can lose surface. It does NOT narrow: a subtract is
-  still bounded by the union rather than by its left operand, and an intersect by
-  the union rather than by the intersection, exactly as the ITEM path has always
-  been. Narrowing one side alone breaks that change's own parity gate — a
-  subtracting layer and a subtracting item are the same document — and narrowing
-  both changes the meshing region of every document that already carries a
-  subtract or a paint, and has to be threaded through `compile_group`'s rollback
-  and every resumable entry point that copies a prefix's bounds. Its own change,
-  with its own measurement.
+- ~~**Bounds NARROWED per operator, on both the item and the layer path.**~~
+  **DONE** in the same task, on the item, group and layer paths at once, which is
+  what kept the parity gate green: one rule, `scene::combine_extent`, applied at
+  every level. A subtract keeps its left operand's extent, an intersect the
+  overlap (the left operand's when gated or disjoint). Soundness is sampled on
+  the field in five blend profiles. What it buys, on the same tape meshed over
+  the old and the new box at a 0.02 voxel: a 0.5 sphere carved by a 2.0 cutter
+  goes from 9.64 M cells to 125 k (77x), 20,956 bricks at 0.16 m to 512 (41x),
+  42.2 ms to 5.3 ms (8.0x, median of 200); two offset unit spheres intersected,
+  1.6 M to 400 k cells, 4,116 to 1,176 bricks, 14.3 to 9.6 ms; a union-only
+  document is unchanged to the cell. An infinitely repeated item narrows nothing
+  (`scene::item_material_extent`): its bound is one cell, and an intersect
+  bounded by it lost every other copy of the lattice until review sampled it.
 
 - **Deformers on a mesh layer.** `Deformer` has twenty-one entries and every
   one applies to an SDF item; a mesh layer takes a lattice cage and nothing
@@ -1418,7 +1403,7 @@ moves are the ones already shipped.
 
 | | Item | Why here |
 |---|---|---|
-| **P0** | `fold-the-layers-with-an-operator` | **Raised to P0 on 2026-09-06 by the host that consumes this engine, and it is the only open row that changes what they can ship.** A subtool IS a layer there, so a subtractive ITEM does not reach the workflow; what they ship instead is a resolved boolean that stops tracking its operands the moment one moves. Still 0/27 and still gated on its own decision task 0.1. See the host section for where its measurement belongs |
+| ~~P0~~ | `fold-the-layers-with-an-operator` | **DONE, archived (43/43).** Raised to P0 on 2026-09-06 by the host because a subtool IS a layer there; a subtractive LAYER now reaches the workflow as a live boolean, which is the upgrade their resolved boolean was waiting for. The last task narrowed bounds per operator and closed the group-ring gap; see row 3 above for the measurement |
 | ~~**P0**~~ **P1** | `add-mobile-thread-scheduling` | **Demoted 2026-09-06 at the host's request.** The handoff is now and the pool still declares no QoS class, but the P0 was written for the iPad and the desktop host says QoS classes and performance-core sizing buy it nothing. It stays open for the mobile reason and stops blocking a desktop release. **The threading ask that replaced it is `add-mesh-sculptor-off-thread`**: `clay_mesh_sculptor_create` is a weld and an adjacency pass, 160 ms over 296,216 triangles, on the interface thread, with no other route to a mesh layer's surface — see the host section below |
 | ~~**P0**~~ | ~~`add-history-budget`~~ **landed 2026-08-24** | Unbounded allocation in a multi-hour session on an OS that kills for memory. Bytes, a budget, on-demand trim, and a horizon a host can show. **What building it found:** the expensive entries are the inverses of REMOVALS, since the stack stores inverses — deleting an item records a whole node while adding one records an id, so a session of deletes and a session of adds cost very differently and nothing told the host which it was in |
 | ~~**P0**~~ | ~~`add-surface-groups`~~ **landed 2026-08-24** | The largest genuinely-absent workflow primitive. **Landed TWICE, and the first time did not count**: the lattice, `isolate` and the visibility flags shipped with tests and were reachable from no host at all — no C entry point, no pyclay, no serialisation, and the mesher never asked, so hiding a group hid nothing. The second half is what made it a workflow: grow/shrink/border, a `'GRUP'` chunk, undo, both bindings, and geometry that actually disappears. Hiding filters the produced MESH rather than the field, so it is exactly reversible and cannot change what the document evaluates to |
@@ -4348,8 +4333,9 @@ longer generates them is decoration that reads like insurance.
 one-layer equivalent are one document, over union, smooth union, chamfered
 union, subtract, smooth subtract, intersect, smooth intersect, paint, groove,
 shell and incise, in distance, colour, bounds AND safe step. That gate is what
-holds back the bound-NARROWING half of `fold-the-layers-with-an-operator`'s task
-3.1.
+held back the bound-NARROWING half of `fold-the-layers-with-an-operator`'s task
+3.1, until that task narrowed the item, group and layer paths together through
+one rule and the gate stayed green by construction.
 
 **What the equivalence actually says**, because two sessions read it wrongly in
 one day and the comment lives only in the test:
@@ -4363,12 +4349,14 @@ subtracting layer the same as a subtracting item?" has a true answer that is
 narrower than the question, and a fixture built on the wider reading goes red
 for a correct reason.
 
-### A gap that fixture structurally cannot see
+### A gap that fixture structurally could not see — CLOSED
 
 `test_layer_parity.cpp` compiles the `Document` in C++ and never crosses the C
-ABI. A binding that FLATTENED a layer's chain on the way through would build
-exactly the wrong document — the flat-chain-subtracts-twice one — and the
-fixture could not see it, because the flattening happens on a path it does not
-use. The test that would catch it is layer-of-several versus
-group-carrying-the-composition driven through C. Recorded here rather than left
-depending on a host session's queue.
+ABI, so a binding that FLATTENED a layer's chain on the way through was
+invisible to it. `test_c_layer_group_parity.cpp` is that gate: every document
+built and read back through `clay.h` only, eleven compositions against their
+one-group spelling plus an A−B+C / A+C−B order case, in field, colour, safe step
+and extent. Mutation-checked by making `clay_document_set_layer_composition`
+write the op onto each root item: 10 of 11 subcases and the order case fail. The
+one it cannot see is the hard union, because flattening a hard union changes
+nothing.

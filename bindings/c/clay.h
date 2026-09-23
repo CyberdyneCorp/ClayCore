@@ -11897,7 +11897,13 @@ const float* clay_tape_blob(const clay_tape* tape, size_t* out_count);
  * scale draws a wrong frame" and a host recomputing a one-line formula is a
  * host that can get it wrong. Four bytes to remove the question.
  *
- * out_bounds_* is the union of item influence bounds: what to clip against. A
+ * out_bounds_* is where the field can hold material: what to clip against and
+ * what to plan bricks over. It is the union of item bounds EXCEPT where a
+ * combine narrows it — a subtract (item, group or layer)
+ * keeps the extent of what it cuts and an intersect the overlap — and it
+ * includes the blend ring of every smooth join, a group's own included. An
+ * infinitely repeated item narrows nothing, and where one reaches the result
+ * unconfined the box is the one-cell union it has always been. A
  * host that guesses these draws a slow frame instead of a wrong one.
  *
  * out_revision is the document revision the tape was compiled at, so telling

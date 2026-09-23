@@ -19,10 +19,9 @@
 //
 // WHAT IS NOT HERE. The symbolic fold itself and the first-visible-layer rule
 // (test_layer_fold.cpp, tasks 2.x); the four resumable-compile sites and the
-// brick refill's own fold (tasks 4.x). Note in particular that a RESUMED
-// compile does not yet reproduce the ring `fold_layer_bounds` adds, because
-// TapeCheckpoint carries no extent -- that is task 4.4 and there is nothing
-// here that would catch it.
+// brick refill's own fold (tasks 4.x). The same parity driven through the C ABI
+// is test_c_layer_group_parity.cpp, and the soundness of the NARROWED bounds --
+// sampled on the field, across every profile -- is test_fold_bounds.cpp.
 
 #include <doctest/doctest.h>
 
@@ -266,41 +265,28 @@ TEST_CASE("layer parity: a composed layer of several items is one group of them"
         CHECK(differing(sample(two, pts), unioned) > 0);
     }
 
-    SUBCASE("a fold WITH support agrees in field and safe step, and is wider by its own ring") {
-        // The one place the two forms part company, and it is the GROUP path's
-        // gap rather than the layer fold's: a group adds no ring for its own
-        // combine's support, so its box is the plain union of its children
-        // while the layer fold's is that union dilated. See fold_layer_bounds
-        // in tape_build.cpp for why closing it is the resumable checkpoint's
-        // problem and not this change's. The layer's box CONTAINS the group's,
-        // which is the safe direction, and this pins that the difference is
-        // exactly one ring and not something else.
+    SUBCASE("a fold WITH support agrees in field, safe step AND bounds") {
+        // Until task 3.1 this was the one place the two forms parted company:
+        // a group added no ring for its own combine's support, so its box was
+        // the plain union of its children while the layer fold's was that
+        // union dilated. Each TapeCheckpointFrame now carries the outer chain's
+        // extent, so a resume can reproduce the ring, and compile_group adds it
+        // through the same combine_extent the layer fold uses. The two boxes
+        // are the same box.
         LayerComposition comp;
         SUBCASE("smooth union") { comp = composed(Op::Add, BlendProfile::Quadratic, 0.3f); }
+        SUBCASE("smooth subtract") { comp = composed(Op::Subtract, BlendProfile::Quadratic, 0.3f); }
+        SUBCASE("smooth intersect") { comp = composed(Op::Intersect, BlendProfile::Cubic, 0.2f); }
         SUBCASE("groove") { comp = composed(Op::Groove, BlendProfile::Hard, 0.15f, 0.1f); }
         SUBCASE("shell") { comp = composed(Op::Shell, BlendProfile::Hard, 0.12f); }
         SUBCASE("incise") { comp = composed(Op::Incise, BlendProfile::Hard, 0.2f, 0.25f); }
 
         const Tape two = compile_document(several_items(true, comp));
         const Tape one = compile_document(several_items(false, comp));
+        CHECK(layer_blend_support(several_items(true, comp).layers.back()) > 0.0f);
         same_field(two, one, pts);
         same_info(two, one);
-
-        const float ring = layer_blend_support(several_items(true, comp).layers.back());
-        CHECK(ring > 0.0f);
-        const float slack = ring + 1e-5f;
-        CHECK(one.bounds.min.x - two.bounds.min.x >= 0.0f);
-        CHECK(one.bounds.min.x - two.bounds.min.x <= slack);
-        CHECK(one.bounds.min.y - two.bounds.min.y >= 0.0f);
-        CHECK(one.bounds.min.y - two.bounds.min.y <= slack);
-        CHECK(one.bounds.min.z - two.bounds.min.z >= 0.0f);
-        CHECK(one.bounds.min.z - two.bounds.min.z <= slack);
-        CHECK(two.bounds.max.x - one.bounds.max.x >= 0.0f);
-        CHECK(two.bounds.max.x - one.bounds.max.x <= slack);
-        CHECK(two.bounds.max.y - one.bounds.max.y >= 0.0f);
-        CHECK(two.bounds.max.y - one.bounds.max.y <= slack);
-        CHECK(two.bounds.max.z - one.bounds.max.z >= 0.0f);
-        CHECK(two.bounds.max.z - one.bounds.max.z <= slack);
+        same_bounds(two, one);
     }
 }
 
@@ -362,13 +348,25 @@ TEST_CASE("layer bounds: a smooth fold's bulge is inside the box, and only becau
     CHECK(blended.bounds.max.y == doctest::Approx(0.1f + ring));
 }
 
-TEST_CASE("layer bounds: a hard fold adds no extent, whatever the operator") {
+TEST_CASE("layer bounds: a hard fold adds no extent, and subtract and intersect narrow it") {
+    // A hard fold's ring is zero, so a union and a paint keep the plain union
+    // of the two layers -- the box every document had before a layer could
+    // carry a combine. A subtract keeps what it cuts and an intersect the
+    // overlap (combine_extent): base is the unit sphere at the origin, the
+    // cutter a 0.6 sphere at (0.7, 0.1, 0), whose box reaches x = 1.3.
     const Tape add = compile_document(one_item_each(true, composed(Op::Add)));
-    for (Op op : {Op::Subtract, Op::Intersect, Op::Paint}) {
-        const Tape t = compile_document(one_item_each(true, composed(op)));
-        CAPTURE(static_cast<int>(op));
-        same_bounds(t, add);
-    }
+    CHECK(add.bounds.max.x == doctest::Approx(1.3f));
+    CHECK(add.bounds.min.x == doctest::Approx(-1.0f));
+    same_bounds(compile_document(one_item_each(true, composed(Op::Paint))), add);
+
+    const Tape sub = compile_document(one_item_each(true, composed(Op::Subtract)));
+    CHECK(sub.bounds.max.x == doctest::Approx(1.0f));
+    CHECK(sub.bounds.min.x == doctest::Approx(-1.0f));
+
+    const Tape isect = compile_document(one_item_each(true, composed(Op::Intersect)));
+    CHECK(isect.bounds.min.x == doctest::Approx(0.1f));
+    CHECK(isect.bounds.max.x == doctest::Approx(1.0f));
+    CHECK(isect.bounds.max.y == doctest::Approx(0.7f));
 }
 
 TEST_CASE("layer bounds: the ring is the combine's own support, from one expression") {

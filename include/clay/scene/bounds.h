@@ -447,6 +447,54 @@ math::Aabb node_influence_bound(const SdfContent& content, NodeId id, const Laye
 // item's own rounding.
 float chain_blend_support(Op op, const Blend& blend, float round_world);
 
+// WHERE A COMBINE'S RESULT CAN HOLD MATERIAL, from where its two operands can.
+// The one rule for `tape.bounds`, applied at every level a combine happens --
+// an item onto its chain, a group's chain onto the chain outside it, a layer
+// onto the layers beneath it, and a resume unwinding the same stack -- so a
+// layer boolean and the item boolean it is spelled as cannot answer
+// differently (design.md 3: "the item-level bound logic is the single source").
+//
+// `left` is the accumulated operand, `right` the one being combined in, and
+// `right_ring` how far the combine itself reaches past `right`: zero for an
+// item, whose geometry bound already carries its own support, and
+// `group_blend_support` / `layer_blend_support` for a chain.
+//
+//   Subtract   -> left. Every profile's smooth minimum is <= the hard one, so
+//                 -smin(-a, b) >= max(a, -b) >= a: a point outside the left
+//                 operand's material is outside the result's. A mask gate
+//                 mixes that result with `a` itself, which is >= a too.
+//   Intersect  -> left AND right, by the same inequality twice -- with the
+//                 right operand dilated by its ring all the same. The kernel
+//                 does not need it (-smin(-a, -b) >= max(a, b)); PARITY does:
+//                 an item's geometry bound carries its own combine's support
+//                 whatever the op, so a layer or group that did not dilate
+//                 would report a different box for the same document. Gated, the
+//                 protected region keeps `a` whatever `b` is, so it is left
+//                 alone. Disjoint boxes leave no material at all; the result
+//                 is then `left` rather than an empty box, because an empty
+//                 box on a tape that is not empty reads as "unbounded" to every
+//                 consumer, and meshing refuses one outright.
+//   anything else -> left united with right dilated by `right_ring`: a union
+//                 and every extended mode can put material outside both boxes
+//                 by up to that ring, and paint, relief and the morphs are left
+//                 as wide as they always were.
+//
+// Wider than necessary costs a larger march; narrower than the surface costs
+// the surface, silently -- so the two narrowing rows are only the ones an
+// inequality in the kernel proves, and test_fold_bounds.cpp samples them.
+math::Aabb combine_extent(Op op, const math::Aabb& left, const math::Aabb& right,
+                          float right_ring, bool gated);
+
+// WHAT `combine_extent` MAY TAKE AS WHERE AN ITEM HOLDS MATERIAL: its geometry
+// bound, except for an INFINITE GRID, whose geometry bound is one cell -- the
+// box `tape.bounds` has always marched for it -- while its copies fill space.
+// That cell is harmless as a union operand and wrong as a narrowing one: an
+// intersect bounded by it keeps one copy of a lattice the field holds
+// everywhere inside the left operand. So it is infinite here, which an
+// intersect ignores and a union or subtract carries up to the entry point, and
+// there `tape.bounds` falls back to the plain union it always reported.
+math::Aabb item_material_extent(const Node& item, const math::Aabb& geometry);
+
 // How far a GROUP's combine spreads a change in one of its operands. Shared by
 // node_influence_bound, which applies it to the union of the children, and
 // node_reach_bound, which applies it to one child — two spellings of the same
