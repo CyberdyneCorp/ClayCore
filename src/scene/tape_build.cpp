@@ -526,18 +526,13 @@ struct Compiler {
     // WHERE THE RUNNING VALUE CAN HOLD MATERIAL, folded combine by combine
     // through `combine_extent`: the chain being compiled (`chain_bound_`,
     // saved and restored around every group) and the layers already folded
-    // (`doc_bound_`). What an entry point finally reports as `tape.bounds`.
+    // (`doc_bound_`). What an entry point finally reports as `tape.bounds`,
+    // AS IS: infinite where an infinite grid reaches the result unconfined,
+    // because its copies do fill space. It used to fall back to the plain
+    // union there -- the grid's one cell -- and every other copy sat outside
+    // the box meshing marches and a host plans bricks over (#640).
     math::Aabb chain_bound_{};
     math::Aabb doc_bound_{};
-
-    // What an entry point reports for a material extent: the extent itself,
-    // unless it is infinite -- an infinite grid that no intersect confined
-    // (item_material_extent) -- where it is the plain union, the one-cell box
-    // `tape.bounds` has always carried for such a document, so narrowing never
-    // turns a document the mesher accepted into an "unbounded scene".
-    math::Aabb reported_bound(const math::Aabb& material) const {
-        return material.is_infinite() ? reach_ : material;
-    }
 
     // The gated item's own reach, set immediately before fold_info by the
     // caller that already computed it, so the bound is not recomputed and
@@ -1540,7 +1535,7 @@ struct Compiler {
             have_acc = compile_and_fold_layer(layer, first, have_acc);
             first = FirstVisibleLayer{false};
         }
-        tape.bounds = reported_bound(doc_bound_);
+        tape.bounds = doc_bound_;
     }
 
     void run(const Document& doc, const CullRegion* cull_region) {
@@ -1554,7 +1549,7 @@ struct Compiler {
             have_acc = compile_and_fold_layer(layer, first, have_acc);
             first = FirstVisibleLayer{false};
         }
-        tape.bounds = reported_bound(doc_bound_);
+        tape.bounds = doc_bound_;
     }
 
     // Carry on from a checkpoint: the chain of `layer` continues with
@@ -1840,7 +1835,7 @@ bool compile_document_append(const Tape& prefix, const TapeCheckpoint& cp, const
     // the checkpoint carries that too.
     c.reach_ = cp.reach;
     c.resume(cp, *layer, appended);
-    c.tape.bounds = c.reported_bound(c.doc_bound_);
+    c.tape.bounds = c.doc_bound_;
     c.tape.compile_id = next_compile_id();  // different bytes, so a different identity
     // The lineage, set HERE and nowhere else: the checkpoint is the point up
     // to which this tape and `prefix` agree, because the bytes below it were
@@ -1922,7 +1917,7 @@ bool compile_layer_prefix(const Document& doc, std::size_t count, Tape* out,
     c.begin_cull(cull, pad);
     std::vector<NodeId> prefix(roots.begin(), roots.begin() + static_cast<std::ptrdiff_t>(count));
     c.compile_list(prefix, *layer->sdf, *layer, false);
-    c.tape.bounds = c.reported_bound(c.chain_bound_);
+    c.tape.bounds = c.chain_bound_;
     c.tape.compile_id = next_compile_id();
     *out = std::move(c.tape);
     return true;
@@ -1971,7 +1966,7 @@ Tape compile_layer(const Layer& layer, const CullRegion* cull) {
     bool usable = layer.visible && layer.kind == LayerKind::Sdf && layer.sdf;
     c.begin_cull(cull, cull && usable ? cull_pad(*layer.sdf, layer) : 0.0f);
     if (usable) c.compile_list(layer.sdf->roots, *layer.sdf, layer, false);
-    c.tape.bounds = c.reported_bound(c.chain_bound_);
+    c.tape.bounds = c.chain_bound_;
     c.tape.compile_id = next_compile_id();
     return std::move(c.tape);
 }
@@ -1997,7 +1992,9 @@ Tape compile_item(const Layer& layer, const Node& item) {
     // promises, and test_pick.cpp holds it over the gnarly corpus.
     const math::Aabb geometry = item_geometry_bound(alone, layer);
     c.reach_.expand(geometry);
-    c.tape.bounds.expand(geometry);
+    // Where the item holds material, as compile_list takes it: an infinite
+    // grid's copies fill space, so its tape is unbounded like its layer's.
+    c.tape.bounds.expand(item_material_extent(alone, geometry));
     c.emit_item(alone, layer);
     c.gate_reach_ = geometry;
     c.fold_info(alone, Op::Add, false, alone.rounding * placed_distance_scale(layer, alone));

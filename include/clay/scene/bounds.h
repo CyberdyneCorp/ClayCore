@@ -491,8 +491,9 @@ math::Aabb combine_extent(Op op, const math::Aabb& left, const math::Aabb& right
 // That cell is harmless as a union operand and wrong as a narrowing one: an
 // intersect bounded by it keeps one copy of a lattice the field holds
 // everywhere inside the left operand. So it is infinite here, which an
-// intersect ignores and a union or subtract carries up to the entry point, and
-// there `tape.bounds` falls back to the plain union it always reported.
+// intersect ignores and a union or subtract carries up to the entry point,
+// where `tape.bounds` reports it infinite: the one cell would leave every
+// other copy outside the box (#640).
 math::Aabb item_material_extent(const Node& item, const math::Aabb& geometry);
 
 // How far a GROUP's combine spreads a change in one of its operands. Shared by

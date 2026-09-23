@@ -1974,9 +1974,15 @@ own combine SHALL contribute that support as a layer fold's does.
 An operand whose geometry bound does not contain its material — an INFINITE
 GRID, whose bound is one cell while its copies fill space — SHALL NOT narrow
 anything: it SHALL be taken as unbounded, so an intersect with it keeps the left
-operand's extent, and where an unbounded extent reaches the result the reported
-extent SHALL be the plain union of item bounds the engine has always reported
-for such a document rather than an infinite box the mesher refuses.
+operand's extent. Where an unbounded extent reaches the result — the lattice on
+its own, unioned with anything, or as the left operand of a subtract — the
+reported extent SHALL be INFINITE, the answer an unbounded primitive already
+gives, and SHALL NOT be clamped to any finite box: the one cell the grid's
+geometry bound covers leaves every other copy outside, which is exactly the
+too-small bound this requirement forbids. A caller that needs a finite region
+for such a document — meshing, sampling, rasterizing, a bake — SHALL be refused
+and told to pass one, rather than handed one cell of it. A document with no
+infinite grid SHALL report exactly the extent it did before.
 
 Exactness and the Lipschitz bound SHALL fold exactly as the item-level combine
 folds them, so that a document expressing a shape as two layers and a document
@@ -2079,6 +2085,10 @@ unioning, and SHALL render exactly as it did.
 #### Scenario: An infinite lattice does not narrow what it intersects
 - **WHEN** a box is intersected with an infinitely repeated sphere, as an item, inside an intersecting group or as an intersecting layer
 - **THEN** the reported extent is the box's, not the one repeated cell; no sampled point with material lies outside it; and a compile resumed from a checkpoint reports the same extent
+
+#### Scenario: An unconfined lattice reports an unbounded extent
+- **WHEN** an infinitely repeated item reaches the result unconfined — on its own, unioned with a sphere, or with a sphere subtracted from it under any blend profile, with rounding, inside a group, as a subtracting layer, through every compile entry point, or resumed from a checkpoint
+- **THEN** the reported extent is infinite, no sampled point with material lies outside it, and a resumed compile reports the same extent as the full compile; while a finite shape minus the lattice, or the lattice intersected with a finite shape, still reports the finite shape's extent
 
 #### Scenario: A smooth group's own blend is inside the box
 - **WHEN** a group with a smooth combine joins material that abuts the chain outside it
