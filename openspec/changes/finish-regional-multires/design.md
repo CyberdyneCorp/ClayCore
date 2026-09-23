@@ -234,7 +234,9 @@ The C++ half of that landed and is gated: a refusal has a name
 and the header says what the call does not promise. The descriptor rules in the
 paragraph above are owed by the C entry point of task 6.1, which is not built —
 so nothing in this ABI answers a mixed export yet, rather than answering it
-badly.
+badly. 6.1 and the C half of 5.7 were RE-SCOPED to the change
+`expose-the-mixed-depth-export` when this one closed, because no host exports a
+hierarchy; see task 6.1.
 
 ### What a mixed export costs a host that is short of memory
 

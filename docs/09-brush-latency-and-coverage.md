@@ -731,11 +731,31 @@ borrows the corner rather than meeting it.
   `cache_generation` moves, and it does NOT promise residency — it opens with
   `evaluate_all_up_to`, so a level a trim released comes back to answer it.
 
-**What is not done yet.** The mixed export has no C entry point: nothing in
-`clay.h` reaches it, so a host on the C ABI or on pyclay still assembles per
-patch and still meets the open-edge counts above. And the FRAME at a depth
-boundary is a separate half — this section prices the stamp that crosses one,
-not the surface frame a coarse vertex is given beside a finer region.
+**What is done and what is not, and who each half is for.** The two halves of
+regional multires do not have the same audience, and the record should not
+pretend they do.
+
+- **The storage half has users today.** Any host that refines a region and
+  sculpts it reads the frames, the neighbourhood and the brushes. At a depth
+  boundary all of them now take the COMPLETE neighbourhood, the one a uniformly
+  refined hierarchy would give the vertex: the brush's normal, relax, the kernel
+  Smooth and boundary automasking (`finish-regional-multires` sections 2 and 3),
+  the transported frame and the display normal (commit f40ee3fe, gated by the
+  "regional boundary:" cases in `test_multires_regional.cpp`), and the two
+  layered smooths, `smooth_detail` and `form_shift` (task 3.7). Before 3.7 those
+  two averaged a rim vertex over its inward half only: on the 6x6 cage with its
+  middle 2x2 at level 3, one dab over the region left all 64 rim vertices
+  somewhere other than the dense hierarchy leaves them, worst 0.0035
+  (detail-only) and 0.0196 (preserve-detail), and 0 afterwards.
+- **The export half has no host waiting.** `mesh_at_level`,
+  `clay_multires_copy_level_mesh` and the mixed export above are called from
+  tests, bindings and examples and from no host loop, and the one host we can
+  check exports no hierarchies at all. So the mixed export is finished in C++
+  and gated there, and its C entry point is NOT built: nothing in `clay.h`
+  reaches it, and a host on the C ABI or on pyclay that assembles per patch
+  still meets the open-edge counts above. That work — the descriptor, the
+  caller-owned buffers, pyclay and Swift — is carried by the
+  `expose-the-mixed-depth-export` change and waits for a host that asks.
 
 ### The extreme-poly runtime, measured (add-extreme-poly-runtime)
 

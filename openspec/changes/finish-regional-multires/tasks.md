@@ -153,11 +153,16 @@
       `MeshWorkItemTopology::ring_slots` and `build_neighbors` rather than a
       special case inside the kernel — there is no branch to fix, the neighbour
       simply has no identity that can name another level
-- [ ] 3.7 SMOOTH IS TWO IMPLEMENTATIONS, and section 3.4 of the predecessor
+- [x] 3.7 SMOOTH IS TWO IMPLEMENTATIONS, and section 3.4 of the predecessor
       named it once. Besides the kernel path, `smooth_detail` averages
       `LocalDetail` coefficients raw and `form_shift` (under `smooth_form`)
       averages `S(n)`. Averaging coefficients across a transition is doubly
-      wrong while the two sides' frames differ, so 3.7 lands AFTER section 1
+      wrong while the two sides' frames differ, so 3.7 lands AFTER section 1.
+      DONE: both add the rim's outside ring through
+      `CrossLevelNeighborhood::outside_ring`, the walk the kernel CSR already
+      took, now shared. GATED by the two "regional smooth:" cases in
+      `test_multires_regional.cpp`: 64 of 64 rim vertices disagree with the
+      dense hierarchy on main and 0 after. See the record at the end
 - [x] 3.8 Leave `refit_bvh` alone. It walks only the triangles this level has,
       which is correct at a transition; listed so nobody "fixes" it
 - [x] 3.9 `euclidean_region` has no ring to hook into — it scans every class of
@@ -377,7 +382,9 @@
       per-face group, so the whole-surface export states the commitment rather
       than transporting it — which is the whole commitment this change makes to
       the polygroup proposal
-- [ ] 5.7 The new entry point does NOT repeat `build_block`'s shape, which
+- [x] 5.7 RE-SCOPED, THE C HALF NOT DONE HERE: carried as tasks 1.2-1.4 of
+      `expose-the-mixed-depth-export`, for 6.1's reason. The new entry point
+      does NOT repeat `build_block`'s shape, which
       returns true with an empty block for a non-resident patch. A descriptor
       starting with `uint32_t struct_size`, grown by appending, a new field's
       zero meaning today's behaviour, caller-owned buffers, `BUFFER_TOO_SMALL`
@@ -480,10 +487,16 @@
 
 ## 6. Surface, docs and versions
 
-- [ ] 6.1 C ABI, pyclay and a mirrored entry point for the export, following
-      `clay_multires_block_info` and `clay_multires_copy_block` in shape. The
-      cross-level helper of section 2 is internal and gets no C entry point
-      unless a host asks for one
+- [x] 6.1 RE-SCOPED, NOT DONE HERE. C ABI, pyclay and a mirrored entry point
+      for the export, following `clay_multires_block_info` and
+      `clay_multires_copy_block` in shape. The cross-level helper of section 2
+      is internal and gets no C entry point unless a host asks for one. MOVED
+      to `expose-the-mixed-depth-export` (tasks 1.1-2.4) rather than built,
+      for the reason 6.5 records: no host exports a hierarchy, and
+      `clay_multires_copy_level_mesh` itself has no caller outside tests,
+      bindings and examples. ABI surface nobody calls is maintenance with no
+      user; the C++ export is finished and gated, and the follow-up change is
+      where the entry point waits for the host that asks
 - [x] 6.2 VERSION LINES move together, and they moved for a reason this task did
       not anticipate: not the new entry point of 6.1, which is still unbuilt,
       but a field of an EXISTING one that means something new.
@@ -505,16 +518,23 @@
       in `pyproject.toml`; `release_check.py` reads
       `cmake=0.89.0 abi=0.89.0 wheel=0.89.0`. 6.1 adds an entry point at this
       same minor and does not move it again
-- [ ] 6.3 `docs/09-brush-latency-and-coverage.md` states the export gap under
-      "What is not done yet" and is correct today; update it to what landed
-- [ ] 6.4 `examples/74_regional_multires.py` repeats the gap in the artist's
+- [x] 6.3 `docs/09-brush-latency-and-coverage.md` states the export gap under
+      "What is not done yet" and is correct today; update it to what landed.
+      DONE: the paragraph is now "What is done and what is not, and who each
+      half is for" — the frame (f40ee3fe) and the layered smooths (3.7) are
+      complete at a boundary, and the export has no C entry point, naming the
+      change that carries it
+- [x] 6.4 `examples/74_regional_multires.py` repeats the gap in the artist's
       vocabulary and calls the polygons "the next piece of this change". Update
-      it, and say plainly there that the export half had no host waiting
-- [ ] 6.5 Say in the docs who each half is for. `mesh_at_level` and
+      it, and say plainly there that the export half had no host waiting.
+      DONE: the engine builds the polygons, pyclay does not reach them, and the
+      export half had no host waiting while the storage half is finished
+- [x] 6.5 Say in the docs who each half is for. `mesh_at_level` and
       `clay_multires_copy_level_mesh` are called only from tests, bindings and
       examples — no host loop — and the one host we can check does not export
       hierarchies at all. The frame and neighbourhood half is storage and does
-      have users today
+      have users today. DONE in
+      `docs/09-brush-latency-and-coverage.md`, beside the export it describes
 - [x] 6.6 `python3 tools/check_task_symbols.py` and the OpenSpec strict
       validation both pass on this change before it is opened — and so does
       every other gate CI runs against it, listed in the block below. 6.1 will
@@ -986,5 +1006,54 @@
   this record, so no complexity figure moves.
 - STILL OPEN, and not section 1's: 3.7 (smoothing coefficients and `S(n)` over a
   short ring in `smooth_detail` / `form_shift`), 5.7 and 6.1 (the C export entry
-  point), 6.3-6.5 (docs and the example).
+  point), 6.3-6.5 (docs and the example). All closed or re-scoped by the next
+  record.
 
+### What 3.7 found, and how the change closed
+
+- THE DEFECT WAS LIVE ON MAIN, unlike section 1's. At 9616286c
+  `smooth_detail` and `form_shift` read the ring off `level_adjacency` alone.
+  Measured before touching the code, with two cases appended to
+  `test_multires_regional.cpp` and the source as on main: the 6x6 cage with the
+  middle 2x2 at level 3, a coefficient field that differs vertex to vertex on
+  every stored level-3 vertex of both hierarchies (zero on the dense vertices
+  the regional level does not store, which is what the regional surface holds
+  there), and one Euclidean dab of radius 0.9 over the region. Each smooth
+  mode, on the regional and on the dense hierarchy, compared at the 289 shared
+  vertices:
+
+  | mode | rim vertices differing, before | worst, before | after | worst, after |
+  |---|---:|---:|---:|---:|
+  | detail-only (`smooth_detail`) | 64 of 64 | 0.00347 | 0 | 0 |
+  | preserve-detail (`form_shift`) | 64 of 64 | 0.0196 | 0 | 4.3e-08 |
+
+  0 disagreements off the rim in either, before or after: the defect is the
+  short ring and nothing else. Positions agree the same way (worst 5.4e-08
+  after). PRECONDITIONS ASSERTED, not assumed: the rim is 64 vertices whose own
+  face ring is shorter than the dense twin's, all 64 lie inside the dab, and
+  the stroke wrote at least 63 of them — 64 before the fix, 63 after, because
+  with the complete ring one rim vertex comes out of preserve-detail unchanged,
+  and so does its dense twin.
+- THE FIX REUSES THE RING THAT FIXED THE FRAMES rather than inventing a second.
+  The walk `MeshSculptor::append_outside_neighbors` did inline — the outside ids
+  a weld class's members reach through the derived faces, each once — moved onto
+  `CrossLevelNeighborhood::outside_ring`, and the kernel CSR and both layered
+  smooths now call it. What each adds per outside neighbour is the only
+  difference between them: nothing to the detail sum (a vertex the level does
+  not store has no coefficient, so it holds zero) and one to the count, and
+  `outside_positions` to the form sum — the pure subdivision of the level below,
+  the same `S(n)` `subdivided_at` holds for the level's own vertices.
+- PROVED BY REVERT, twice, each revert compiling. Dropping the outside
+  contribution from both averages reproduces main's numbers exactly — 64 of 64,
+  worst 0.00347 and 0.0196, 4 failed assertions. TRUNCATING the shared ring to
+  one outside neighbour per member fails 32 of 64 in both new cases, and across
+  the whole suite 5 cases and 7 assertions: the two new ones and three on the
+  kernel path, "a WELDED class counts an outside neighbour once" and "relax and
+  a normal-steered verb agree with the uniform hierarchy at a seam" among them —
+  which is the proof that the three readers now share one walk.
+- 5.7 AND 6.1 ARE RE-SCOPED, NOT DONE. The C entry point for the export moved to
+  `expose-the-mixed-depth-export`, a change that waits for a host rather than
+  being scheduled. See 6.1 for why. The C++ half of 5.7 was already done and
+  gated.
+- WHAT THIS CHANGE LEAVES FOR NOBODY: the change reached 0 open boxes and is
+  archived by the PR that carries this record.
