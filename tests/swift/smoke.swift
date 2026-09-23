@@ -545,6 +545,20 @@ check(clay_voxel_sculpt_pinch(grid, &cell, &brush) == CLAY_OK, "sculpt pinch")
 check(clay_voxel_occupied_count(grid, &occupied) == CLAY_OK && occupied != stamped,
       "sculpting changed the occupied set (\(stamped) -> \(occupied))")
 
+// One undo across representations reaches a voxel edit, and a sculpt-layer
+// dial is its own step: undoing it restores the slider, not the pass under it
+// (unify-the-undo-history 5.3).
+var sculptLayer = 0
+check(clay_voxel_begin_sculpt_layer(grid, "pass", &sculptLayer) == CLAY_OK, "began a sculpt layer")
+check(clay_voxel_sculpt_inflate(grid, &cell, &brush, 1) == CLAY_OK, "inflated inside it")
+check(clay_voxel_end_sculpt_layer(grid) == CLAY_OK, "ended the sculpt layer")
+check(clay_voxel_set_sculpt_layer_strength(grid, sculptLayer, 0.4) == CLAY_OK, "dialled it to 0.4")
+var dialUndone: Int32 = 0
+check(clay_document_undo(doc, &dialUndone) == CLAY_OK && dialUndone == 1, "undid the dial")
+var dialStrength: Float = 0
+check(clay_voxel_sculpt_layer_strength(grid, sculptLayer, &dialStrength) == CLAY_OK
+        && dialStrength == 1.0, "undo restored the dial, not the pass (\(dialStrength))")
+
 check(clay_voxel_grid_destroy(grid) != CLAY_OK, "destroying a borrowed layer handle is refused")
 
 // -- the remaining verbs, and repair -----------------------------------------
