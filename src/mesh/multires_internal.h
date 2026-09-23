@@ -16,6 +16,7 @@
 // are hot paths measured in microseconds, and one file holding both is a file
 // nobody reads twice.
 
+#include <cstdint>
 #include <memory>
 #include <vector>
 
@@ -228,6 +229,10 @@ struct AttrLevel {
     std::size_t bytes() const;
 };
 
+// A fresh value from a process-wide counter, so no two structures -- of one
+// surface over time, or of two surfaces a handle was moved between -- share one.
+std::uint64_t next_structure_revision();
+
 struct MultiresSurface::State {
     MultiresOptions options;
 
@@ -284,6 +289,8 @@ struct MultiresSurface::State {
     std::uint64_t detail_revision = 1;
     std::uint64_t evaluated_revision = 1;
     std::uint64_t cache_generation = 1;
+    // Which LEVEL NUMBERING this state has. See `structure_revision()`.
+    std::uint64_t structure_revision = next_structure_revision();
     MultiresEvalStats stats;
 
     // Base patches touched since the host last drained them.

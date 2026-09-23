@@ -9536,12 +9536,12 @@ NB_MODULE(pyclay, m) {
                nb::handle mask, bool geodesic, int smooth_iterations, nb::handle alpha,
                nb::handle alpha_direction, nb::handle alpha_tangent, float alpha_extent,
                nb::handle seed_class, nb::handle seed_revision, nb::handle automask,
-               float stamp_azimuth) {
+               float stamp_azimuth, float layer_height) {
                 mesh::MeshBrush chosen = mesh::MeshBrush::Draw;
                 mesh::MeshBrushSettings settings = mesh_brush_settings(
                     verb, center, radius, strength, falloff, direction, nb::none(),
                     nb::cast(geodesic), seed_class, seed_revision, "two_sided", nb::none(),
-                    nb::none(), 0.2f, smooth_iterations, 0.0f, alpha, alpha_direction,
+                    nb::none(), 0.2f, smooth_iterations, layer_height, alpha, alpha_direction,
                     alpha_tangent, alpha_extent, nb::none(), automask, stamp_azimuth, &chosen);
                 field::MaskGate gate = mask_gate_of(mask);
                 nb::gil_scoped_release release;
@@ -9553,7 +9553,7 @@ NB_MODULE(pyclay, m) {
             "alpha_direction"_a = nb::none(), "alpha_tangent"_a = nb::none(),
             "alpha_extent"_a = 0.0f, "seed_class"_a = nb::none(),
             "seed_revision"_a = nb::none(), "automask"_a = nb::none(),
-            "stamp_azimuth"_a = 0.0f,
+            "stamp_azimuth"_a = 0.0f, "layer_height"_a = 0.05f,
             "One stamp at the surface's current sculpt level. Returns how many\n"
             "weld classes moved, SUMMED OVER EVERY LEVEL THE STAMP WROTE: on a\n"
             "regionally refined hierarchy the patches beside the refined region\n"
@@ -9572,7 +9572,10 @@ NB_MODULE(pyclay, m) {
             "the walk finds no class within the radius and the stamp reports 0\n"
             "moved, which is indistinguishable from a fully masked stroke. With\n"
             "the token the stale seed is rejected and the walk finds its own\n"
-            "way, which is slower for one stamp and correct.")
+            "way, which is slower for one stamp and correct.\n\n"
+            "`layer_height` is the `layer` verb's ceiling, measured from where\n"
+            "the STROKE found each vertex -- the same default `MeshSculptor.stamp`\n"
+            "and `apply_stroke` take.")
         .def("begin_stroke", [](PyMultiresSculptor& s) { s.begin_stroke(); },
              "Start a gesture. Clears the record the Layer verb measures its\n"
              "ceiling against.")

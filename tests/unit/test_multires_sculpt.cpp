@@ -14,12 +14,14 @@
 #include <cmath>
 #include <cstdint>
 #include <map>
+#include <string>
 #include <vector>
 
 #include "clay/brush/stroke.h"
 #include "clay/mesh/automask.h"
 #include "clay/mesh/multires_sculpt.h"
 #include "clay/mesh/sculpt.h"
+#include "clay/mesh/surface_view.h"
 
 using namespace clay;
 using namespace clay::kernel;
@@ -1772,6 +1774,253 @@ TEST_CASE("multires: a cache drop mid-stroke does not lift the coarse side's lay
     // THE GATE. The drop is invisible to the gesture, in bytes.
     CHECK(same_bytes(kept, dropped));
     CHECK(worst_travel(pristine, dropped) <= 0.08f);
+}
+
+namespace {
+
+// What a two-dab `Layer` stroke across the rim left behind, and the evidence
+// that the release between its dabs actually made the sculptor rebind.
+struct AcrossTrim {
+    std::vector<cfloat3> coarse;  // level 2, the side the stroke crossed onto
+    bool generation_moved = false;
+    bool rebound = false;
+    std::vector<std::uint32_t> second_dab_levels;
+};
+
+// `layer_stroke_across_drop`, with the release a HOST can actually ask for --
+// `trim_surface` at a stated pressure, which is what `clay_multires_trim` and
+// pyclay's `MultiresSurface.trim` call -- and optionally an UNREVISIONED seed
+// picked off the sculpt level before the first dab.
+// The rim-anchored Layer dab both regional ceiling cases stamp.
+MeshBrushSettings rim_layer_settings(MultiresSurface& s) {
+    MeshBrushSettings settings;
+    const std::vector<cfloat3>& p = s.positions_at(3);
+    settings.center = p[nearest_vertex(p, cf3(-1.0f / 3.0f, 0.0f, 0.0f))];
+    settings.radius = 0.50f;  // anchored on the rim and reaching well past it
+    settings.strength = 1.0f;
+    settings.layer_height = 0.08f;
+    return settings;
+}
+
+// An UNREVISIONED seed off the bound level: the class only, trusted verbatim.
+void seed_unrevisioned(MultiresSculptor& sculptor, MeshBrushSettings* settings) {
+    settings->seed_class = sculptor.level_sculptor()->nearest_class(settings->center);
+    REQUIRE(settings->seed_class != mesh::kNoClass);
+    REQUIRE(settings->seed_revision == mesh::kNoSeedRevision);
+}
+
+void layer_dab(MultiresSculptor& sculptor, const MeshBrushSettings& settings) {
+    REQUIRE(sculptor.stamp(MeshBrush::Layer, settings) > 0);
+}
+
+AcrossTrim layer_stroke_across_trim(const Mesh& cage, bool trim, memory::Pressure pressure,
+                                    bool seeded) {
+    MultiresSurface s = build_regional(cage);
+    REQUIRE(s.set_sculpt_level(3));
+    MeshBrushSettings settings = rim_layer_settings(s);
+
+    MultiresSculptor sculptor(s);
+    sculptor.begin_stroke();
+    if (seeded) seed_unrevisioned(sculptor, &settings);
+    layer_dab(sculptor, settings);
+
+    AcrossTrim out;
+    const std::uint64_t generation = s.cache_generation();
+    const std::uint64_t token = sculptor.seed_revision();
+    if (trim) mesh::trim_surface(s, pressure, nullptr);
+    out.generation_moved = s.cache_generation() != generation;
+    layer_dab(sculptor, settings);
+    out.second_dab_levels = sculptor.last_write_levels();
+    // Read AFTER the second dab, so the probe cannot be what rebinds: a bound
+    // level sculptor mints a new token at construction and only there.
+    out.rebound = sculptor.seed_revision() != token;
+    out.coarse = s.positions_at(2);
+    return out;
+}
+
+// The untrimmed stroke: no rebind, both levels written, settled within the
+// ceiling -- the stroke really reached the coarse level.
+void require_untrimmed(const AcrossTrim& kept) {
+    REQUIRE_FALSE(kept.rebound);
+    REQUIRE(kept.second_dab_levels == std::vector<std::uint32_t>{2u, 3u});
+}
+
+void check_untrimmed_stroke(const std::vector<cfloat3>& pristine, const AcrossTrim& kept) {
+    require_untrimmed(kept);
+    const float settled = worst_travel(pristine, kept.coarse);
+    CHECK((settled > 0.01f && settled <= 0.08f));
+}
+
+// THE PRECONDITION the host's own negative repro never induced: the generation
+// moved between the dabs, and the sculptor really rebound on it rather than
+// stamping through a binding it kept.
+//
+// And the second dab still reached the coarse side. With an unrevisioned seed
+// this is the silent-empty-dab hazard: a coarse sculptor handed the sculpt
+// level's class would walk from the wrong vertex and write nothing.
+void require_rebound_and_reached(const AcrossTrim& trimmed) {
+    REQUIRE(trimmed.generation_moved);
+    REQUIRE(trimmed.rebound);
+    CHECK(trimmed.second_dab_levels == std::vector<std::uint32_t>{2u, 3u});
+}
+
+// One trimmed stroke against the untrimmed one, at `pressure`, optionally seeded.
+void check_trimmed_stroke(const Mesh& cage, const std::vector<cfloat3>& pristine,
+                          const AcrossTrim& kept, memory::Pressure pressure, bool seeded) {
+    const std::string name = memory::pressure_name(pressure);
+    CAPTURE(name);
+    CAPTURE(seeded);
+    const AcrossTrim trimmed = layer_stroke_across_trim(cage, true, pressure, seeded);
+    require_rebound_and_reached(trimmed);
+    const float travel = worst_travel(pristine, trimmed.coarse);
+    MESSAGE("coarse travel " << travel << " after a " << name << " trim mid-stroke, ceiling 0.08");
+    CHECK(travel <= 0.08f);
+    CHECK(same_bytes(kept.coarse, trimmed.coarse));
+}
+
+}  // namespace
+
+TEST_CASE("multires: a host's trim mid-stroke does not lift the coarse side's layer ceiling") {
+    // THE SAME DEFECT AS THE CASE ABOVE, reached the way a host reaches it. The
+    // case above releases with `drop_all_caches`, which no binding exposes; a
+    // host answering a memory warning calls the trim, and two of its pressures
+    // move the cache generation under a live stroke: Urgent releases the levels
+    // BELOW the sculpt level -- which are exactly the coarse levels a crossing
+    // stamp writes -- and Critical releases every level.
+    const Mesh cage = bumpy_quads(6, 1.0f);
+    const std::vector<cfloat3> pristine = build_regional(cage).positions_at(2);
+    const AcrossTrim kept = layer_stroke_across_trim(cage, false, memory::Pressure::None, false);
+    check_untrimmed_stroke(pristine, kept);
+
+    for (memory::Pressure pressure : {memory::Pressure::Urgent, memory::Pressure::Critical})
+        for (bool seeded : {false, true}) check_trimmed_stroke(cage, pristine, kept, pressure, seeded);
+}
+
+namespace {
+
+// Two `Layer` dabs of one gesture with the sculpt level moved from 3 to 2
+// between them. With `restart` the second dab opens a gesture of its own,
+// which is what the rebind must make the level change look like.
+std::vector<cfloat3> layer_across_level_change(const Mesh& cage, bool restart) {
+    MultiresSurface s = build_regional(cage);
+    REQUIRE(s.set_sculpt_level(3));
+    MeshBrushSettings settings = rim_layer_settings(s);
+    MultiresSculptor sculptor(s);
+    sculptor.begin_stroke();
+    layer_dab(sculptor, settings);
+    REQUIRE(s.set_sculpt_level(2));
+    if (restart) sculptor.begin_stroke();
+    layer_dab(sculptor, settings);
+    return s.positions_at(2);
+}
+
+}  // namespace
+
+TEST_CASE("multires: a sculpt-level change mid-stroke drops the records the level numbered") {
+    // THE OTHER HALF OF THE ASYMMETRY the two cases above hold. A rebind in
+    // which only `cache_generation` moved keeps every record; a change of
+    // sculpt level must NOT, because the bound level's record is indexed by
+    // the numbering of the level it was taken on. Carried across, level 3's
+    // record would answer "where did the stroke find this vertex" for level
+    // 2's vertex of the same index -- some other point of the surface -- and
+    // `Layer` would measure its ceiling from there.
+    const Mesh cage = bumpy_quads(6, 1.0f);
+    const std::vector<cfloat3> pristine = build_regional(cage).positions_at(2);
+    const std::vector<cfloat3> fresh = layer_across_level_change(cage, true);
+    const std::vector<cfloat3> carried = layer_across_level_change(cage, false);
+    // NOT VACUOUS: the dab at level 2 moved level 2.
+    CHECK(worst_travel(pristine, fresh) > 0.01f);
+    // THE GATE: the stroke that crossed a level change is, from level 2's side,
+    // byte-identical to one that began there.
+    CHECK(same_bytes(fresh, carried));
+}
+
+namespace {
+
+struct Restructured {
+    std::vector<cfloat3> fine;  // level 3 after the second dab
+    std::size_t vertices_before = 0, vertices_after = 0;
+    bool structure_moved = false;
+};
+
+// Remove the top level and refine level 3 again over one patch of the four.
+// Returns whether the surface said its numbering moved.
+bool restructure_to_one_patch(MultiresSurface& s) {
+    const std::uint64_t structure = s.structure_revision();
+    REQUIRE(s.remove_highest_level());
+    REQUIRE(s.add_level_for_patches({14u}));
+    REQUIRE(s.sculpt_level() == 3);
+    return s.structure_revision() != structure;
+}
+
+// Two `Layer` dabs of one gesture with the hierarchy RESTRUCTURED between them:
+// the top level removed and level 3 refined again over one patch of the four.
+// The sculpt level's NUMBER is 3 on both sides of that and its numbering is
+// not. With `restart` the second dab opens a gesture of its own.
+Restructured layer_across_restructure(const Mesh& cage, bool restart) {
+    MultiresSurface s = build_regional(cage);
+    REQUIRE(s.set_sculpt_level(3));
+    MeshBrushSettings settings = rim_layer_settings(s);
+    MultiresSculptor sculptor(s);
+    sculptor.begin_stroke();
+    layer_dab(sculptor, settings);
+
+    Restructured out;
+    out.vertices_before = s.positions_at(3).size();
+    out.structure_moved = restructure_to_one_patch(s);
+    out.vertices_after = s.positions_at(3).size();
+    if (restart) sculptor.begin_stroke();
+    sculptor.stamp(MeshBrush::Layer, settings);
+    out.fine = s.positions_at(3);
+    return out;
+}
+
+}  // namespace
+
+TEST_CASE("multires: a restructure mid-stroke drops the records even at the same level number") {
+    // THE CASE A LEVEL NUMBER CANNOT SEE. Removing the top level and refining a
+    // different region lands the sculpt level back on 3 with every vertex under
+    // it renumbered, and the cache generation moved, so a rebind that asked
+    // only "same level?" kept a record indexed by the OLD level 3 and read it
+    // against the new one: `Layer` measured its ceiling from wherever the old
+    // stroke had found some other vertex. Measured before the fix: 0.078 of
+    // difference from the stroke that began afresh, against a 0.08 ceiling.
+    const Mesh cage = bumpy_quads(6, 1.0f);
+    const Restructured fresh = layer_across_restructure(cage, true);
+    const Restructured carried = layer_across_restructure(cage, false);
+    // THE PRECONDITION: the numbering really changed under the same number.
+    REQUIRE(carried.structure_moved);
+    REQUIRE(carried.vertices_before != carried.vertices_after);
+    CHECK(same_bytes(fresh.fine, carried.fine));
+}
+
+TEST_CASE("multires: a sculptor rebinds when the cage is replaced under it") {
+    // `set_base_mesh` replaces the hierarchy's whole state, and a fresh state
+    // counts its cache generation from the start: on this fixture it lands on
+    // the SAME value the bound sculptor last saw (2 and 2), so a sculptor that
+    // compared the level and the generation alone kept its reference into the
+    // level mesh the replacement freed and stamped through it.
+    const Mesh cage = bumpy_quads(6, 1.0f);
+    MultiresError err = MultiresError::None;
+    auto s = MultiresSurface::from_mesh(cage, {}, &err);
+    REQUIRE(s.has_value());
+    REQUIRE(s->add_level());
+    REQUIRE(s->set_sculpt_level(0));
+    MultiresSculptor sculptor(*s);
+    sculptor.begin_stroke();
+    MeshBrushSettings settings;
+    settings.center = cf3(0.0f, 0.2f, 0.0f);
+    settings.radius = 0.5f;
+    settings.strength = 0.5f;
+    REQUIRE(sculptor.stamp(MeshBrush::Draw, settings) > 0);
+
+    const std::uint64_t token = sculptor.seed_revision();
+    const std::uint64_t structure = s->structure_revision();
+    REQUIRE(s->set_base_mesh(bumpy_quads(6, 1.2f)));
+    CHECK(s->structure_revision() != structure);
+    REQUIRE(sculptor.stamp(MeshBrush::Draw, settings) > 0);
+    // Read after the stamp: a new token is minted only by a rebind.
+    CHECK(sculptor.seed_revision() != token);
 }
 
 TEST_CASE("multires: a crossing stamp does not spend the bound level's seed on a coarse one") {

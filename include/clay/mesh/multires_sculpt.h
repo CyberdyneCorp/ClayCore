@@ -391,6 +391,9 @@ class MultiresSculptor {
     std::uint64_t capture_generation_ = 0;
     std::uint32_t bound_level_ = 0xffffffffu;
     std::uint64_t bound_generation_ = 0;
+    // The surface's `structure_revision` at the bind: a level of the same
+    // NUMBER is the same numbering only while this has not moved.
+    std::uint64_t bound_structure_ = 0;
     AutomaskInputs automask_;
     bool automask_set_ = false;
     memory::PeakTelemetry* telemetry_ = nullptr;

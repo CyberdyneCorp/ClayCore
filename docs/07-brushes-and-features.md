@@ -2590,6 +2590,28 @@ was not there, with `stamp` still reporting the classes it believed it had
 moved. Every second dab of a drag vanished. Fixed, and held by four regression
 cases across C++, C and pyclay.
 
+**A trim mid-drag does not move the `Layer` ceiling either.** `Layer` measures
+its ceiling from where the STROKE found each vertex, and on a regionally refined
+hierarchy that record lives per level: the sculpt level's, and one for each
+coarse level a crossing stamp writes beside the refined region. A trim at
+`Urgent` or `Critical` rebinds the sculptor, and the rebind keeps every one of
+those records, so the stroke after the trim is byte-identical to the stroke
+without it. Only a change of the level's NUMBERING drops them, because the
+records are indexed by vertex: a change of sculpt level, and also a restructure
+that leaves the level number where it was -- removing the top level and refining
+a different region, or replacing the cage. `MultiresSurface::structure_revision()`
+moves on exactly those, and the sculptor compares it at every bind. Through
+v0.120.0 the sculptor compared the level number alone, so a restructure mid-stroke
+read the old level's record against the new numbering, and a cage replaced
+under a live sculptor could leave it stamping through the freed level mesh,
+because the fresh state's cache generation started over and landed on the
+value the sculptor had last seen. Before v0.97.0 the coarse records were dropped
+on any rebind, and the coarse side deposited its ceiling a second time: 0.116 of
+travel against a 0.08 ceiling at the seam. Held in C++, through
+`clay_multires_trim`, and through pyclay, where `MultiresSculptor.stamp` now
+takes `layer_height` (default 0.05). Without that argument a pyclay `layer`
+stamp on a hierarchy had a ceiling of zero and moved nothing.
+
 ### The peak is what kills an app, not the steady state
 
 Adding a level, converting between representations, flattening a stack, a global
