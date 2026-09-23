@@ -26,13 +26,17 @@ struct Doc {
     explicit Doc(bool undo) {
         d = clay_document_create();
         REQUIRE(d != nullptr);
+        fill_block();
+        if (undo) enable();
+    }
+    void fill_block() {
         clay_voxel_grid* g = nullptr;
         REQUIRE(clay_document_add_voxel_layer(d, "blocks", 0.1f, &voxels, &g) == CLAY_OK);
         const std::int32_t lo[3] = {-6, -6, -6};
         const std::int32_t hi[3] = {6, 6, 6};
         REQUIRE(clay_voxel_fill_box(g, lo, hi, 1) == CLAY_OK);
-        if (undo) REQUIRE(clay_document_enable_undo(d) == CLAY_OK);
     }
+    void enable() { REQUIRE(clay_document_enable_undo(d) == CLAY_OK); }
     ~Doc() { clay_document_destroy(d); }
     Doc(const Doc&) = delete;
     Doc& operator=(const Doc&) = delete;

@@ -54,6 +54,17 @@ void VoxelGrid::unfold_down(const SculptLayerOp& op) {
 
 namespace {
 
+// Undoing a merge restores the lower layer from its recorded length and
+// overwritten afters, so the lower layer has to be at least that long and every
+// recorded index inside it.
+bool merge_undo_fits(const VoxelGrid::SculptLayerOp& op, std::size_t count,
+                     std::size_t lower_size) {
+    if (op.layer > count || lower_size < op.lower_count) return false;
+    for (const auto& entry : op.lower_afters)
+        if (entry.first >= op.lower_count) return false;
+    return true;
+}
+
 // Whether the stack has the shape `op` names, in the direction it is about to
 // run. Checked before anything is written, so a refusal leaves the grid as it
 // was rather than half-replayed.
@@ -69,15 +80,9 @@ bool op_fits(const VoxelGrid::SculptLayerOp& op, bool forward, std::size_t count
         case Kind::Remove:
             // Undoing a removal reinserts, so the slot may be one past the end.
             return forward ? op.layer < count : op.layer <= count;
-        case Kind::Merge: {
+        case Kind::Merge:
             if (op.layer == 0) return false;
-            if (forward) return op.layer < count;
-            if (op.layer > count) return false;
-            if (lower_size < op.lower_count) return false;
-            for (const auto& entry : op.lower_afters)
-                if (entry.first >= op.lower_count) return false;
-            return true;
-        }
+            return forward ? op.layer < count : merge_undo_fits(op, count, lower_size);
         case Kind::None:
             return false;
     }
@@ -86,46 +91,69 @@ bool op_fits(const VoxelGrid::SculptLayerOp& op, bool forward, std::size_t count
 
 }  // namespace
 
+// The stack half of a redo: put the property back to what the operation made it.
+void VoxelGrid::redo_layer_property(const SculptLayerOp& op) {
+    switch (op.kind) {
+        case SculptLayerOp::Kind::Strength:
+            sculpt_layers_[op.layer].strength = op.strength_after;
+            break;
+        case SculptLayerOp::Kind::Visible:
+            sculpt_layers_[op.layer].visible = op.visible_after;
+            break;
+        case SculptLayerOp::Kind::Move:
+            move_record(op.layer, op.to);
+            break;
+        case SculptLayerOp::Kind::Remove:
+            sculpt_layers_.erase(sculpt_layers_.begin() + static_cast<std::ptrdiff_t>(op.layer));
+            break;
+        case SculptLayerOp::Kind::Merge:
+            fold_down(op.layer, nullptr);
+            break;
+        case SculptLayerOp::Kind::None:
+            break;
+    }
+}
+
+// The stack half of an undo: put the property back to what it was.
+void VoxelGrid::undo_layer_property(const SculptLayerOp& op) {
+    switch (op.kind) {
+        case SculptLayerOp::Kind::Strength:
+            sculpt_layers_[op.layer].strength = op.strength_before;
+            break;
+        case SculptLayerOp::Kind::Visible:
+            sculpt_layers_[op.layer].visible = op.visible_before;
+            break;
+        case SculptLayerOp::Kind::Move:
+            move_record(op.to, op.layer);
+            break;
+        case SculptLayerOp::Kind::Remove:
+            sculpt_layers_.insert(sculpt_layers_.begin() + static_cast<std::ptrdiff_t>(op.layer),
+                                  from_data(op.held));
+            break;
+        case SculptLayerOp::Kind::Merge:
+            unfold_down(op);
+            break;
+        case SculptLayerOp::Kind::None:
+            break;
+    }
+}
+
 bool VoxelGrid::apply_sculpt_layer_op(const SculptLayerOp& op, bool forward) {
     const std::size_t count = sculpt_layers_.size();
-    const std::size_t lower_size =
-        (op.layer >= 1 && op.layer - 1 < count) ? sculpt_layers_[op.layer - 1].changes.size() : 0;
+    const bool has_lower = op.layer >= 1 && op.layer - 1 < count;
+    const std::size_t lower_size = has_lower ? sculpt_layers_[op.layer - 1].changes.size() : 0;
     if (!op_fits(op, forward, count, lower_size)) return false;
     // Undo restores the cells FIRST, while the stack still has the shape the
     // operation left it in, and then the property; redo runs the other way.
     // Neither order matters to the cells — a replay writes by coordinate — but
     // keeping them mirror images keeps the two directions readable as one.
-    if (!forward) revert_changes(op.cells);
-    switch (op.kind) {
-        case SculptLayerOp::Kind::Strength:
-            sculpt_layers_[op.layer].strength = forward ? op.strength_after : op.strength_before;
-            break;
-        case SculptLayerOp::Kind::Visible:
-            sculpt_layers_[op.layer].visible = forward ? op.visible_after : op.visible_before;
-            break;
-        case SculptLayerOp::Kind::Move:
-            if (forward)
-                move_record(op.layer, op.to);
-            else
-                move_record(op.to, op.layer);
-            break;
-        case SculptLayerOp::Kind::Remove:
-            if (forward)
-                sculpt_layers_.erase(sculpt_layers_.begin() + static_cast<std::ptrdiff_t>(op.layer));
-            else
-                sculpt_layers_.insert(sculpt_layers_.begin() + static_cast<std::ptrdiff_t>(op.layer),
-                                      from_data(op.held));
-            break;
-        case SculptLayerOp::Kind::Merge:
-            if (forward)
-                fold_down(op.layer, nullptr);
-            else
-                unfold_down(op);
-            break;
-        case SculptLayerOp::Kind::None:
-            break;
+    if (forward) {
+        redo_layer_property(op);
+        reapply_changes(op.cells);
+    } else {
+        revert_changes(op.cells);
+        undo_layer_property(op);
     }
-    if (forward) reapply_changes(op.cells);
     return true;
 }
 

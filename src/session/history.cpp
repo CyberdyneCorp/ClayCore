@@ -568,11 +568,10 @@ bool History::apply_step(const Step& step, bool forward, scene::Document& doc,
             return surface->apply_sculpt_layer_property(step.sculpt_layer_property, forward);
         }
         case Step::Kind::VoxelLayerProperty: {
-            voxel::VoxelGrid* grid = grid_for ? grid_for(step.layer) : nullptr;
             // Refused rather than skipped, for the reason a missing grid is;
             // the grid itself refuses a stack no longer the shape it names.
-            if (!grid) return false;
-            return grid->apply_sculpt_layer_op(step.voxel_layer_op, forward);
+            voxel::VoxelGrid* grid = grid_for ? grid_for(step.layer) : nullptr;
+            return grid && grid->apply_sculpt_layer_op(step.voxel_layer_op, forward);
         }
         case Step::Kind::Mask: {
             voxel::MaskField* mask = mask_for ? mask_for(step.layer) : nullptr;
@@ -957,6 +956,15 @@ void History::trim_journal(std::size_t upto) {
     if (it != snapshots_.begin()) snapshots_.erase(snapshots_.begin(), std::prev(it));
 }
 
+namespace {
+// A replay stopping at an event it could not apply: what was applied stands and
+// is reported, the rest is refused.
+bool refuse_replay(History::ReplayResult* out, const History::ReplayResult& result) {
+    if (out) *out = result;
+    return false;
+}
+}  // namespace
+
 bool History::replay(const std::uint8_t* data, std::size_t size, scene::Document& doc,
                      const GridFor& grid_for, const MeshFor& mesh_for, ReplayResult* out,
                      const MaskFor& mask_for) {
@@ -1143,10 +1151,8 @@ bool History::replay(const std::uint8_t* data, std::size_t size, scene::Document
                 break;
             }
             case JournalEvent::Kind::VoxelLayerProperty:
-                if (!replay_voxel_layer_op(layer, body, payload, grid_for)) {
-                    if (out) *out = result;
-                    return false;
-                }
+                if (!replay_voxel_layer_op(layer, body, payload, grid_for))
+                    return refuse_replay(out, result);
                 break;
             case JournalEvent::Kind::Mask: {
                 voxel::MaskField* mask = mask_for ? mask_for(layer) : nullptr;

@@ -86,13 +86,19 @@ struct World {
     void record(const VoxelGrid::SculptLayerOp& op) { h.record_voxel_layer_property(voxel_layer, op); }
 };
 
+void undo_to(World& w, const Bytes& expected) {
+    REQUIRE(w.undo());
+    CHECK(w.grid.serialize() == expected);
+}
+void redo_to(World& w, const Bytes& expected) {
+    REQUIRE(w.redo());
+    CHECK(w.grid.serialize() == expected);
+}
 // Undo, check the bytes are the ones from before; redo, check they are the
 // ones from after. Both directions, one call, so no test forgets redo.
 void round_trip(World& w, const Bytes& before, const Bytes& after) {
-    REQUIRE(w.undo());
-    CHECK(w.grid.serialize() == before);
-    REQUIRE(w.redo());
-    CHECK(w.grid.serialize() == after);
+    undo_to(w, before);
+    redo_to(w, after);
 }
 
 }  // namespace

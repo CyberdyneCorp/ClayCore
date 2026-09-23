@@ -929,6 +929,8 @@ class VoxelGrid {
     // The metadata half of a merge-down, shared by the operation and its redo.
     void fold_down(std::size_t layer, SculptLayerOp* record);
     void unfold_down(const SculptLayerOp& op);
+    void redo_layer_property(const SculptLayerOp& op);
+    void undo_layer_property(const SculptLayerOp& op);
     void move_record(std::size_t from, std::size_t to);
     static SculptLayerData to_data(SculptLayerRecord rec);
     static SculptLayerRecord from_data(SculptLayerData data);
