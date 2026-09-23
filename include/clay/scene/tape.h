@@ -44,7 +44,9 @@ struct Tape {
     // reaches compiles a tape without it, and keeps the flag.
     bool lipschitz_bounds_gradient = true;
     // Where the field can hold material: what meshing marches and what a
-    // raycast clips against; never infinite, even for a non-local op. Folded
+    // raycast clips against. Finite for any non-local OP; infinite only where
+    // the material is -- an unbounded primitive, or an infinite grid nothing
+    // confines. Folded
     // combine by combine through `combine_extent` (bounds.h), at every level a
     // combine happens -- item, group, layer -- so it is conservative in the
     // one direction that matters and NARROWED where the kernel proves it may
@@ -56,8 +58,11 @@ struct Tape {
     // A document with neither a subtract nor an intersect, and no smooth
     // group, keeps exactly the box it had before narrowing existed. An
     // infinite grid narrows nothing (item_material_extent), and where one
-    // reaches the result unconfined this is the plain union of item bounds
-    // -- one cell for the grid -- exactly as before narrowing existed.
+    // reaches the result unconfined -- on its own, in a union, or as the left
+    // operand of a subtract -- this is INFINITE, as for a plane. It used to be
+    // the plain union of item bounds, one cell for the grid, which left every
+    // other copy outside the box (#640). A consumer that needs a finite region
+    // is refused and asks for one ("unbounded scene; pass a region").
     //
     // Not a promise for `compile_layer_suffix`, which reports the union of the
     // appended items' own bounds (see there).

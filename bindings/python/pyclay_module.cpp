@@ -3691,9 +3691,11 @@ NB_MODULE(pyclay, m) {
                     // Padded by the band: sampling exactly to the bounds would
                     // clip the band at the surface where it is needed most.
                     region = tape.bounds;
-                    if (region.empty())
+                    // An infinite grid nothing confines has material
+                    // everywhere, so the document names no region to sample.
+                    if (region.empty() || region.is_infinite())
                         throw std::invalid_argument(
-                            "the document has no bounds to sample; pass bounds=");
+                            "the document has no finite bounds to sample; pass bounds=");
                     kernel::cfloat3 pad = kernel::cf3(width, width, width);
                     region = math::Aabb{region.min - pad, region.max + pad};
                 } else {
@@ -3980,8 +3982,9 @@ NB_MODULE(pyclay, m) {
                 math::Aabb where;
                 if (bounds.is_none()) {
                     where = tape.bounds;
-                    if (where.empty())
-                        throw std::invalid_argument("the document has no bounds; pass bounds=");
+                    if (where.empty() || where.is_infinite())
+                        throw std::invalid_argument(
+                            "the document has no finite bounds; pass bounds=");
                     const float pad = width + radius + kernel::clength(settings.displacement);
                     kernel::cfloat3 p3 = kernel::cf3(pad, pad, pad);
                     where = math::Aabb{where.min - p3, where.max + p3};
@@ -4049,8 +4052,9 @@ NB_MODULE(pyclay, m) {
                 math::Aabb where;
                 if (bounds.is_none()) {
                     where = tape.bounds;
-                    if (where.empty())
-                        throw std::invalid_argument("the document has no bounds; pass bounds=");
+                    if (where.empty() || where.is_infinite())
+                        throw std::invalid_argument(
+                            "the document has no finite bounds; pass bounds=");
                     kernel::cfloat3 pad = kernel::cf3(width, width, width);
                     where = math::Aabb{where.min - pad, where.max + pad};
                 } else {

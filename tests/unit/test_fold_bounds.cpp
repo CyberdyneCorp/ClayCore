@@ -345,9 +345,10 @@ TEST_CASE("fold bounds: an intersect with an infinite grid keeps the whole left 
     }
 }
 
-// ...and where nothing confines the lattice, the box is the one-cell union it
-// always was rather than an infinite one the mesher would refuse outright.
-TEST_CASE("fold bounds: an unconfined infinite grid keeps the box it always reported") {
+// ...and where nothing confines the lattice, the box is INFINITE, as a plane's
+// is: the one-cell union it used to report left every other copy outside it
+// (#640, sampled in test_lattice_bounds.cpp).
+TEST_CASE("fold bounds: an unconfined infinite grid reports an unbounded box") {
     Document doc;
     Layer& l = doc.add_sdf_layer("l");
     Node lattice = box_at(cf3(0, 0, 0), cf3(2, 2, 2));
@@ -356,6 +357,5 @@ TEST_CASE("fold bounds: an unconfined infinite grid keeps the box it always repo
     l.sdf->insert(sphere_at(cf3(0, 0, 0), 1.0f, Op::Subtract));
     const Tape t = compile_document(doc);
     REQUIRE_FALSE(t.bounds.empty());
-    CHECK_FALSE(t.bounds.is_infinite());
-    CHECK(t.bounds.max.x == doctest::Approx(2.0f));
+    CHECK(t.bounds.is_infinite());
 }

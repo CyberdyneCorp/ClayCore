@@ -11903,7 +11903,11 @@ const float* clay_tape_blob(const clay_tape* tape, size_t* out_count);
  * keeps the extent of what it cuts and an intersect the overlap — and it
  * includes the blend ring of every smooth join, a group's own included. An
  * infinitely repeated item narrows nothing, and where one reaches the result
- * unconfined the box is the one-cell union it has always been. A
+ * unconfined — on its own, in a union, or with something subtracted from it —
+ * the box is UNBOUNDED: out_bounds_min is -FLT_MAX and out_bounds_max +FLT_MAX
+ * on every axis, as for a plane. Test for that before planning bricks over it;
+ * plan over the view instead. It used to be the grid's one cell, which
+ * left every other copy outside the box (#640). A
  * host that guesses these draws a slow frame instead of a wrong one.
  *
  * out_revision is the document revision the tape was compiled at, so telling

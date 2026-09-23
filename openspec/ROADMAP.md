@@ -1100,6 +1100,10 @@ needs them, and listed so they are not mistaken for oversights:
   document is unchanged to the cell. An infinitely repeated item narrows nothing
   (`scene::item_material_extent`): its bound is one cell, and an intersect
   bounded by it lost every other copy of the lattice until review sampled it.
+  Unconfined -- alone, in a union, or minus a sphere -- it still reported that
+  one cell, which put all 5,824 sampled material samples of a lattice minus a
+  sphere outside the box; `report-an-unconfined-lattice-as-unbounded` (#640)
+  reports it infinite, as a plane is, and the gallery's bounds do not move.
 
 - **Deformers on a mesh layer.** `Deformer` has twenty-one entries and every
   one applies to an SDF item; a mesh layer takes a lattice cage and nothing

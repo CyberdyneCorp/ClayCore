@@ -832,8 +832,17 @@ plate model meshed 2.3x the triangles at the same resolution, and now asks for
 58 where it asked for 88. An **infinite grid** never narrows anything: its geometry bound
 is one cell while its copies fill space, so `scene::item_material_extent` takes it
 as unbounded — an intersect with it keeps the left operand — and where an
-unbounded extent reaches the result the tape reports the plain union of item
-bounds, the one-cell box such a document always had. `TapeCheckpoint` carries the extents a resume needs
+unbounded extent reaches the result (the lattice alone, in a union, or as the left
+operand of a subtract) `tape.bounds` is **infinite**, as a plane's is (#640). It
+used to fall back to the plain union of item bounds, the grid's one cell, which
+left every other copy outside the box: a lattice minus a sphere had all 5,824 of
+its material samples outside it. Every consumer already handles an
+infinite box — meshing, `clay_voxel_rasterize`, the bakes and pyclay's `Volume`
+constructors refuse and ask for a region, a raycast and a pick skip the clip,
+`advised_params` gives no advice and the prefix cache declines (the layer walks
+in full) — and a host reading `clay_tape_info` must test for ±FLT_MAX before it
+plans bricks over the box. A document with no infinite grid is untouched: the
+nine gallery documents report bit-identical bounds and plan the same 3,188 bricks. `TapeCheckpoint` carries the extents a resume needs
 (`chain_bound`, `below_bound`, per-frame `outer_bound`, and the plain union
 `reach` a transition's field info still reads), so an appended subtract reports
 the full compile's box. The same
