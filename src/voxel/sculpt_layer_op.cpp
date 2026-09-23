@@ -1,10 +1,13 @@
-// A sculpt-layer operation as an undo step (unify-the-undo-history 3.3, 3.4).
+// A sculpt-layer operation as an undo step (unify-the-undo-history 3.3, 3.4),
+// including a layer's creation and each edit made inside it (#642).
 //
 // The operations themselves live beside the rest of the stack in grid.cpp;
 // this file holds what makes one REPLAYABLE — the apply in either direction,
 // the data a removal or a merge-down has to keep, and the journal encoding.
 
+#include <algorithm>
 #include <cstring>
+#include <unordered_set>
 #include <utility>
 
 #include "clay/bytes.h"
@@ -37,19 +40,87 @@ VoxelGrid::SculptLayerRecord VoxelGrid::from_data(SculptLayerData data) {
     return rec;
 }
 
+// Drop a record's entries from `count` on, and the lookup entries naming them.
+void VoxelGrid::truncate_record(SculptLayerRecord& rec, std::size_t count) {
+    for (std::size_t i = count; i < rec.changes.size(); ++i) rec.index.erase(rec.changes[i].cell);
+    rec.changes.resize(count);
+}
+
 // The inverse of fold_down: truncate the lower layer to what it held, put back
 // the `after` values the fold overwrote, and reinsert the upper layer.
 void VoxelGrid::unfold_down(const SculptLayerOp& op) {
     SculptLayerRecord& lower = sculpt_layers_[op.layer - 1];
-    for (std::size_t i = op.lower_count; i < lower.changes.size(); ++i)
-        lower.index.erase(lower.changes[i].cell);
-    lower.changes.resize(op.lower_count);
+    truncate_record(lower, op.lower_count);
     for (std::size_t k = op.lower_afters.size(); k > 0; --k) {
         const auto& [at, after] = op.lower_afters[k - 1];
         lower.changes[at].after = after;
     }
     sculpt_layers_.insert(sculpt_layers_.begin() + static_cast<std::ptrdiff_t>(op.layer),
                           from_data(op.held));
+}
+
+// -- a creation and a pass (#642) --------------------------------------------
+
+void VoxelGrid::begin_pass_capture(SculptLayerOp* record) {
+    pass_capture_ = nullptr;
+    if (!record) return;
+    *record = SculptLayerOp{};
+    if (!recording_) return;
+    record->layer = sculpt_layers_.size() - 1;
+    record->lower_count = sculpt_layers_.back().changes.size();
+    pass_capture_ = record;
+}
+
+void VoxelGrid::end_pass_capture() {
+    SculptLayerOp* op = pass_capture_;
+    pass_capture_ = nullptr;
+    // The layer shrank or vanished under the capture — nothing a binding does
+    // inside one edit — so there is no record left to describe.
+    if (!op || op->layer >= sculpt_layers_.size() ||
+        sculpt_layers_[op->layer].changes.size() < op->lower_count)
+        return;
+    const SculptLayerRecord& rec = sculpt_layers_[op->layer];
+    // A cell rewritten twice was noted twice; the FIRST note holds the value
+    // the edit found, which is the one an undo restores. And a rewrite that
+    // ended where it started is not part of the record's change at all.
+    std::vector<std::pair<std::uint32_t, std::uint8_t>> noted = std::move(op->lower_afters);
+    op->lower_afters.clear();
+    std::unordered_set<std::uint32_t> seen;
+    for (const auto& [at, was] : noted) {
+        if (!seen.insert(at).second || rec.changes[at].after == was) continue;
+        op->lower_afters.emplace_back(at, was);
+        op->pass_afters.emplace_back(at, rec.changes[at].after);
+    }
+    op->held.changes.assign(rec.changes.begin() + static_cast<std::ptrdiff_t>(op->lower_count),
+                            rec.changes.end());
+    if (!op->held.changes.empty() || !op->lower_afters.empty()) op->kind = SculptLayerOp::Kind::Pass;
+}
+
+void VoxelGrid::redo_begin(const SculptLayerOp& op) {
+    sculpt_layers_.push_back(from_data(op.held));
+    // A replayed journal rebuilds layers this grid never made, and the next
+    // layer it does make must not reuse one of their seeds.
+    next_sculpt_seed_ = std::max(next_sculpt_seed_, op.held.seed + 1);
+}
+
+void VoxelGrid::undo_begin() {
+    sculpt_layers_.pop_back();
+    recording_ = false;  // what it was recording into is gone
+}
+
+void VoxelGrid::redo_pass(const SculptLayerOp& op) {
+    SculptLayerRecord& rec = sculpt_layers_[op.layer];
+    for (const auto& [at, after] : op.pass_afters) rec.changes[at].after = after;
+    for (const SculptChange& ch : op.held.changes) {
+        rec.index.emplace(ch.cell, rec.changes.size());
+        rec.changes.push_back(ch);
+    }
+}
+
+void VoxelGrid::undo_pass(const SculptLayerOp& op) {
+    SculptLayerRecord& rec = sculpt_layers_[op.layer];
+    truncate_record(rec, op.lower_count);
+    for (const auto& [at, was] : op.lower_afters) rec.changes[at].after = was;
 }
 
 namespace {
@@ -65,12 +136,35 @@ bool merge_undo_fits(const VoxelGrid::SculptLayerOp& op, std::size_t count,
     return true;
 }
 
+// A pass replays onto a record of EXACTLY the length it left or found — not
+// merely a long enough one, because a record that grew or shrank outside the
+// history is one whose positions no longer mean what this record says.
+bool pass_fits(const VoxelGrid::SculptLayerOp& op, bool forward, std::size_t count,
+               std::size_t own_size) {
+    if (op.layer >= count || op.lower_afters.size() != op.pass_afters.size()) return false;
+    const std::size_t expected = forward ? op.lower_count : op.lower_count + op.held.changes.size();
+    if (own_size != expected) return false;
+    for (const auto& entry : op.lower_afters)
+        if (entry.first >= op.lower_count) return false;
+    for (const auto& entry : op.pass_afters)
+        if (entry.first >= op.lower_count) return false;
+    return true;
+}
+
+// The stack's shape as op_fits reads it: its length, and the lengths of the
+// record an operation names and of the one below it (zero where absent).
+struct StackShape {
+    std::size_t count = 0;
+    std::size_t lower_size = 0;
+    std::size_t own_size = 0;
+};
+
 // Whether the stack has the shape `op` names, in the direction it is about to
 // run. Checked before anything is written, so a refusal leaves the grid as it
 // was rather than half-replayed.
-bool op_fits(const VoxelGrid::SculptLayerOp& op, bool forward, std::size_t count,
-             std::size_t lower_size) {
+bool op_fits(const VoxelGrid::SculptLayerOp& op, bool forward, const StackShape& shape) {
     using Kind = VoxelGrid::SculptLayerOp::Kind;
+    const std::size_t count = shape.count;
     switch (op.kind) {
         case Kind::Strength:
         case Kind::Visible:
@@ -82,7 +176,15 @@ bool op_fits(const VoxelGrid::SculptLayerOp& op, bool forward, std::size_t count
             return forward ? op.layer < count : op.layer <= count;
         case Kind::Merge:
             if (op.layer == 0) return false;
-            return forward ? op.layer < count : merge_undo_fits(op, count, lower_size);
+            return forward ? op.layer < count : merge_undo_fits(op, count, shape.lower_size);
+        case Kind::Begin:
+            // Always the top: a redo appends one, and an undo removes the one
+            // it appended, which must have nothing left in its record — every
+            // pass inside it is a later step and is undone first.
+            return forward ? op.layer == count
+                           : count > 0 && op.layer == count - 1 && shape.own_size == 0;
+        case Kind::Pass:
+            return pass_fits(op, forward, count, shape.own_size);
         case Kind::None:
             return false;
     }
@@ -109,6 +211,12 @@ void VoxelGrid::redo_layer_property(const SculptLayerOp& op) {
         case SculptLayerOp::Kind::Merge:
             fold_down(op.layer, nullptr);
             break;
+        case SculptLayerOp::Kind::Begin:
+            redo_begin(op);
+            break;
+        case SculptLayerOp::Kind::Pass:
+            redo_pass(op);
+            break;
         case SculptLayerOp::Kind::None:
             break;
     }
@@ -133,16 +241,24 @@ void VoxelGrid::undo_layer_property(const SculptLayerOp& op) {
         case SculptLayerOp::Kind::Merge:
             unfold_down(op);
             break;
+        case SculptLayerOp::Kind::Begin:
+            undo_begin();
+            break;
+        case SculptLayerOp::Kind::Pass:
+            undo_pass(op);
+            break;
         case SculptLayerOp::Kind::None:
             break;
     }
 }
 
 bool VoxelGrid::apply_sculpt_layer_op(const SculptLayerOp& op, bool forward) {
-    const std::size_t count = sculpt_layers_.size();
-    const bool has_lower = op.layer >= 1 && op.layer - 1 < count;
-    const std::size_t lower_size = has_lower ? sculpt_layers_[op.layer - 1].changes.size() : 0;
-    if (!op_fits(op, forward, count, lower_size)) return false;
+    StackShape shape;
+    shape.count = sculpt_layers_.size();
+    if (op.layer >= 1 && op.layer - 1 < shape.count)
+        shape.lower_size = sculpt_layers_[op.layer - 1].changes.size();
+    if (op.layer < shape.count) shape.own_size = sculpt_layers_[op.layer].changes.size();
+    if (!op_fits(op, forward, shape)) return false;
     // Undo restores the cells FIRST, while the stack still has the shape the
     // operation left it in, and then the property; redo runs the other way.
     // Neither order matters to the cells — a replay writes by coordinate — but
@@ -159,7 +275,7 @@ bool VoxelGrid::apply_sculpt_layer_op(const SculptLayerOp& op, bool forward) {
 
 std::size_t VoxelGrid::SculptLayerOp::bytes() const {
     return sizeof(SculptLayerOp) + held.name.capacity() + vector_bytes(held.changes) +
-           vector_bytes(lower_afters) + vector_bytes(cells);
+           vector_bytes(lower_afters) + vector_bytes(pass_afters) + vector_bytes(cells);
 }
 
 // -- the journal encoding ----------------------------------------------------
@@ -171,6 +287,7 @@ std::size_t VoxelGrid::SculptLayerOp::bytes() const {
 //   f32 strength_before   f32 strength_after   u8 visible_before   u8 visible_after
 //   held:  u32 name_len  name  f32 strength  u8 visible  u32 seed  changes
 //   u32 lower_count   u32 n  n x (u32 index, u8 after)
+//   u32 n  n x (u32 index, u8 after)          pass_afters
 //   cells
 // where `changes` and `cells` are  u32 n  n x (i32 x, i32 y, i32 z, u8 before, u8 after).
 namespace {
@@ -194,6 +311,15 @@ void put_changes(std::vector<std::uint8_t>& out,
         put_u32(out, static_cast<std::uint32_t>(c.cell.z));
         out.push_back(c.before);
         out.push_back(c.after);
+    }
+}
+
+void put_afters(std::vector<std::uint8_t>& out,
+                const std::vector<std::pair<std::uint32_t, std::uint8_t>>& afters) {
+    put_u32(out, static_cast<std::uint32_t>(afters.size()));
+    for (const auto& [at, after] : afters) {
+        put_u32(out, at);
+        out.push_back(after);
     }
 }
 
@@ -243,6 +369,16 @@ struct Reader {
         }
         return ok;
     }
+    bool afters(std::vector<std::pair<std::uint32_t, std::uint8_t>>* out) {
+        std::uint32_t n = 0;
+        if (!count(5, &n)) return false;
+        out->resize(n);
+        for (auto& [at, after] : *out) {
+            at = u32();
+            after = u8();
+        }
+        return ok;
+    }
 };
 
 }  // namespace
@@ -264,11 +400,8 @@ std::vector<std::uint8_t> VoxelGrid::SculptLayerOp::encode() const {
     put_u32(out, held.seed);
     put_changes(out, held.changes);
     put_u32(out, static_cast<std::uint32_t>(lower_count));
-    put_u32(out, static_cast<std::uint32_t>(lower_afters.size()));
-    for (const auto& [at, after] : lower_afters) {
-        put_u32(out, at);
-        out.push_back(after);
-    }
+    put_afters(out, lower_afters);
+    put_afters(out, pass_afters);
     put_changes(out, cells);
     return out;
 }
@@ -280,7 +413,7 @@ bool VoxelGrid::SculptLayerOp::decode(const std::uint8_t* data, std::size_t size
     if (r.u8() != kOpVersion) return false;
     SculptLayerOp op;
     const std::uint8_t kind = r.u8();
-    if (kind == 0 || kind > static_cast<std::uint8_t>(Kind::Merge)) return false;
+    if (kind == 0 || kind > static_cast<std::uint8_t>(Kind::Pass)) return false;
     op.kind = static_cast<Kind>(kind);
     op.layer = r.u32();
     op.to = r.u32();
@@ -297,13 +430,7 @@ bool VoxelGrid::SculptLayerOp::decode(const std::uint8_t* data, std::size_t size
     op.held.seed = r.u32();
     if (!r.changes(&op.held.changes)) return false;
     op.lower_count = r.u32();
-    std::uint32_t afters = 0;
-    if (!r.count(5, &afters)) return false;
-    op.lower_afters.resize(afters);
-    for (auto& [at, after] : op.lower_afters) {
-        at = r.u32();
-        after = r.u8();
-    }
+    if (!r.afters(&op.lower_afters) || !r.afters(&op.pass_afters)) return false;
     if (!r.changes(&op.cells)) return false;
     // Trailing bytes are a record this build did not write.
     if (!r.ok || r.pos != size) return false;

@@ -200,9 +200,16 @@ class VoxelGrid {
     void reapply_changes(const std::vector<SculptChange>& changes);
 
     std::size_t sculpt_layer_count() const { return sculpt_layers_.size(); }
+    struct SculptLayerOp;
     // Start recording. Writes from here on are attributed to the new layer,
     // which begins at full strength and visible. Returns its index.
-    std::size_t begin_sculpt_layer(std::string name = {});
+    //
+    // `record`, when given, receives the CREATION as an undo step (Kind::Begin,
+    // #642): undoing it takes the layer off the stack, redoing it puts it back.
+    // Before that record existed a layer was the one part of a pass the history
+    // never saw, so an undone pass left its cells listed in the record and a
+    // journal replayed onto an older snapshot had no layer to put them in.
+    std::size_t begin_sculpt_layer(std::string name = {}, SculptLayerOp* record = nullptr);
     // Stop recording. Further writes are attributed to no layer, exactly as
     // they were before any layer existed.
     void end_sculpt_layer();
@@ -244,7 +251,25 @@ class VoxelGrid {
         // None is what an operation that changed nothing leaves behind — the
         // same strength again, a move onto itself — and a caller recording
         // steps drops it, as every other recorder drops a no-op.
-        enum class Kind : std::uint8_t { None, Strength, Visible, Move, Remove, Merge };
+        //
+        // Begin and Pass are APPENDED (#642), so every value an earlier record
+        // carries keeps its meaning.
+        //
+        // Begin: a layer's creation. `layer` is its index, always the top, and
+        // `held` its name and seed; nothing else is set.
+        //
+        // Pass: one edit made while a layer was recording. The edit is two
+        // things — the cells it wrote, which `cells` carries exactly as a Voxel
+        // step would, and what it did to the layer's RECORD of the pass, which
+        // is what makes it a layer operation at all. An undo that restored the
+        // cells alone would leave the record listing them, and the next dial
+        // would recompose and put them back. The record half is `lower_count`
+        // (the record's length before the edit), `lower_afters` (the entries
+        // it rewrote, with the `after` each had), `pass_afters` (the same
+        // entries with the `after` the edit left) and `held.changes` (the
+        // entries it appended). The field names are the merge's, whose record
+        // half is the same shape: a truncation and some overwritten afters.
+        enum class Kind : std::uint8_t { None, Strength, Visible, Move, Remove, Merge, Begin, Pass };
         Kind kind = Kind::None;
         std::size_t layer = 0;  // Move: the index it moved FROM
         std::size_t to = 0;     // Move only
@@ -260,6 +285,8 @@ class VoxelGrid {
         // which would double the step for the layer most likely to be large.
         std::size_t lower_count = 0;
         std::vector<std::pair<std::uint32_t, std::uint8_t>> lower_afters;
+        // Pass only: parallel to lower_afters, the value each entry was left at.
+        std::vector<std::pair<std::uint32_t, std::uint8_t>> pass_afters;
         // Every cell the recompose wrote, in the order it wrote them.
         std::vector<SculptChange> cells;
 
@@ -272,10 +299,32 @@ class VoxelGrid {
     };
     // Replay a recorded operation backwards (forward = false) or forwards. Refused
     // — false, grid untouched — when the stack no longer has the shape the
-    // record names: an index past the end, or a lower layer shorter than a
-    // merge's record of it. Neither direction recomposes, and neither records
-    // into a sculpt layer or a change sink.
+    // record names: an index past the end, a lower layer shorter than a
+    // merge's record of it, a creation that is not the top layer, or a pass
+    // record of a different length than the one the edit left. Neither
+    // direction recomposes, and neither records into a sculpt layer or a
+    // change sink.
+    //
+    // Undoing a creation also ENDS recording, since the layer being recorded
+    // into is gone; redoing it brings the layer back CLOSED. Whether a layer
+    // is recording is the state of a gesture, not of the document — it is not
+    // saved either — and reopening one on redo would have a host that had
+    // already ended the pass refused at its next begin.
     bool apply_sculpt_layer_op(const SculptLayerOp& op, bool forward);
+
+    // What an edit does to the OPEN layer's record, captured as a Kind::Pass
+    // operation (#642). A third channel beside the change sink, for the reason
+    // the change sink is a second one: the choke point sees every write, and a
+    // caller decides what an undo step is. Between these two calls, every
+    // entry the recording hook rewrites is noted in `record`; closing it fills
+    // in what was appended and what the rewritten entries were left at.
+    //
+    // `record` is reset on begin, and stays `empty()` when no layer was
+    // recording or the edit did not touch its record. It does not receive the
+    // cells — the change sink does, and a caller holding both joins them.
+    // Starting another layer inside the bracket closes it.
+    void begin_pass_capture(SculptLayerOp* record);
+    void end_pass_capture();
 
     // Both recompose the grid: the layers above this one are reverted, the
     // change applied, and they are replayed. False for a layer this grid does
@@ -931,6 +980,12 @@ class VoxelGrid {
     void unfold_down(const SculptLayerOp& op);
     void redo_layer_property(const SculptLayerOp& op);
     void undo_layer_property(const SculptLayerOp& op);
+    // The record halves of a creation and of a pass, in either direction.
+    void redo_begin(const SculptLayerOp& op);
+    void undo_begin();
+    void redo_pass(const SculptLayerOp& op);
+    void undo_pass(const SculptLayerOp& op);
+    static void truncate_record(SculptLayerRecord& rec, std::size_t count);
     void move_record(std::size_t from, std::size_t to);
     static SculptLayerData to_data(SculptLayerRecord rec);
     static SculptLayerRecord from_data(SculptLayerData data);
@@ -938,6 +993,8 @@ class VoxelGrid {
     std::vector<SculptLayerRecord> sculpt_layers_;
     // Not owned. Null is off; see set_change_sink.
     std::vector<SculptChange>* change_sink_ = nullptr;
+    // Not owned. Null is off; see begin_pass_capture.
+    SculptLayerOp* pass_capture_ = nullptr;
     bool recording_ = false;
     std::uint32_t next_sculpt_seed_ = 1;
 

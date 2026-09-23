@@ -11139,7 +11139,8 @@ NB_MODULE(pyclay, m) {
              [](PySculptLayerScope& s) {
                  if (s.grid.grid().recording_sculpt_layer())
                      throw nb::value_error("a sculpt layer is already recording");
-                 s.index = s.grid.grid().begin_sculpt_layer(s.name);
+                 PyLayerOpStep step(s.grid);  // creation is a step (#642)
+                 s.index = s.grid.grid().begin_sculpt_layer(s.name, step.record());
                  return s.index;
              })
         .def("__exit__",
@@ -11464,7 +11465,8 @@ NB_MODULE(pyclay, m) {
             [](PyVoxelGrid& g, const std::string& name) {
                 if (g.grid().recording_sculpt_layer())
                     throw nb::value_error("a sculpt layer is already recording");
-                return g.grid().begin_sculpt_layer(name);
+                PyLayerOpStep step(g);  // creation is a step (#642)
+                return g.grid().begin_sculpt_layer(name, step.record());
             },
             "name"_a = std::string(),
             "Start recording; every edit until end_sculpt_layer joins this pass")

@@ -289,6 +289,12 @@ void VoxelGrid::set(VoxelCoord c, std::uint8_t index) {
             rec.index.emplace(c, rec.changes.size());
             rec.changes.push_back({c, get(c), index});
         } else {
+            // A rewrite of an entry older than the open pass capture is what
+            // an undo of this edit has to put back (#642). Entries the edit
+            // itself appended are not noted: truncating removes them whole.
+            if (pass_capture_ && it->second < pass_capture_->lower_count)
+                pass_capture_->lower_afters.emplace_back(static_cast<std::uint32_t>(it->second),
+                                                         rec.changes[it->second].after);
             rec.changes[it->second].after = index;
         }
     }
@@ -321,11 +327,20 @@ void VoxelGrid::set(VoxelCoord c, std::uint8_t index) {
 
 // -- sculpt layers -----------------------------------------------------------
 
-std::size_t VoxelGrid::begin_sculpt_layer(std::string name) {
+std::size_t VoxelGrid::begin_sculpt_layer(std::string name, SculptLayerOp* record) {
     end_sculpt_layer();
+    // A capture names the layer it opened on; a new top layer is not it.
+    end_pass_capture();
     SculptLayerRecord rec;
     rec.name = std::move(name);
     rec.seed = next_sculpt_seed_++;
+    if (record) {
+        *record = SculptLayerOp{};
+        record->kind = SculptLayerOp::Kind::Begin;
+        record->layer = sculpt_layers_.size();
+        record->held.name = rec.name;
+        record->held.seed = rec.seed;
+    }
     sculpt_layers_.push_back(std::move(rec));
     recording_ = true;
     return sculpt_layers_.size() - 1;

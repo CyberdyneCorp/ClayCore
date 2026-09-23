@@ -13096,7 +13096,11 @@ clay_result clay_voxel_begin_sculpt_layer(clay_voxel_grid* grid, const char* nam
     if (r != CLAY_OK) return r;
     if (g->recording_sculpt_layer())
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "a sculpt layer is already recording");
-    const std::size_t layer = g->begin_sculpt_layer(name ? std::string(name) : std::string());
+    // Creation is a step (#642), so undoing back past it removes the layer and
+    // a journal replayed onto an older snapshot has a layer to fill.
+    LayerOpStep step(grid);
+    const std::size_t layer =
+        g->begin_sculpt_layer(name ? std::string(name) : std::string(), step.record());
     if (out_layer) *out_layer = layer;
     return CLAY_OK;
 }
