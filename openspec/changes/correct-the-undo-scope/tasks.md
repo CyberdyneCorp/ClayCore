@@ -9,9 +9,14 @@
 - [x] 1.2 Rewrite the requirement to describe the vocabulary that exists, and
       to name the boundary — three history mechanisms, one per representation,
       and no single undo step across two of them
-- [ ] 1.3 Add the scenario as a test: with undo enabled, a voxel edit leaves
-      `undo_depth` unchanged. It pins the boundary so a later change that
-      quietly extends undo has to update the spec rather than drift past it
+- [ ] 1.3 Add the scenario as a test. REWRITTEN 2026-09-23: the boundary this
+      pinned ("a voxel edit leaves `undo_depth` unchanged") was closed by
+      `unify-the-undo-history`, which is exactly the "later change that extends
+      undo" this task anticipated — so the spec was updated rather than
+      drifted past. The scenario now says a voxel edit IS a session-history
+      step and NOT a vocabulary command; `test_c_undo_spans.cpp` "undo reverses
+      a voxel edit" covers the first half, and the second half (no command
+      performed) still wants its own assertion
 
 ## 2. The guarantees that already hold
 

@@ -56,12 +56,15 @@ bool History::perform(scene::Document& doc, const scene::Command& cmd) {
 // truth and the step list learns what it missed. A group that stayed empty is
 // popped by end_group, so it correctly yields no step.
 void History::begin_group() {
-    // Where the bracket starts, so end_group can fold what it produced into
-    // one step. Taken before grouping_ is set, and eviction is held off while
-    // a bracket is open (see enforce_budget), so this index stays valid.
-    group_start_ = steps_.size();
+    // Where the OUTERMOST bracket starts, so end_group can fold what it
+    // produced into one step. Taken before grouping_ is set, and eviction is
+    // held off while a bracket is open (see enforce_budget), so this index
+    // stays valid. An inner bracket must not move it: the outer one owns the
+    // fold, exactly as UndoStack collapses nested brackets into the outermost.
+    const bool outermost = group_depth_++ == 0;
+    if (outermost) group_start_ = steps_.size();
     grouping_ = true;
-    if (enabled_) {
+    if (enabled_ && outermost) {
         JournalEvent e;
         e.kind = JournalEvent::Kind::GroupBegin;
         journal_.push_back(std::move(e));
@@ -70,7 +73,19 @@ void History::begin_group() {
 }
 
 void History::end_group() {
+    // AN END WITH NO OPEN BRACKET IS A NO-OP, and it was not: it folded every
+    // step from the last bracket's start — or from the first step of the
+    // session, if no bracket had ever opened — into ONE Compound. The shape a
+    // host reaches it by is ordinary: begin_undo_group is refused while undo
+    // is off, the host enables undo mid-gesture, and the gesture's end_undo_
+    // group then closed a bracket that never opened and took the whole
+    // history with it (unify-the-undo-history 2.4).
+    if (group_depth_ == 0) return;
     commands_.end_group();
+    // An inner bracket closes into the outer one and records nothing of its
+    // own. The journal does not record it either: GroupBegin/GroupEnd events
+    // pair up at the outermost level, so a replay reproduces the same fold.
+    if (--group_depth_ > 0) return;
     grouping_ = false;
     if (enabled_) {
         JournalEvent e;
@@ -327,6 +342,21 @@ void History::record_multires_layer_property(scene::LayerId layer,
     push(std::move(step));
 }
 
+void History::record_voxel_layer_property(scene::LayerId layer,
+                                          voxel::VoxelGrid::SculptLayerOp op) {
+    if (!enabled_ || op.empty()) return;
+    Step step;
+    step.kind = Step::Kind::VoxelLayerProperty;
+    step.layer = layer;
+    step.voxel_layer_op = std::move(op);
+    JournalEvent e;
+    e.kind = JournalEvent::Kind::VoxelLayerProperty;
+    e.layer = step.layer;
+    e.voxel_layer_op = step.voxel_layer_op;
+    journal_.push_back(std::move(e));
+    push(std::move(step));
+}
+
 namespace {
 
 // A mesh as bytes, for the journal.
@@ -536,6 +566,12 @@ bool History::apply_step(const Step& step, bool forward, scene::Document& doc,
             mesh::MultiresSurface* surface = multires_for_ ? multires_for_(step.layer) : nullptr;
             if (!surface) return false;
             return surface->apply_sculpt_layer_property(step.sculpt_layer_property, forward);
+        }
+        case Step::Kind::VoxelLayerProperty: {
+            // Refused rather than skipped, for the reason a missing grid is;
+            // the grid itself refuses a stack no longer the shape it names.
+            voxel::VoxelGrid* grid = grid_for ? grid_for(step.layer) : nullptr;
+            return grid && grid->apply_sculpt_layer_op(step.voxel_layer_op, forward);
         }
         case Step::Kind::Mask: {
             voxel::MaskField* mask = mask_for ? mask_for(step.layer) : nullptr;
@@ -868,6 +904,9 @@ std::vector<std::uint8_t> History::journal_since(std::size_t from,
             case JournalEvent::Kind::MultiresLayerProperty:
                 put_bytes(out, e.sculpt_layer_property.encode());
                 break;
+            case JournalEvent::Kind::VoxelLayerProperty:
+                put_bytes(out, e.voxel_layer_op.encode());
+                break;
             case JournalEvent::Kind::Mask:
                 put_bytes(out, encode_mask_cells(e.mask_cells));
                 break;
@@ -916,6 +955,15 @@ void History::trim_journal(std::size_t upto) {
     auto it = snapshots_.upper_bound(journal_base_);
     if (it != snapshots_.begin()) snapshots_.erase(snapshots_.begin(), std::prev(it));
 }
+
+namespace {
+// A replay stopping at an event it could not apply: what was applied stands and
+// is reported, the rest is refused.
+bool refuse_replay(History::ReplayResult* out, const History::ReplayResult& result) {
+    if (out) *out = result;
+    return false;
+}
+}  // namespace
 
 bool History::replay(const std::uint8_t* data, std::size_t size, scene::Document& doc,
                      const GridFor& grid_for, const MeshFor& mesh_for, ReplayResult* out,
@@ -1102,6 +1150,10 @@ bool History::replay(const std::uint8_t* data, std::size_t size, scene::Document
                 push(std::move(step));
                 break;
             }
+            case JournalEvent::Kind::VoxelLayerProperty:
+                if (!replay_voxel_layer_op(layer, body, payload, grid_for))
+                    return refuse_replay(out, result);
+                break;
             case JournalEvent::Kind::Mask: {
                 voxel::MaskField* mask = mask_for ? mask_for(layer) : nullptr;
                 std::vector<voxel::MaskField::MaskChange> cells;
@@ -1206,6 +1258,19 @@ bool History::replay(const std::uint8_t* data, std::size_t size, scene::Document
     return true;
 }
 
+bool History::replay_voxel_layer_op(scene::LayerId layer, const std::uint8_t* body,
+                                    std::size_t size, const GridFor& grid_for) {
+    voxel::VoxelGrid* grid = grid_for ? grid_for(layer) : nullptr;
+    voxel::VoxelGrid::SculptLayerOp op;
+    if (!grid || !voxel::VoxelGrid::SculptLayerOp::decode(body, size, &op) ||
+        !grid->apply_sculpt_layer_op(op, /*forward=*/true))
+        return false;
+    // Recorded through the same path a live operation takes, so the rebuilt
+    // step list is undoable and the journal continues as it would have.
+    record_voxel_layer_property(layer, std::move(op));
+    return true;
+}
+
 // -- what it costs (add-history-budget) --------------------------------------
 
 std::size_t History::step_bytes(const Step& s) {
@@ -1231,6 +1296,10 @@ std::size_t History::step_bytes(const Step& s) {
     // precisely so a host can see which of the two is filling its budget.
     n += s.sculpt_layer_delta.bytes();
     n += s.sculpt_layer_property.bytes();
+    // A voxel layer operation holds the cells its recompose rewrote, and a
+    // removal or merge-down the whole pass it destroyed on top of that. The
+    // `sizeof` share is already in sizeof(Step), so only the heap is added.
+    n += s.voxel_layer_op.bytes() - sizeof(voxel::VoxelGrid::SculptLayerOp);
     // A SurfaceGroup step holds two whole serialised fields, which makes this
     // the term that matters for it rather than a rounding error — the same
     // omission roll-up-document-memory found six of in node_bytes.
@@ -1258,6 +1327,7 @@ std::size_t History::event_bytes(const JournalEvent& e) {
     n += e.multires_delta.bytes();
     n += e.sculpt_layer_delta.bytes();
     n += e.sculpt_layer_property.bytes();
+    n += e.voxel_layer_op.bytes() - sizeof(voxel::VoxelGrid::SculptLayerOp);
     n += e.group_after.capacity();
     n += e.mesh_after.capacity();
     n += scene::command_bytes(e.command);
@@ -1348,6 +1418,7 @@ void History::clear() {
     // hold off the budget forever and leave group_start_ naming a step list
     // that no longer exists.
     grouping_ = false;
+    group_depth_ = 0;
     group_start_ = 0;
 }
 

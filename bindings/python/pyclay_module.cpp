@@ -1852,6 +1852,27 @@ struct PyVoxelStep {
     PyVoxelStep& operator=(const PyVoxelStep&) = delete;
 };
 
+// A sculpt-layer stack operation as ONE undo step, matching the C binding's
+// LayerOpStep (unify-the-undo-history 3.3): the grid fills the record, this
+// hands it to the history. A standalone grid has no history.
+struct PyLayerOpStep {
+    session::History* history = nullptr;
+    scene::LayerId layer = 0;
+    voxel::VoxelGrid::SculptLayerOp op;
+
+    explicit PyLayerOpStep(const PyVoxelGrid& handle) {
+        if (!handle.doc || !handle.undo || !*handle.undo) return;
+        history = handle.undo->get();
+        layer = handle.layer;
+    }
+    voxel::VoxelGrid::SculptLayerOp* record() { return history ? &op : nullptr; }
+    ~PyLayerOpStep() {
+        if (history) history->record_voxel_layer_property(layer, std::move(op));
+    }
+    PyLayerOpStep(const PyLayerOpStep&) = delete;
+    PyLayerOpStep& operator=(const PyLayerOpStep&) = delete;
+};
+
 math::Aabb to_aabb(nb::handle obj) {
     if (nb::isinstance<PyDocument>(obj)) {
         math::Aabb b = scene::compile_document(nb::cast<PyDocument&>(obj).doc->document).bounds;
@@ -11475,7 +11496,8 @@ NB_MODULE(pyclay, m) {
             "set_sculpt_layer_strength",
             [](PyVoxelGrid& g, std::size_t layer, float strength) {
                 check_sculpt_layer(g, layer);
-                g.grid().set_sculpt_layer_strength(layer, strength);
+                PyLayerOpStep step(g);
+                g.grid().set_sculpt_layer_strength(layer, strength, step.record());
             },
             "layer"_a, "strength"_a,
             "Clamped to [0, 1]. On binary occupancy a fraction is a "
@@ -11491,21 +11513,24 @@ NB_MODULE(pyclay, m) {
             "set_sculpt_layer_visible",
             [](PyVoxelGrid& g, std::size_t layer, bool visible) {
                 check_sculpt_layer(g, layer);
-                g.grid().set_sculpt_layer_visible(layer, visible);
+                PyLayerOpStep step(g);
+                g.grid().set_sculpt_layer_visible(layer, visible, step.record());
             },
             "layer"_a, "visible"_a)
         .def(
             "remove_sculpt_layer",
             [](PyVoxelGrid& g, std::size_t layer) {
                 check_sculpt_layer(g, layer);
-                g.grid().remove_sculpt_layer(layer);
+                PyLayerOpStep step(g);
+                g.grid().remove_sculpt_layer(layer, step.record());
             },
             "layer"_a, "Drop a pass; the ones above it replay on what is left")
         .def(
             "merge_sculpt_layer_down",
             [](PyVoxelGrid& g, std::size_t layer) {
                 check_sculpt_layer(g, layer);
-                if (!g.grid().merge_sculpt_layer_down(layer))
+                PyLayerOpStep step(g);
+                if (!g.grid().merge_sculpt_layer_down(layer, step.record()))
                     throw nb::value_error("the bottom sculpt layer has nothing below it");
             },
             "layer"_a, "Fold a pass into the one below, keeping the lower name")
@@ -11514,7 +11539,8 @@ NB_MODULE(pyclay, m) {
             [](PyVoxelGrid& g, std::size_t from, std::size_t to) {
                 check_sculpt_layer(g, from);
                 check_sculpt_layer(g, to);
-                g.grid().move_sculpt_layer(from, to);
+                PyLayerOpStep step(g);
+                g.grid().move_sculpt_layer(from, to, step.record());
             },
             "from_"_a, "to"_a,
             "Move a pass within the stack. Order is meaningful: where two\n"

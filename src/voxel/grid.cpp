@@ -411,71 +411,138 @@ void VoxelGrid::apply_from(std::size_t first) {
     recording_ = was_recording;
 }
 
-bool VoxelGrid::set_sculpt_layer_strength(std::size_t layer, float strength) {
+std::vector<VoxelGrid::SculptChange>* VoxelGrid::capture_into(SculptLayerOp* record) {
+    std::vector<SculptChange>* was = change_sink_;
+    if (record) {
+        record->cells.clear();
+        change_sink_ = &record->cells;
+    }
+    return was;
+}
+
+bool VoxelGrid::set_sculpt_layer_strength(std::size_t layer, float strength,
+                                          SculptLayerOp* record) {
     if (layer >= sculpt_layers_.size()) return false;
     const float s = strength < 0.0f ? 0.0f : (strength > 1.0f ? 1.0f : strength);
-    if (s == sculpt_layers_[layer].strength) return true;
+    const float was = sculpt_layers_[layer].strength;
+    if (s == was) return true;
+    std::vector<SculptChange>* sink = capture_into(record);
     revert_from(layer);
     sculpt_layers_[layer].strength = s;
     apply_from(layer);
+    change_sink_ = sink;
+    if (record) {
+        record->kind = SculptLayerOp::Kind::Strength;
+        record->layer = layer;
+        record->strength_before = was;
+        record->strength_after = s;
+    }
     return true;
 }
 
-bool VoxelGrid::set_sculpt_layer_visible(std::size_t layer, bool visible) {
+bool VoxelGrid::set_sculpt_layer_visible(std::size_t layer, bool visible, SculptLayerOp* record) {
     if (layer >= sculpt_layers_.size()) return false;
     if (visible == sculpt_layers_[layer].visible) return true;
+    std::vector<SculptChange>* sink = capture_into(record);
     revert_from(layer);
     sculpt_layers_[layer].visible = visible;
     apply_from(layer);
+    change_sink_ = sink;
+    if (record) {
+        record->kind = SculptLayerOp::Kind::Visible;
+        record->layer = layer;
+        record->visible_before = !visible;
+        record->visible_after = visible;
+    }
     return true;
 }
 
-bool VoxelGrid::remove_sculpt_layer(std::size_t layer) {
+bool VoxelGrid::remove_sculpt_layer(std::size_t layer, SculptLayerOp* record) {
     if (layer >= sculpt_layers_.size()) return false;
+    std::vector<SculptChange>* sink = capture_into(record);
     revert_from(layer);
+    SculptLayerRecord gone = std::move(sculpt_layers_[layer]);
     sculpt_layers_.erase(sculpt_layers_.begin() + static_cast<std::ptrdiff_t>(layer));
     apply_from(layer);
+    change_sink_ = sink;
+    if (record) {
+        record->kind = SculptLayerOp::Kind::Remove;
+        record->layer = layer;
+        record->held = to_data(std::move(gone));
+    }
     return true;
 }
 
-bool VoxelGrid::merge_sculpt_layer_down(std::size_t layer) {
-    // Nothing below to merge into.
-    if (layer == 0 || layer >= sculpt_layers_.size()) return false;
-    // Composed at FULL strength, because a merged pass is one pass: keeping
-    // the upper layer's dither would bake a fractional subset in and leave the
-    // result unable to reach the other cells again.
-    revert_from(layer - 1);
+// The metadata half of a merge-down: fold `layer` into the one below it.
+// Shared by the operation and by its redo, so the two cannot fold differently.
+void VoxelGrid::fold_down(std::size_t layer, SculptLayerOp* record) {
     SculptLayerRecord upper = std::move(sculpt_layers_[layer]);
     sculpt_layers_.erase(sculpt_layers_.begin() + static_cast<std::ptrdiff_t>(layer));
     SculptLayerRecord& lower = sculpt_layers_[layer - 1];
+    if (record) {
+        record->lower_count = lower.changes.size();
+        record->lower_afters.clear();
+    }
     for (const SculptChange& ch : upper.changes) {
         auto it = lower.index.find(ch.cell);
         if (it == lower.index.end()) {
             lower.index.emplace(ch.cell, lower.changes.size());
             lower.changes.push_back(ch);
-        } else {
-            // The lower layer already owns this cell: keep ITS before — that
-            // is the state both passes started from — and take the upper's
-            // after, which is where the pair ends up.
-            lower.changes[it->second].after = ch.after;
+            continue;
         }
+        // The lower layer already owns this cell: keep ITS before — that is
+        // the state both passes started from — and take the upper's after,
+        // which is where the pair ends up. The value overwritten is what an
+        // undo of the merge has to put back.
+        if (record)
+            record->lower_afters.emplace_back(static_cast<std::uint32_t>(it->second),
+                                              lower.changes[it->second].after);
+        lower.changes[it->second].after = ch.after;
     }
+    if (record) record->held = to_data(std::move(upper));
+}
+
+bool VoxelGrid::merge_sculpt_layer_down(std::size_t layer, SculptLayerOp* record) {
+    // Nothing below to merge into.
+    if (layer == 0 || layer >= sculpt_layers_.size()) return false;
+    // Composed at FULL strength, because a merged pass is one pass: keeping
+    // the upper layer's dither would bake a fractional subset in and leave the
+    // result unable to reach the other cells again.
+    std::vector<SculptChange>* sink = capture_into(record);
+    revert_from(layer - 1);
+    fold_down(layer, record);
     apply_from(layer - 1);
+    change_sink_ = sink;
+    if (record) {
+        record->kind = SculptLayerOp::Kind::Merge;
+        record->layer = layer;
+    }
     return true;
 }
 
-bool VoxelGrid::move_sculpt_layer(std::size_t from, std::size_t to) {
+void VoxelGrid::move_record(std::size_t from, std::size_t to) {
+    SculptLayerRecord moved = std::move(sculpt_layers_[from]);
+    sculpt_layers_.erase(sculpt_layers_.begin() + static_cast<std::ptrdiff_t>(from));
+    sculpt_layers_.insert(sculpt_layers_.begin() + static_cast<std::ptrdiff_t>(to),
+                          std::move(moved));
+}
+
+bool VoxelGrid::move_sculpt_layer(std::size_t from, std::size_t to, SculptLayerOp* record) {
     if (from >= sculpt_layers_.size() || to >= sculpt_layers_.size()) return false;
     if (from == to) return true;
     // Everything from the lower of the two positions is affected, so that is
     // where the unwind starts.
     const std::size_t first = std::min(from, to);
+    std::vector<SculptChange>* sink = capture_into(record);
     revert_from(first);
-    SculptLayerRecord moved = std::move(sculpt_layers_[from]);
-    sculpt_layers_.erase(sculpt_layers_.begin() + static_cast<std::ptrdiff_t>(from));
-    sculpt_layers_.insert(sculpt_layers_.begin() + static_cast<std::ptrdiff_t>(to),
-                          std::move(moved));
+    move_record(from, to);
     apply_from(first);
+    change_sink_ = sink;
+    if (record) {
+        record->kind = SculptLayerOp::Kind::Move;
+        record->layer = from;
+        record->to = to;
+    }
     return true;
 }
 

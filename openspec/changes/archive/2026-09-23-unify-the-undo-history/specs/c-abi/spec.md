@@ -5,7 +5,7 @@
 ### Requirement: Undo across the ABI
 The C API SHALL expose the same opt-in history as the Python bindings: enable, undo, redo, depths and grouping. Calling undo with an empty history SHALL report that rather than failing, so a UI can drive it without tracking state itself.
 
-Undo and redo SHALL act on the session history, which spans the SDF edit list, voxel grids and mesh layers. Before this change they acted on the command stack alone, so a host calling them after a voxel or mesh edit reversed an older SDF edit instead of the edit the user had just made, or did nothing at all. That is a behaviour change and a fix: a host that already calls these gets the edits it was silently missing, through the same entry points.
+Undo and redo SHALL act on the session history, which spans the SDF edit list, voxel grids, masks and mesh layers. On a mesh layer the ABI records what replaces its triangles — an attach, a replacement, a remesh; a vertex displacement made by a `clay_mesh_sculptor` is recorded into the host's `clay_mesh_deltas`, not into the document's history. Before this change they acted on the command stack alone, so a host calling them after a voxel or mesh edit reversed an older SDF edit instead of the edit the user had just made, or did nothing at all. That is a behaviour change and a fix: a host that already calls these gets the edits it was silently missing, through the same entry points.
 
 The reported depths SHALL count steps that will actually reverse something, across every representation, so that a host greying out a menu item from a depth never offers an undo that does nothing.
 
@@ -23,12 +23,16 @@ An operation that no history mechanism records SHALL NOT be counted as a step, a
 - **WHEN** a host sculpts a voxel layer of a document and calls undo
 - **THEN** the cells the pass changed are restored, where before this change the call reversed an unrelated SDF edit or reported nothing to undo
 
-#### Scenario: Undo reverses a mesh edit
-- **WHEN** a host moves a mesh layer's vertices and calls undo
-- **THEN** the vertices are restored, and `indices` and `quads` are byte-identical throughout
+#### Scenario: Undo reverses a mesh layer's replacement
+- **WHEN** a host replaces a mesh layer's triangles and calls undo
+- **THEN** the previous triangles are restored and the layer's geometry revision advances
+
+#### Scenario: A mesh sculptor stamp is not a document step
+- **WHEN** a host stamps a `clay_mesh_sculptor` built over a document's mesh layer
+- **THEN** the document's undo depth does not change, and the stamp is reversed through the `clay_mesh_deltas` the host passed to it rather than through `clay_document_undo`
 
 #### Scenario: Depth counts every representation
-- **WHEN** edits are made to all three representations
+- **WHEN** edits are made to the edit list, a voxel grid and a mesh layer's triangles
 - **THEN** the reported undo depth counts them all, and calling undo that many times returns the document to its starting state
 
 #### Scenario: The existing entry points keep their shape

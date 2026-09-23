@@ -40,9 +40,14 @@
       append is ~16 ns and the absolute stays at 0.001 ms. The first draft
       measured 1.26x on the verb because it probed `get(c)` for the previous
       value; `write_cell` already had it. See 7.1
-- [ ] 1.8 The same measurement ON THE DEVICE, which is what the budgets are
-      set against. Filed as an issue for the team that has the iPad, per representation per step. This
-      is the input `add-history-budget` needs and that row assumes one mechanism
+- [x] 1.8 RE-SCOPED to #644, not measured. The same measurement ON THE DEVICE
+      is what the budgets are set against, and no device case measures it:
+      `tests/device/Measure/LatencyCases.swift` has no case that A/Bs a voxel
+      verb with undo on against undo off — the two that touch undo only use it
+      to reset outside the timing. A new case means a device-gate cycle, which
+      this change does not run; a Mac number is not offered in its place. The
+      16 bytes per journaled cell is `sizeof(VoxelGrid::SculptChange)` and is
+      the same on arm64, so only the ratio is outstanding
 
 ## 2. Decide
 
@@ -58,8 +63,27 @@
       depends on something it does not own, and the history outlives the
       sculptor that produced the deltas. The doubling is real and is what 1.7
       must measure
-- [ ] 2.4 DECIDE and record: what enabling the history mid-session does, without
-      changing what `enable_undo` means for the SDF path
+- [x] 2.4 DECIDED: enabling mid-session STARTS AN EMPTY HISTORY and is never
+      refused; a second enable keeps the history it has. Enumerated against
+      an existing session:
+      - steps before enabling: none recorded, depth 0 — the document as it
+        stands is the starting state. Recording a barrier at the switch was
+        rejected: nothing before it is reversible anyway, it would add a step
+        to every SDF-only host (4.5), and a journal barrier at index 0 would
+        stop every "load, enable, crash, replay" recovery before it began.
+      - refusing when the document has edits was rejected: it changes what
+        `enable_undo` means on the SDF path, and "has edits" is not
+        detectable for four representations anyway (#641).
+      - a partially-applied gesture: a bracket cannot straddle the switch —
+        `begin_undo_group` is refused while off — but its END could, and an
+        unmatched `end_group` folded every step since the session began into
+        ONE. Fixed: an unmatched end is a no-op, and brackets are
+        depth-counted so only the outermost folds (6.7, 6.8).
+      - memory: enabling allocates the history and nothing else.
+      - the crash journal: seeded with the last loaded/saved snapshot, which is
+        wrong if the document was edited since — replay then silently lacks the
+        pre-enable edits. Probed and filed as #641; documented workaround is to
+        save once after enabling mid-session
 
 ## 3. Build
 
@@ -70,13 +94,21 @@
       that already do the replay for sculpt layers
 - [x] 3.2 The session history: an ordered log of steps, each naming its owner
       and carrying the token that reverses it
-- [ ] 3.3 (DEFERRED — see 5.8) Two voxel step kinds — the pass, and a change to a pass (strength,
+- [x] 3.3 Two voxel step kinds — the pass, and a change to a pass (strength,
       visibility, order, merge-down) — so undoing a strength tweak does not
-      remove the pass
-- [ ] 3.4 (DEFERRED — see 5.8) Merge-down holds the folded record, since undoing it means restoring
-      one. The only voxel step whose memory scales with the pass
+      remove the pass. BUILT as `Step::Kind::VoxelLayerProperty` carrying a
+      `VoxelGrid::SculptLayerOp`: the property AND every cell the recompose
+      rewrote, replayed without recomposing, so undo is bit-exact by
+      construction. Removal is a step too. The mesh stack's shape — an optional
+      record out-parameter on each operation and one apply either way —
+      reached through the existing `GridFor`, no new resolver
+- [x] 3.4 Merge-down holds the folded record, since undoing it means restoring
+      one. The only voxel step whose memory scales with the pass. BUILT holding
+      the UPPER record plus the lower's prior length and the afters the fold
+      overwrote — not a second copy of the lower layer, which is the one most
+      likely to be large
 - [x] 3.5 Redo discarded on the next edit, across representations
-- [ ] 3.7 (CORRECTED — not needed) Move history ownership onto `io::ClaySpaceDoc`, so the two bindings
+- [x] 3.7 (CORRECTED — not needed, see 6.4 and 6.5) Move history ownership onto `io::ClaySpaceDoc`, so the two bindings
       share one implementation instead of instantiating one each
 - [x] 3.6 Mesh steps refused rather than failed when a layer's vertex count has
       changed since the step was recorded
@@ -89,7 +121,10 @@
       and the mesh each return to their starting and ending states
 - [x] 4.3 Coalescing and grouping unchanged: a stroke of many stamps is still
       one step, over the golden corpus
-- [ ] 4.4 (DEFERRED — see 5.8) A voxel strength change undoes without removing its pass
+- [x] 4.4 A voxel strength change undoes without removing its pass —
+      `test_voxel_layer_history.cpp`, `test_c_voxel_layer_history.cpp`,
+      `test_voxel_layer_history.py`, bit-exact on `serialize()` / the document
+      bytes, undo AND redo, for all five operations
 - [x] 4.5 A host that only ever edits SDF sees behaviour bit-identical to today
 
 ## 5. Reach it and say it
@@ -97,13 +132,14 @@
 - [x] 5.1 C ABI — the existing undo entry points, now spanning three
       representations, plus whatever 2.2 decides
 - [x] 5.2 pyclay, so `check_binding_parity` stays clean
-- [ ] 5.3 Swift smoke
+- [x] 5.3 Swift smoke: a voxel sculpt-layer dial undone through
+      `clay_document_undo` restores the slider
 - [x] 5.4 ABI minor bump and `docs/RELEASE.md`, stating plainly that undo now
       reverses more than it did — a behaviour change and a fix
 - [x] 5.5 `docs/05-claycore-library.md`: the history section, which did not
       exist, and which `correct-the-undo-scope` is the reason to write
 - [x] 5.6 A numbered example that crosses representations and undoes back
-- [ ] 5.7 `openspec/ROADMAP.md`, and `correct-the-undo-scope` updated — it names
+- [x] 5.7 `openspec/ROADMAP.md`, and `correct-the-undo-scope` updated — it names
       this gap and will no longer be describing the tree
 
 ## 6. Corrections made while building
@@ -150,9 +186,28 @@
       one place that has it — so it hands it back through an out-parameter now.
       Measured 1.26x -> 1.005x on `sculpt_smooth`
 
+- [x] 6.7 CORRECTED while deciding 2.4: `History::end_group` with no bracket
+      open folded every step since the last bracket's start into one. A host
+      reaches it by enabling undo mid-gesture. Now a no-op; regression tests at
+      the session, C and pyclay levels, proved against the old body
+- [x] 6.8 CORRECTED: an inner `begin_group` moved the fold's start past what
+      the outer bracket had already collected, so a nested bracket undid in
+      two. Depth-counted now; regression test
+- [x] 6.9 CORRECTED while reading the c-abi delta against the code: "a host
+      moves a mesh layer's vertices and calls undo" was false at the ABI. A
+      `clay_mesh_sculptor` stamp over a document mesh layer is not a document
+      step — probed: 17 classes moved, depth unchanged, the next undo removed
+      the layer. The scenario now states what the ABI records (replacements),
+      pinned by a test; recording stamps is #643
+- [x] 6.10 CORRECTED in the scene-model delta: its barrier examples were still
+      consolidate and rasterize, which 6.1 had already shown are recorded
+- [x] 6.11 FOUND: creating a voxel sculpt layer is not a history event, so an
+      undone pass stays in its record and a journal replayed onto an older
+      snapshot rebuilds cells and not the stack. Filed as #642
+
 ## 7. Still open after this slice
 
-- [ ] 7.1 Sculpt-layer PROPERTY changes (strength, visibility, order) are not
+- [x] 7.1 CLOSED by 3.3 and 3.4. Sculpt-layer PROPERTY changes (strength, visibility, order) are not
       steps. Their cell effect is restorable by replay, but the property value
       is not, so an undo would restore the pixels and not the setting — a
       partial undo, which is worse than none. Needs the second voxel step kind
