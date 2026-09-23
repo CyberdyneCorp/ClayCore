@@ -151,9 +151,11 @@ able to fire on its own failure mode.
 
 ## D9. What this does NOT fix
 
-The per-brick price. Every refilled brick is still evaluated through the whole
-chain, so the cost of one refilled brick grows with the chain's length; this
-change removes the node-extent factor only (numbers in proposal.md). The issue's
+The per-brick price. The cost of one refilled brick still grows with the
+chain's length -- 7.4 us at 1 grab, 28.1 us at 160 on the probe's fixture,
+with none of those grabs reaching the refilled bricks -- and where that cost
+goes is not measured here. This change removes the node-extent factor only
+(numbers in proposal.md). The issue's
 second route -- a refill over a baked volume costing close to an analytic
 item's (~430 us vs ~7 us a brick, measured by the host) -- is a separate problem
 and is not attempted.

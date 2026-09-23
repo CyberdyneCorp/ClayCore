@@ -37,6 +37,38 @@ reads the same shape at other sizes: 1,000 bricks for a radius-1.5 node, 32,768
 for radius 6, 61,952 for radius 6 with 40 grabs — for an edit whose ball marks
 12.
 
+## Measured after
+
+Same probe, both arms built from the same source with `clang++ -O2` against
+each tree's `cpu-only` Release `libclaycore.a`; Mac (M-series), CPU backend;
+200 timed undos per point after five discarded, medians, the two binaries
+interleaved three times per point after one throwaway run of each. The three
+repeats agree to within 0.1 ms (main) and 0.005 ms (branch); the middle one
+is shown.
+
+| grabs | bricks main -> branch | undo p50, main -> branch | per refilled brick, main -> branch |
+|---:|---:|---:|---:|
+| 1 | 1,000 -> **12** | 1.665 -> **0.089 ms** (18.7x) | 1.66 -> 7.42 us |
+| 10 | 1,440 -> **12** | 2.481 -> **0.086 ms** (28.8x) | 1.72 -> 7.17 us |
+| 40 | 4,000 -> **12** | 7.415 -> **0.115 ms** (64.5x) | 1.85 -> 9.59 us |
+| 80 | -- -> 12 | -- -> 0.158 ms | -- -> 13.18 us |
+| 160 | -- -> 12 | -- -> 0.337 ms | -- -> 28.12 us |
+
+**The count is flat and asserted; the clock is not the claim.** The brick count
+is what the tests pin (`undoing one grab marks a count independent of the
+node's size and its chain`: 12 bricks at node radius 1.5 and 6, at 1 and 40
+grabs, where main marks 1,000 / 32,768 / 61,952).
+
+**The chain-length factor is still there, and this is it.** On the branch the
+same 12 bricks cost 7.4 us each at 1 grab and 28.1 us at 160, although none of
+the equator grabs reaches the pole the bricks sit on. The issue's second factor
+-- the price of one refilled brick grows with the chain -- is untouched by this
+change, and WHERE that per-brick cost goes on this fixture (compile, cull, or
+evaluation) is not measured here. What is removed is the first factor, the
+node's extent. The per-brick column is not comparable across the arms: most of
+main's 1,000-4,000 bricks are proven uniform or empty and cost almost nothing,
+while the branch's 12 are the surface bricks the grab actually moved.
+
 ## What Changes
 
 - **A deformer step reports the deformer's support, clipped to the node.**
@@ -60,7 +92,7 @@ for radius 6, 61,952 for radius 6 with 40 grabs — for an edit whose ball marks
 
 - **The per-brick price.** Each refilled brick is still evaluated through the
   whole chain, so one brick costs more on a longer chain. This removes the
-  node-extent factor only, and the measurement below shows both.
+  node-extent factor only, and the measurement above shows both.
 - **Radial pose**, which has finite weight and is still not the identity past
   its ball (D2), and any head containing a whole-item deformer, keep the node's
   bound.
