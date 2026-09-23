@@ -196,6 +196,7 @@ add_executable(clay_unit_tests
   unit/test_c_eval_excluding.cpp
   unit/test_c_layer_group_parity.cpp
   unit/test_fold_bounds.cpp
+  unit/test_lattice_bounds.cpp
   unit/test_c_tape_cache.cpp
   unit/test_c_frontier_resume.cpp
   unit/test_c_prefetch_seed.cpp
@@ -213,6 +214,9 @@ add_executable(clay_unit_tests
   unit/test_c_memory_io.cpp
   unit/test_session_history.cpp
   unit/test_session_journal.cpp
+  unit/test_voxel_layer_history.cpp
+  unit/test_voxel_layer_history_roundtrip.cpp
+  unit/test_c_voxel_layer_history.cpp
   unit/test_c_journal.cpp
   unit/test_cancellation.cpp
   unit/test_mask_history.cpp

@@ -146,6 +146,20 @@ struct Step {
         // then presses undo means the dial, and a history that skipped past it
         // to the stroke before is a history that lied about what it holds.
         MultiresLayerProperty,
+        // ONE OPERATION ON A VOXEL GRID'S SCULPT-LAYER STACK: a strength, a
+        // visibility, a reorder, a removal or a merge-down.
+        //
+        // The voxel half of what MultiresLayerProperty is for the mesh stack,
+        // and a separate kind from Voxel for the reason that one gives: a
+        // PASS is the cells it wrote, reversed by replaying them; a CHANGE TO
+        // A PASS is a property as well as the cells its recompose rewrote, and
+        // undoing only the cells would leave the slider at the new value. Until
+        // this existed the operations were not steps at all — worse than a
+        // barrier, because the recompose moved cells under the history without
+        // telling it, and the next undo replayed an older step onto them.
+        //
+        // Reached through GridFor like a Voxel step, so no resolver is added.
+        VoxelLayerProperty,
         Barrier  // an operation nothing records; not reversible, not silent
     };
 
@@ -158,6 +172,7 @@ struct Step {
     mesh::MultiresDelta multires_delta;        // Multires
     mesh::SculptLayerDelta sculpt_layer_delta;        // MultiresLayer
     mesh::SculptLayerProperty sculpt_layer_property;  // MultiresLayerProperty
+    voxel::VoxelGrid::SculptLayerOp voxel_layer_op;   // VoxelLayerProperty
     // SurfaceGroup: the whole field, serialised, on each side of the edit.
     //
     // A WHOLE SNAPSHOT where every other kind stores a DIFF, and deliberately.
@@ -314,6 +329,11 @@ class History {
     // pressed undo means the rename — and a history that skipped past it to the
     // stroke before would take back work the user did not ask to lose.
     void record_multires_layer_property(scene::LayerId layer, mesh::SculptLayerProperty property);
+    // One operation on a voxel grid's sculpt-layer stack, as the grid recorded
+    // it (VoxelGrid::set_sculpt_layer_strength and its siblings take the
+    // record). An `empty()` record — the same strength again, a move onto
+    // itself — is dropped, as every recorder drops a no-op.
+    void record_voxel_layer_property(scene::LayerId layer, voxel::VoxelGrid::SculptLayerOp op);
     // One layer's mesh REPLACED wholesale — a global voxel remesh. Both sides
     // are taken by value because both are kept: undo needs the before and redo
     // needs the after, and the layer holds only one of them at a time.
@@ -399,7 +419,8 @@ class History {
             MeshReplace,  // appended, for the reason above
             Multires,     // appended, for the reason above
             MultiresLayer,         // appended, for the reason above
-            MultiresLayerProperty  // appended, for the reason above
+            MultiresLayerProperty,  // appended, for the reason above
+            VoxelLayerProperty      // appended, for the reason above
         };
         Kind kind = Kind::Command;
         scene::Command command;                   // Kind::Command
@@ -411,6 +432,7 @@ class History {
         mesh::MultiresDelta multires_delta;        // Multires
         mesh::SculptLayerDelta sculpt_layer_delta;        // MultiresLayer
         mesh::SculptLayerProperty sculpt_layer_property;  // MultiresLayerProperty
+        voxel::VoxelGrid::SculptLayerOp voxel_layer_op;   // VoxelLayerProperty
         // SurfaceGroup: the field AFTER the edit. Only the after side, unlike
         // the step — a journal replays forward onto the snapshot it was taken
         // against and never runs backwards, so the before side would be bytes
@@ -584,6 +606,10 @@ class History {
     // the resolver when it did not; either way no wholesale restore anywhere in
     // this file reaches a `mesh::Mesh*` and writes through it directly.
     bool install_mesh(scene::LayerId layer, mesh::Mesh triangles, const MeshFor& mesh_for);
+    // One VoxelLayerProperty journal event, replayed forward and recorded.
+    // Apart from replay() so the event's decode-apply-record reads as one unit.
+    bool replay_voxel_layer_op(scene::LayerId layer, const std::uint8_t* body, std::size_t size,
+                               const GridFor& grid_for);
 
     scene::UndoStack commands_;
     std::vector<Step> steps_;
@@ -617,6 +643,9 @@ class History {
     std::vector<std::uint8_t> group_snapshot_;
     scene::LayerId open_mask_layer_ = 0;
     bool grouping_ = false;
+    // How many brackets are open. Only the outermost folds, and an end with
+    // none open is ignored rather than folding from a stale start.
+    std::size_t group_depth_ = 0;
     // Where steps_ stood when the open bracket began, so end_group knows what
     // the bracket produced. Meaningful only while grouping_.
     std::size_t group_start_ = 0;

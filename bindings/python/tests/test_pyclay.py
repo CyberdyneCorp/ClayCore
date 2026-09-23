@@ -1643,6 +1643,25 @@ def test_infinite_grid_is_periodic():
     assert np.allclose(doc.eval(pts), doc.eval(shifted), atol=1e-4)
 
 
+def test_an_unconfined_lattice_names_no_region():
+    # A lattice minus a sphere has material in every cell, so the document
+    # has no finite bounds: a call that would derive its region from them is
+    # refused, rather than handed the one cell the grid's own bound covers.
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    layer.add(clay.Box(size=(0.8, 0.8, 0.8)).repeat_grid(spacing=1.5))
+    layer.add(clay.Sphere(r=1.0), op=clay.Op.SUBTRACT)
+    far = doc.eval(np.array([[6.0, 0.0, 0.0]], dtype=np.float32))[0]
+    assert far < 0.0  # material four cells out
+    with pytest.raises(ValueError, match="bounded"):
+        doc.mesh(resolution=16)
+    with pytest.raises(ValueError, match="finite bounds"):
+        clay.Volume.from_document(doc, cell=0.1)
+    box = ((4.0, -1.0, -1.0), (8.0, 1.0, 1.0))
+    vol = clay.Volume.from_document(doc, cell=0.1, bounds=box)
+    assert vol is not None
+
+
 def test_radial_array_periodicity():
     count = 6
     doc = clay.Document()

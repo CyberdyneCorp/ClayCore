@@ -1076,24 +1076,13 @@ void MeshSculptor::append_outside_neighbors(std::uint32_t cls, bool want_normals
     if (colors) return;
     std::size_t mc = 0;
     const std::uint32_t* members = adjacency_.members(cls, &mc);
-    nb_outside_.clear();
-    for (std::size_t k = 0; k < mc; ++k) {
-        std::size_t rc = 0;
-        const std::uint32_t* ring = cross_->ring_of(members[k], &rc);
-        for (std::size_t j = 0; j < rc; ++j) {
-            const std::uint32_t id = ring[j];
-            if (cross_->inside(id)) continue;
-            // A welded class can reach the same outside vertex through two of
-            // its members; counting it twice would weight it twice in a mean.
-            if (std::find(nb_outside_.begin(), nb_outside_.end(), id) != nb_outside_.end())
-                continue;
-            nb_outside_.push_back(id);
-            nb_slots_.push_back(kOutsideRegion);
-            nb_positions_.push_back(cross_->outside_positions[id - cross_->vertex_count]);
-            if (want_normals)
-                nb_normals_.push_back(safe_normalize(
-                    cross_->normal_contribution(mesh_.positions, id), kernel::cf3(0, 1, 0)));
-        }
+    cross_->outside_ring(members, mc, &nb_outside_);
+    for (const std::uint32_t id : nb_outside_) {
+        nb_slots_.push_back(kOutsideRegion);
+        nb_positions_.push_back(cross_->outside_positions[id - cross_->vertex_count]);
+        if (want_normals)
+            nb_normals_.push_back(safe_normalize(cross_->normal_contribution(mesh_.positions, id),
+                                                 kernel::cf3(0, 1, 0)));
     }
 }
 void MeshSculptor::gather_stroke_origin(const VertexDeltas& record) {

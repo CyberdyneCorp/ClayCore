@@ -1208,7 +1208,10 @@ clay_result clay_remove_node(clay_document* doc, clay_layer_id layer, clay_node_
  * escapes undo. Nothing to undo is reported through *out_undone, not returned
  * as a failure, so a UI can drive the buttons without tracking state. */
 /* Opt-in history. Unchanged in shape, and since ABI 0.43.0 it spans the SDF
- * edit list, VOXEL grids and MESH layers rather than the edit list alone.
+ * edit list, VOXEL grids and MESH layers rather than the edit list alone. On a
+ * mesh layer it records what REPLACES the triangles (attach, replace, remesh);
+ * a clay_mesh_sculptor stamp records into the host's clay_mesh_deltas and is
+ * not a document step.
  *
  * That is a behaviour change and a fix. Before it, a host that sculpted a voxel
  * layer and called clay_document_undo reversed an unrelated SDF edit, or was
@@ -1225,11 +1228,28 @@ clay_result clay_remove_node(clay_document* doc, clay_layer_id layer, clay_node_
  * a redo bring the content back rather than an empty layer; the payload is not
  * reachable while the layer is absent, and is not saved.
  *
+ * A VOXEL SCULPT-LAYER OPERATION IS A STEP: clay_voxel_set_sculpt_layer_strength,
+ * _visible, clay_voxel_move_sculpt_layer, clay_voxel_remove_sculpt_layer and
+ * clay_voxel_merge_sculpt_layer_down each record one, carrying the property AND
+ * the cells the recompose rewrote, so an undo restores the slider and the grid
+ * together, bit-exact. Through 0.120.0 none of them recorded anything, and an
+ * undo after a dial reverted the PASS onto cells the dial had moved.
+ *
  * WHAT IS STILL NOT A STEP, because nothing records it: creating a MASK — mask
- * EDITS record, since 0.47.0, but the mask's existence does not — and the
- * operations that destroy history itself (dropping a resolution level, removing
- * a sculpt layer, merging one down). Consolidate IS undoable and is worth
- * naming because it is the one most often assumed otherwise.
+ * EDITS record, since 0.47.0, but the mask's existence does not — creating a
+ * voxel SCULPT LAYER (clay_voxel_begin_sculpt_layer; the pass's cells are steps,
+ * the layer's record is not), and dropping a resolution level, which destroys
+ * history itself. Consolidate IS undoable and is worth naming because it is the
+ * one most often assumed otherwise.
+ *
+ * ENABLING MID-SESSION starts an EMPTY history and is never refused: what the
+ * document holds is the starting state, and a second enable keeps the history
+ * it has. clay_document_end_undo_group with no bracket open is a no-op — through
+ * 0.120.0 it folded every step since the session began into one, which a host
+ * reached by enabling undo mid-gesture. The crash journal a mid-session enable
+ * starts is paired with the snapshot the document was last loaded from or saved
+ * to; if it was edited since, save once after enabling, or a recovery onto the
+ * older snapshot will lack those edits.
  *
  * The depths reported by clay_document_undo_state count steps that will
  * actually reverse something, so a host greying a menu item from one never
@@ -11935,7 +11955,11 @@ const float* clay_tape_blob(const clay_tape* tape, size_t* out_count);
  * keeps the extent of what it cuts and an intersect the overlap — and it
  * includes the blend ring of every smooth join, a group's own included. An
  * infinitely repeated item narrows nothing, and where one reaches the result
- * unconfined the box is the one-cell union it has always been. A
+ * unconfined — on its own, in a union, or with something subtracted from it —
+ * the box is UNBOUNDED: out_bounds_min is -FLT_MAX and out_bounds_max +FLT_MAX
+ * on every axis, as for a plane. Test for that before planning bricks over it;
+ * plan over the view instead. It used to be the grid's one cell, which
+ * left every other copy outside the box (#640). A
  * host that guesses these draws a slow frame instead of a wrong one.
  *
  * out_revision is the document revision the tape was compiled at, so telling

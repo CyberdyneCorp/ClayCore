@@ -1852,6 +1852,27 @@ struct PyVoxelStep {
     PyVoxelStep& operator=(const PyVoxelStep&) = delete;
 };
 
+// A sculpt-layer stack operation as ONE undo step, matching the C binding's
+// LayerOpStep (unify-the-undo-history 3.3): the grid fills the record, this
+// hands it to the history. A standalone grid has no history.
+struct PyLayerOpStep {
+    session::History* history = nullptr;
+    scene::LayerId layer = 0;
+    voxel::VoxelGrid::SculptLayerOp op;
+
+    explicit PyLayerOpStep(const PyVoxelGrid& handle) {
+        if (!handle.doc || !handle.undo || !*handle.undo) return;
+        history = handle.undo->get();
+        layer = handle.layer;
+    }
+    voxel::VoxelGrid::SculptLayerOp* record() { return history ? &op : nullptr; }
+    ~PyLayerOpStep() {
+        if (history) history->record_voxel_layer_property(layer, std::move(op));
+    }
+    PyLayerOpStep(const PyLayerOpStep&) = delete;
+    PyLayerOpStep& operator=(const PyLayerOpStep&) = delete;
+};
+
 math::Aabb to_aabb(nb::handle obj) {
     if (nb::isinstance<PyDocument>(obj)) {
         math::Aabb b = scene::compile_document(nb::cast<PyDocument&>(obj).doc->document).bounds;
@@ -3691,9 +3712,11 @@ NB_MODULE(pyclay, m) {
                     // Padded by the band: sampling exactly to the bounds would
                     // clip the band at the surface where it is needed most.
                     region = tape.bounds;
-                    if (region.empty())
+                    // An infinite grid nothing confines has material
+                    // everywhere, so the document names no region to sample.
+                    if (region.empty() || region.is_infinite())
                         throw std::invalid_argument(
-                            "the document has no bounds to sample; pass bounds=");
+                            "the document has no finite bounds to sample; pass bounds=");
                     kernel::cfloat3 pad = kernel::cf3(width, width, width);
                     region = math::Aabb{region.min - pad, region.max + pad};
                 } else {
@@ -3980,8 +4003,9 @@ NB_MODULE(pyclay, m) {
                 math::Aabb where;
                 if (bounds.is_none()) {
                     where = tape.bounds;
-                    if (where.empty())
-                        throw std::invalid_argument("the document has no bounds; pass bounds=");
+                    if (where.empty() || where.is_infinite())
+                        throw std::invalid_argument(
+                            "the document has no finite bounds; pass bounds=");
                     const float pad = width + radius + kernel::clength(settings.displacement);
                     kernel::cfloat3 p3 = kernel::cf3(pad, pad, pad);
                     where = math::Aabb{where.min - p3, where.max + p3};
@@ -4049,8 +4073,9 @@ NB_MODULE(pyclay, m) {
                 math::Aabb where;
                 if (bounds.is_none()) {
                     where = tape.bounds;
-                    if (where.empty())
-                        throw std::invalid_argument("the document has no bounds; pass bounds=");
+                    if (where.empty() || where.is_infinite())
+                        throw std::invalid_argument(
+                            "the document has no finite bounds; pass bounds=");
                     kernel::cfloat3 pad = kernel::cf3(width, width, width);
                     where = math::Aabb{where.min - pad, where.max + pad};
                 } else {
@@ -9734,13 +9759,14 @@ NB_MODULE(pyclay, m) {
             [](PySculptLayerStroke& s, const std::string& verb, nb::handle center, float radius,
                float strength, const std::string& falloff, nb::handle direction, nb::handle mask,
                bool geodesic, int smooth_iterations, nb::handle alpha,
-               nb::handle alpha_direction, nb::handle alpha_tangent, float alpha_extent) {
+               nb::handle alpha_direction, nb::handle alpha_tangent, float alpha_extent,
+               float layer_height) {
                 mesh::MeshBrush chosen = mesh::MeshBrush::Draw;
                 mesh::MeshBrushSettings settings = mesh_brush_settings(
                     verb, center, radius, strength, falloff, direction, nb::none(),
                     nb::cast(geodesic), nb::none(), nb::none(), "two_sided", nb::none(), nb::none(), 0.2f,
-                    smooth_iterations, 0.0f, alpha, alpha_direction, alpha_tangent, alpha_extent,
-                    nb::none(), nb::none(), 0.0f, &chosen);
+                    smooth_iterations, layer_height, alpha, alpha_direction, alpha_tangent,
+                    alpha_extent, nb::none(), nb::none(), 0.0f, &chosen);
                 field::MaskGate gate = mask_gate_of(mask);
                 nb::gil_scoped_release release;
                 return s.sculptor->stamp(chosen, settings, gate);
@@ -9749,10 +9775,12 @@ NB_MODULE(pyclay, m) {
             "direction"_a = nb::none(), "mask"_a = nb::none(), "geodesic"_a = true,
             "smooth_iterations"_a = 1, "alpha"_a = nb::none(),
             "alpha_direction"_a = nb::none(), "alpha_tangent"_a = nb::none(),
-            "alpha_extent"_a = 0.0f,
+            "alpha_extent"_a = 0.0f, "layer_height"_a = 0.05f,
             "One stamp at the surface's sculpt level, into this stroke's\n"
             "channel: the same sixteen verbs, the same falloffs, the same mask\n"
-            "and the same automasking, because it is the same code.")
+            "and the same automasking, because it is the same code.\n\n"
+            "`layer_height` is the `layer` verb's ceiling, as on\n"
+            "`MultiresSculptor.stamp`; every other verb ignores it.")
         .def(
             "stamp_detail",
             [](PySculptLayerStroke& s, nb::handle image, const std::string& mode,
@@ -11472,7 +11500,8 @@ NB_MODULE(pyclay, m) {
             "set_sculpt_layer_strength",
             [](PyVoxelGrid& g, std::size_t layer, float strength) {
                 check_sculpt_layer(g, layer);
-                g.grid().set_sculpt_layer_strength(layer, strength);
+                PyLayerOpStep step(g);
+                g.grid().set_sculpt_layer_strength(layer, strength, step.record());
             },
             "layer"_a, "strength"_a,
             "Clamped to [0, 1]. On binary occupancy a fraction is a "
@@ -11488,21 +11517,24 @@ NB_MODULE(pyclay, m) {
             "set_sculpt_layer_visible",
             [](PyVoxelGrid& g, std::size_t layer, bool visible) {
                 check_sculpt_layer(g, layer);
-                g.grid().set_sculpt_layer_visible(layer, visible);
+                PyLayerOpStep step(g);
+                g.grid().set_sculpt_layer_visible(layer, visible, step.record());
             },
             "layer"_a, "visible"_a)
         .def(
             "remove_sculpt_layer",
             [](PyVoxelGrid& g, std::size_t layer) {
                 check_sculpt_layer(g, layer);
-                g.grid().remove_sculpt_layer(layer);
+                PyLayerOpStep step(g);
+                g.grid().remove_sculpt_layer(layer, step.record());
             },
             "layer"_a, "Drop a pass; the ones above it replay on what is left")
         .def(
             "merge_sculpt_layer_down",
             [](PyVoxelGrid& g, std::size_t layer) {
                 check_sculpt_layer(g, layer);
-                if (!g.grid().merge_sculpt_layer_down(layer))
+                PyLayerOpStep step(g);
+                if (!g.grid().merge_sculpt_layer_down(layer, step.record()))
                     throw nb::value_error("the bottom sculpt layer has nothing below it");
             },
             "layer"_a, "Fold a pass into the one below, keeping the lower name")
@@ -11511,7 +11543,8 @@ NB_MODULE(pyclay, m) {
             [](PyVoxelGrid& g, std::size_t from, std::size_t to) {
                 check_sculpt_layer(g, from);
                 check_sculpt_layer(g, to);
-                g.grid().move_sculpt_layer(from, to);
+                PyLayerOpStep step(g);
+                g.grid().move_sculpt_layer(from, to, step.record());
             },
             "from_"_a, "to"_a,
             "Move a pass within the stack. Order is meaningful: where two\n"

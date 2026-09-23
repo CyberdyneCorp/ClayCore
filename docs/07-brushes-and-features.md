@@ -2610,7 +2610,12 @@ on any rebind, and the coarse side deposited its ceiling a second time: 0.116 of
 travel against a 0.08 ceiling at the seam. Held in C++, through
 `clay_multires_trim`, and through pyclay, where `MultiresSculptor.stamp` now
 takes `layer_height` (default 0.05). Without that argument a pyclay `layer`
-stamp on a hierarchy had a ceiling of zero and moved nothing.
+stamp on a hierarchy had a ceiling of zero and moved nothing. The layered
+stroke, `SculptLayerStroke.stamp`, had the same zero ceiling until #628 and
+takes the same argument with the same default. The C ABI never had the gap:
+`clay_multires_sculpt_layer_stroke_stamp` reads its brush through the same
+`clay_mesh_brush_desc` reader as every other stamp, where a zero
+`layer_height` means the engine default.
 
 ### The peak is what kills an app, not the steady state
 

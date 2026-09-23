@@ -56,6 +56,7 @@ add_library(claycore
   src/scene/tape_build.cpp
   src/brick/cache.cpp
   src/voxel/grid.cpp
+  src/voxel/sculpt_layer_op.cpp
   src/voxel/mesh_smooth.cpp
   src/voxel/occupancy_box.cpp
   src/voxel/to_field.cpp

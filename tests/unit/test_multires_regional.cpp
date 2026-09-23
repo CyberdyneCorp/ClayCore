@@ -30,6 +30,7 @@
 #include <vector>
 
 #include "clay/memory/budget.h"
+#include "clay/mesh/layered_sculpt.h"
 #include "clay/mesh/multires.h"
 #include "clay/mesh/multires_sculpt.h"
 
@@ -2198,4 +2199,181 @@ TEST_CASE("regional boundary: an edit below the rim re-derives the frames the de
     CHECK(edits == 289);
     CHECK(stale_edits == 0);
     CHECK(stale_partial == 0);
+}
+
+// -- smoothing across the rim (finish-regional-multires 3.7) ------------------
+//
+// The kernel Smooth reads the complete ring since 3.6, through
+// `MeshSculptor::build_neighbors`. The two LAYERED smooths do not go through
+// the kernel: `smooth_detail` averages the stored coefficients over a vertex's
+// ring and `form_shift` averages the pure subdivision `S(n)` over it, and both
+// read the ring off the LEVEL's own adjacency — which at the rim is short and
+// one-sided, the same incomplete ring the frames were built on before
+// f40ee3fe. So each is gated the way section 1 gated the frame: the same
+// stroke on a regional hierarchy and on the dense one, compared at every vertex
+// both store.
+
+namespace {
+
+// A coefficient that differs from vertex to vertex, so an average over a
+// different set of neighbours reads as a different number. Keyed by the
+// REGIONAL id and written at the matching dense id, so both hierarchies carry
+// the same field on the vertices they share.
+LocalDetail rim_pattern(std::uint32_t v) {
+    return LocalDetail{0.004f * static_cast<float>((v * 7u) % 5u) - 0.008f,
+                       0.003f * static_cast<float>((v * 3u) % 4u) - 0.0045f,
+                       (v % 2u) != 0u ? 0.02f : -0.02f};
+}
+
+struct SmoothPair {
+    MultiresSurface dense;
+    MultiresSurface part;
+    std::vector<std::uint32_t> ids;
+    std::vector<char> rim;
+};
+
+// The 6x6 cage with its middle 2x2 at level 3, the pattern on every stored
+// level-3 vertex of both, and level 3 the sculpt level. The dense vertices the
+// regional level does NOT store carry zero, because that is what the regional
+// surface holds there: a vertex the level does not store has nowhere to put a
+// coefficient.
+void refine_pair(SmoothPair* p) {
+    for (int l = 0; l < 3; ++l) REQUIRE(p->dense.add_level());
+    REQUIRE(p->part.refine_patches_to_level(region_of(6), 3));
+}
+
+void author_pattern(SmoothPair* p) {
+    for (std::uint32_t v = 0; v < p->ids.size(); ++v) {
+        p->part.set_detail(3, v, rim_pattern(v));
+        p->dense.set_detail(3, p->ids[v], rim_pattern(v));
+    }
+}
+
+void sculpt_at_three(SmoothPair* p) {
+    REQUIRE(p->dense.set_sculpt_level(3));
+    REQUIRE(p->part.set_sculpt_level(3));
+}
+
+SmoothPair smooth_pair() {
+    const Mesh cage = grid_quads(6, 1.0f);
+    SmoothPair p{build(cage), build(cage), dense_ids(cage, 3), {}};
+    refine_pair(&p);
+    p.rim = short_ring(p.dense, p.part, 3, p.ids);
+    author_pattern(&p);
+    sculpt_at_three(&p);
+    return p;
+}
+
+// One dab over the whole refined region and past its rim. Euclidean on
+// purpose: a geodesic walk on the regional level stops at the rim while the
+// dense one walks round it, which would give the two a different REGION and
+// make a disagreement mean something other than the average.
+mesh::MeshBrushSettings rim_smooth_dab() {
+    mesh::MeshBrushSettings s;
+    s.center = cf3(0.0f, 0.3f, 0.0f);
+    s.radius = 0.9f;
+    s.strength = 1.0f;
+    s.geodesic = false;
+    return s;
+}
+
+std::size_t smooth_once(MultiresSurface& s, mesh::MultiresSmoothMode mode) {
+    mesh::LayeredMultiresSculptor stroke(s);
+    REQUIRE(stroke.begin());
+    const std::size_t moved = stroke.smooth(mode, rim_smooth_dab());
+    REQUIRE(stroke.commit());
+    return moved;
+}
+
+std::vector<cfloat3> details_of(MultiresSurface& s, std::uint32_t level) {
+    const std::size_t n = s.positions_at(level).size();
+    std::vector<cfloat3> out;
+    for (std::uint32_t v = 0; v < n; ++v) {
+        const LocalDetail d = s.detail_at(level).get(v);
+        out.push_back(cf3(d.tangent, d.bitangent, d.normal));
+    }
+    return out;
+}
+
+// How many rim vertices the stroke actually wrote: the precondition that the
+// comparison is about the rim and not about an interior the ring never
+// reaches.
+std::size_t rim_written(const std::vector<cfloat3>& before, const std::vector<cfloat3>& after,
+                        const std::vector<char>& rim) {
+    std::size_t n = 0;
+    for (std::size_t v = 0; v < rim.size(); ++v) {
+        const cfloat3 e = after[v] - before[v];
+        if (rim[v] && cdot2(e) > 0.0f) ++n;
+    }
+    return n;
+}
+
+// How many rim vertices sit inside the dab's sphere, measured before the
+// stroke: the geometric half of the precondition, which does not depend on
+// what the smoothing then decides to write.
+std::size_t rim_in_dab(MultiresSurface& s, const std::vector<char>& rim) {
+    const mesh::MeshBrushSettings dab = rim_smooth_dab();
+    const std::vector<cfloat3>& p = s.positions_at(3);
+    std::size_t n = 0;
+    for (std::size_t v = 0; v < rim.size(); ++v) {
+        const cfloat3 e = p[v] - dab.center;
+        if (rim[v] && cdot2(e) < dab.radius * dab.radius) ++n;
+    }
+    return n;
+}
+
+struct SmoothOutcome {
+    Disagreement detail;
+    Disagreement position;
+    std::size_t rim = 0;
+    std::size_t rim_reached = 0;
+    std::size_t rim_moved = 0;
+};
+
+SmoothOutcome smooth_both(mesh::MultiresSmoothMode mode) {
+    SmoothPair p = smooth_pair();
+    SmoothOutcome o;
+    o.rim = static_cast<std::size_t>(std::count(p.rim.begin(), p.rim.end(), 1));
+    o.rim_reached = rim_in_dab(p.part, p.rim);
+    const std::vector<cfloat3> before = details_of(p.part, 3);
+    REQUIRE(smooth_once(p.dense, mode) > 0u);
+    REQUIRE(smooth_once(p.part, mode) > 0u);
+    o.rim_moved = rim_written(before, details_of(p.part, 3), p.rim);
+    o.detail = compare(details_of(p.dense, 3), details_of(p.part, 3), p.ids, p.rim);
+    o.position = compare(p.dense.positions_at(3), p.part.positions_at(3), p.ids, p.rim);
+    return o;
+}
+
+// PRECONDITIONS: the fixture has the 64-vertex rim, the dab covers all of
+// it, and the stroke wrote there — a stroke that never reached the rim would
+// agree for free. Written is not asserted at 64: with the complete ring one rim
+// vertex comes out of preserve-detail unchanged — and so does its dense twin,
+// which the comparison below is what says.
+void require_rim_reached(const SmoothOutcome& o) {
+    INFO("rim " << o.rim << ", " << o.rim_reached << " inside the dab, " << o.rim_moved
+                << " written");
+    REQUIRE(o.rim == 64u);
+    REQUIRE(o.rim_reached == 64u);
+    REQUIRE(o.rim_moved >= 63u);
+}
+
+void check_smooth_agrees(mesh::MultiresSmoothMode mode) {
+    const SmoothOutcome o = smooth_both(mode);
+    require_rim_reached(o);
+    INFO("coefficients: " << o.detail.count << " differ (" << o.detail.off_rim
+                          << " off the rim), worst " << o.detail.worst);
+    INFO("positions: " << o.position.count << " differ (" << o.position.off_rim
+                       << " off the rim), worst " << o.position.worst);
+    CHECK(o.detail.count == 0u);
+    CHECK(o.position.count == 0u);
+}
+
+}  // namespace
+
+TEST_CASE("regional smooth: detail-only smoothing averages the rim over its whole ring") {
+    check_smooth_agrees(mesh::MultiresSmoothMode::DetailOnly);
+}
+
+TEST_CASE("regional smooth: preserve-detail smoothing averages the rim's form over its whole ring") {
+    check_smooth_agrees(mesh::MultiresSmoothMode::PreserveDetail);
 }

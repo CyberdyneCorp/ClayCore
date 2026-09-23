@@ -832,8 +832,18 @@ plate model meshed 2.3x the triangles at the same resolution, and now asks for
 58 where it asked for 88. An **infinite grid** never narrows anything: its geometry bound
 is one cell while its copies fill space, so `scene::item_material_extent` takes it
 as unbounded — an intersect with it keeps the left operand — and where an
-unbounded extent reaches the result the tape reports the plain union of item
-bounds, the one-cell box such a document always had. `TapeCheckpoint` carries the extents a resume needs
+unbounded extent reaches the result (the lattice alone, in a union, or as the left
+operand of a subtract) `tape.bounds` is **infinite**, as a plane's is (#640). It
+used to fall back to the plain union of item bounds, the grid's one cell, which
+left every other copy outside the box: a lattice minus a sphere had all 5,824 of
+its material samples outside it. Every consumer already handles an
+infinite box — meshing, `clay_voxel_rasterize`, the bakes and pyclay's `Volume`
+constructors refuse and ask for a region, `clay_sdf_smooth_begin` refuses the
+layer (its working lattice is derived from the box), a raycast and a pick skip
+the clip and the per-ray local tape, `advised_params` gives no advice and the
+prefix cache declines (the layer walks in full) — and a host reading `clay_tape_info` must test for ±FLT_MAX before it
+plans bricks over the box. A document with no infinite grid is untouched: the
+nine gallery documents report bit-identical bounds and plan the same 3,188 bricks. `TapeCheckpoint` carries the extents a resume needs
 (`chain_bound`, `below_bound`, per-frame `outer_bound`, and the plain union
 `reach` a transition's field info still reads), so an appended subtract reports
 the full compile's box. The same
@@ -1407,6 +1417,13 @@ section is the thing that was missing.
 then a voxel smooth, then a mesh grab undo as mesh, voxel, SDF. The entry points
 did not change shape; since ABI 0.43.0 they reverse more than they did.
 
+**One caveat on the mesh row, at the ABI.** The session history records mesh
+vertex deltas, but neither binding hands it a *sculptor stamp*: a
+`clay_mesh_sculptor` over a document's mesh layer records into the host's
+`clay_mesh_deltas`, and `clay_document_undo` after a stamp reaches the step
+before it. What the ABI does record on a mesh layer is whatever replaces its
+triangles — attach, `clay_document_replace_mesh_layer`, a voxel remesh.
+
 | representation | what a step holds | where the inverse comes from |
 |---|---|---|
 | SDF edit list, layer state | one `UndoStack` entry | the command's inverse |
@@ -1460,25 +1477,57 @@ The obvious guesses are wrong, so they are worth naming:
 - **Rasterizing into a grid IS undoable.** It writes through the same cell
   choke point every verb uses.
 
+**A VOXEL sculpt-layer operation is a step** — strength, visibility, reorder,
+removal and merge-down, through the existing `clay_voxel_*_sculpt_layer*`
+entry points and their pyclay methods, since `unify-the-undo-history` finished.
+Until then none of the five recorded anything, which was worse than a barrier:
+the recompose moved cells under the history without telling it, so a host that
+dialled a pass to 40% and pressed undo reverted the *pass* onto cells the dial
+had already moved, and the slider stayed at 40%. The step carries the property
+it changed **and** every cell the recompose rewrote, and replays both without
+recomposing, so undo and redo are bit-exact — the document's bytes, grid and
+stack together. A removal holds the pass it removed; a merge-down holds the
+folded upper pass plus what it overwrote in the lower one, not a second copy of
+the lower. The mesh stack has recorded the same operations since 0.76.0
+(`MultiresLayerProperty`); the two stacks now agree.
+
 What genuinely is not:
 
-- **VOXEL sculpt-layer property changes** — strength, visibility, order,
-  merge-down. Their effect on cells replays, but the property value does not, so
-  an undo would restore the pixels and not the setting. A partial undo is worse
-  than none, so they are not steps yet. Since 0.76.0 the **mesh** stack over a
-  multiresolution hierarchy does record them — rename, strength, visibility,
-  reorder, lock, add, remove, merge and bake are all `MultiresLayerProperty`
-  steps — because an additive displacement can restore its own coefficients
-  exactly and a dialled-back pass is a thing an artist means to undo. That is
-  the shape the voxel side would have to reach, not an inconsistency to
-  preserve.
-- **Operations that destroy history itself** — dropping a resolution level,
-  removing a VOXEL sculpt layer. Removing a *mesh* sculpt layer is a step: the
-  property record carries a whole-stack snapshot on each side, so it comes back
-  with its id, its name and its coefficients.
+- **Creating a VOXEL sculpt layer.** `begin_sculpt_layer` adds a record the
+  history does not see. The pass's *cells* are steps, so undoing them restores
+  the grid — but the layer's record keeps the cells it recorded, and a later
+  dial of that layer replays them. A journal replayed onto a snapshot taken
+  before the layer existed rebuilds the cells and not the stack, and is refused
+  at the first operation that names the missing layer.
+- **Operations that destroy history itself** — dropping a resolution level.
 - **Creating a mask.** Mask *edits* record; the mask's existence does not. It is
   the same shape of gap that layer creation had until #341 closed it.
 - Anything a **host** does that the engine never sees.
+
+#### Enabling undo mid-session
+
+`clay_document_enable_undo` / `Document.enable_undo()` is a light switch, on the
+SDF path and every other: it is **never refused**, it **starts an empty
+history**, and a second call keeps the history it already has.
+
+- **Everything before the switch is the starting state.** The undo depth reads 0
+  immediately after enabling, whatever the document holds. No barrier is
+  recorded: nothing before the switch is reversible anyway, and a barrier would
+  add a step to every SDF-only host and a journal entry that stops every
+  recovery at index 0.
+- **A gesture that straddles the switch.** A bracket cannot: `begin_undo_group`
+  is refused while undo is off. What a host *can* do is enable in the middle and
+  then call `end_undo_group` for the gesture it began — and through 0.120.0 that
+  unmatched end folded every step since the session began into one. It is now a
+  no-op. Brackets also nest: only the outermost folds.
+- **Memory.** Enabling allocates the history and nothing else; bytes grow with
+  the first recorded step.
+- **The crash journal.** Enabling seeds the journal with the snapshot the
+  document was last loaded from or saved to. If the document was **edited since
+  then**, that pairing is wrong and replay accepts it: a recovery onto that
+  snapshot silently lacks the edits made before the switch. **Save once right
+  after enabling mid-session** — the new snapshot is what the journal then
+  pairs with.
 
 A host that needs a boundary can read it: the history records unreversible
 operations as barriers, `undo_depth` stops counting at the nearest one, and the
@@ -1507,6 +1556,9 @@ guessing:
   fill can outweigh a thousand dabs.
 - A mesh step holds its deltas **by value**, which is what makes it
   self-contained and also doubles a mesh stroke.
+- A voxel **sculpt-layer operation** holds the cells its recompose rewrote —
+  a dial on a big pass is a big step — and a removal or merge-down holds the
+  whole pass it destroyed on top of that.
 - The **journal keeps its own copy** of every payload, so a session with crash
   recovery on holds roughly twice what one without it does.
 

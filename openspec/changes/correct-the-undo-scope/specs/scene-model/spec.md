@@ -10,10 +10,11 @@ Every mutation of the SDF EDIT LIST AND OF LAYER STATE SHALL be expressed as a s
 | Representation | Mechanism | Reachable from `undo()` |
 |---|---|---|
 | SDF edit list, layer state | the command vocabulary above | yes |
-| Voxel grid | sculpt layers — record a pass, dial its strength, reorder, merge down | no |
-| Mesh layer | sparse vertex deltas, reverted against the sculptor | no |
+| Voxel grid | the cells each edit wrote, journaled at the one write choke point; sculpt-layer operations as their own step kind | yes, through the session history |
+| Mask | the cells each edit changed | yes, through the session history |
+| Mesh layer | sparse vertex deltas; wholesale replacements as before-and-after meshes | yes, through the session history — at the ABI, replacements only; a sculptor stamp records into the host's deltas |
 
-A host SHALL be able to discover this from the specification rather than from behaviour. **A single user-visible undo step does not span two representations**, and a host that presents one undo button over all three is presenting something the engine does not implement. Whether it should is a separate question, scoped in the ROADMAP rather than assumed here.
+A host SHALL be able to discover this from the specification rather than from behaviour. The command vocabulary still covers only the edit list and layer state; ONE user-visible undo spans the representations because a session history above the three mechanisms orders their steps (`unify-the-undo-history`), not because the vocabulary grew.
 
 #### Scenario: Command inverse restores state
 - **WHEN** any command from the vocabulary is applied to a document and then its inverse is applied
@@ -31,9 +32,9 @@ A host SHALL be able to discover this from the specification rather than from be
 - **WHEN** a binding performs an edit on a document with undo enabled and then undoes it
 - **THEN** the document serializes bit-identically to its state before the edit
 
-#### Scenario: A voxel edit is not on the undo stack
+#### Scenario: A voxel edit is on the session history, not in the vocabulary
 - **WHEN** undo is enabled, a voxel layer is edited, and the undo depth is read before and after
-- **THEN** the depth is unchanged, and undo does not restore the edited cells
+- **THEN** the depth grows by one and undo restores the edited cells, while no command of the vocabulary was performed
 
 #### Scenario: An edit to a group undoes exactly
 - **WHEN** a group's op is changed, a child is added to it, it is reparented, or the whole group is removed, on a document with undo enabled

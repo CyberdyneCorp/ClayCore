@@ -27,6 +27,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "clay/field/volume.h"
@@ -213,18 +214,84 @@ class VoxelGrid {
 
     float sculpt_layer_strength(std::size_t layer) const;
     bool sculpt_layer_visible(std::size_t layer) const;
+
+    // -- a layer operation as an undo step (unify-the-undo-history 3.3) -----
+    //
+    // A dial, a hide, a reorder, a removal or a merge-down changes TWO things:
+    // a property of the stack, and the cells the recompose rewrote. An undo
+    // that restored only the cells would leave the slider at the new value; one
+    // that restored only the slider would have to recompose, and a recompose
+    // is not the inverse of a recompose — it clobbers any edit made outside a
+    // layer since. So the record carries both, and replaying it restores the
+    // cells from what was written and the property from what it was, with no
+    // recompose on either side. Bit-exact by construction rather than by
+    // argument.
+    //
+    // The same shape as mesh::SculptLayerProperty on the mesh stack, which is
+    // the one the roadmap names for this: an optional record out-parameter on
+    // each operation, and one apply that runs it either way.
+
+    // One layer as data. What a removal or a merge-down has to hold, since
+    // each destroys a record and undoing it means putting that record back.
+    struct SculptLayerData {
+        std::string name;
+        std::vector<SculptChange> changes;
+        float strength = 1.0f;
+        bool visible = true;
+        std::uint32_t seed = 0;
+    };
+    struct SculptLayerOp {
+        // None is what an operation that changed nothing leaves behind — the
+        // same strength again, a move onto itself — and a caller recording
+        // steps drops it, as every other recorder drops a no-op.
+        enum class Kind : std::uint8_t { None, Strength, Visible, Move, Remove, Merge };
+        Kind kind = Kind::None;
+        std::size_t layer = 0;  // Move: the index it moved FROM
+        std::size_t to = 0;     // Move only
+        float strength_before = 1.0f, strength_after = 1.0f;  // Strength
+        bool visible_before = true, visible_after = true;     // Visible
+        // Remove: the layer removed. Merge: the UPPER layer, which the fold
+        // consumed. The one payload here proportional to a pass rather than to
+        // a handle, and the reason design.md names merge-down separately.
+        SculptLayerData held;
+        // Merge only: the lower layer's change count before the fold and the
+        // `after` values the fold overwrote, as (index, value). Enough to
+        // restore the lower layer exactly without holding a second copy of it,
+        // which would double the step for the layer most likely to be large.
+        std::size_t lower_count = 0;
+        std::vector<std::pair<std::uint32_t, std::uint8_t>> lower_afters;
+        // Every cell the recompose wrote, in the order it wrote them.
+        std::vector<SculptChange> cells;
+
+        bool empty() const { return kind == Kind::None; }
+        std::size_t bytes() const;
+        // For the crash journal. A private in-session encoding with a version
+        // byte, refused rather than guessed at when it does not parse.
+        std::vector<std::uint8_t> encode() const;
+        static bool decode(const std::uint8_t* data, std::size_t size, SculptLayerOp* out);
+    };
+    // Replay a recorded operation backwards (forward = false) or forwards. Refused
+    // — false, grid untouched — when the stack no longer has the shape the
+    // record names: an index past the end, or a lower layer shorter than a
+    // merge's record of it. Neither direction recomposes, and neither records
+    // into a sculpt layer or a change sink.
+    bool apply_sculpt_layer_op(const SculptLayerOp& op, bool forward);
+
     // Both recompose the grid: the layers above this one are reverted, the
     // change applied, and they are replayed. False for a layer this grid does
-    // not have.
-    bool set_sculpt_layer_strength(std::size_t layer, float strength);
-    bool set_sculpt_layer_visible(std::size_t layer, bool visible);
+    // not have. `record`, when given, receives the operation as an undo step
+    // (left `empty()` when nothing changed).
+    bool set_sculpt_layer_strength(std::size_t layer, float strength,
+                                   SculptLayerOp* record = nullptr);
+    bool set_sculpt_layer_visible(std::size_t layer, bool visible,
+                                  SculptLayerOp* record = nullptr);
 
     // Discard a layer, leaving the grid as though the pass had never been
     // made. Everything recorded after it is replayed on top.
-    bool remove_sculpt_layer(std::size_t layer);
+    bool remove_sculpt_layer(std::size_t layer, SculptLayerOp* record = nullptr);
     // Fold a layer into the one below it, so two passes become one that can
     // still be dialled. The lower layer keeps its own name and strength.
-    bool merge_sculpt_layer_down(std::size_t layer);
+    bool merge_sculpt_layer_down(std::size_t layer, SculptLayerOp* record = nullptr);
     // Move a layer to another position in the stack, sliding the rest along.
     // ORDER IS MEANINGFUL — layers composite bottom-up, so where two passes
     // touched the same cell, moving one past the other changes which value
@@ -234,7 +301,7 @@ class VoxelGrid {
     // the new order rather than re-running the strokes, for the reason
     // remove_sculpt_layer does. False for an index this grid does not have,
     // and a no-op when `to` equals `from`.
-    bool move_sculpt_layer(std::size_t from, std::size_t to);
+    bool move_sculpt_layer(std::size_t from, std::size_t to, SculptLayerOp* record = nullptr);
 
     // What the layers cost in memory: the recorded cells plus the lookup that
     // makes recording O(1) per write. A layer costs its PASS, not the model —
@@ -856,6 +923,17 @@ class VoxelGrid {
     bool read_sculpt_tail(const std::uint8_t* data, std::size_t size, std::size_t* pos);
     void revert_from(std::size_t first);
     void apply_from(std::size_t first);
+    // Route the change sink into `record`'s cells for the length of one
+    // operation; returns the sink to put back. A null record leaves it alone.
+    std::vector<SculptChange>* capture_into(SculptLayerOp* record);
+    // The metadata half of a merge-down, shared by the operation and its redo.
+    void fold_down(std::size_t layer, SculptLayerOp* record);
+    void unfold_down(const SculptLayerOp& op);
+    void redo_layer_property(const SculptLayerOp& op);
+    void undo_layer_property(const SculptLayerOp& op);
+    void move_record(std::size_t from, std::size_t to);
+    static SculptLayerData to_data(SculptLayerRecord rec);
+    static SculptLayerRecord from_data(SculptLayerData data);
 
     std::vector<SculptLayerRecord> sculpt_layers_;
     // Not owned. Null is off; see set_change_sink.
