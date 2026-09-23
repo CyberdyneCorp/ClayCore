@@ -84,6 +84,7 @@ add_executable(clay_unit_tests
   unit/test_clayspace_multires.cpp
   unit/test_multires_io.cpp
   unit/test_c_multires.cpp
+  unit/test_c_multires_layer_ceiling.cpp
   unit/test_c_surface_chunks.cpp
   unit/test_c_maintenance.cpp
   unit/test_mesh_sculpt_layers.cpp

@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 
 #include "clay/memory/capacity.h"
@@ -430,6 +431,7 @@ bool MultiresSurface::add_level(MultiresError* out_error, const parallel::Cancel
     level.note_moved_all();
 
     state_->levels.push_back(std::move(level));
+    state_->structure_revision = next_structure_revision();
     // Every layer gains a slot for the new level, sized lazily on first write.
     // A layer over a twelve-level hierarchy costs the levels it REACHED.
     sync_stack_levels(*state_);
@@ -628,6 +630,7 @@ bool MultiresSurface::add_level_for_patches(const std::vector<std::uint32_t>& pa
     level.patch_kept = std::move(keep);
 
     state_->levels.push_back(std::move(level));
+    state_->structure_revision = next_structure_revision();
     sync_stack_levels(*state_);
     const std::uint32_t added = static_cast<std::uint32_t>(state_->levels.size() - 1);
     state_->sculpt_level = added;
@@ -724,6 +727,7 @@ bool MultiresSurface::remove_highest_level(MultiresError* out_error, DetailField
     }
     if (out_detail) *out_detail = std::move(state_->levels.back().detail);
     state_->levels.pop_back();
+    state_->structure_revision = next_structure_revision();
     // Every layer's field at the level that just went is discarded with it: a
     // coefficient stored against a level that no longer exists names nothing.
     // Destructive, and the owner above this is what makes it reversible — the
@@ -908,6 +912,15 @@ void MultiresSurface::reset_eval_stats() {
 
 std::uint64_t MultiresSurface::cache_generation() const {
     return state_ ? state_->cache_generation : 0;
+}
+
+std::uint64_t next_structure_revision() {
+    static std::atomic<std::uint64_t> next{0};
+    return next.fetch_add(1, std::memory_order_relaxed) + 1;
+}
+
+std::uint64_t MultiresSurface::structure_revision() const {
+    return state_ ? state_->structure_revision : 0;
 }
 
 MultiresMemory MultiresSurface::memory() const {

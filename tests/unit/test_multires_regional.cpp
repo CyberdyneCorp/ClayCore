@@ -1898,3 +1898,304 @@ TEST_CASE("regional: a uniform hierarchy reports no cross-level work") {
     CHECK(centre_stroke(regional, level, 0.2f) > 0u);
     CHECK(regional.eval_stats().cross_level_reads >= 10u);
 }
+
+// -- the frame at a region boundary (finish-regional-multires section 1) ------
+//
+// `P(n) = S(n) + Frame * Detail`, so a vertex whose frame differs from the
+// dense hierarchy's reconstructs the SAME coefficient to a DIFFERENT position.
+// "a refined patch holds the dense hierarchy's own numbers" above authors no
+// detail and therefore cannot see this: with zero detail the frame multiplies
+// nothing. Every gate here authors NONZERO detail at the boundary and compares
+// the POSITION, because a fix that only changed shading has not fixed storage.
+
+namespace {
+
+// The dense vertex holding each regional vertex of `level`, matched on the
+// detail-free positions of a pristine pair built from the same cage. Both
+// hierarchies number deterministically, so the mapping carries over to any
+// other pair built the same way.
+//
+// The region is the middle 2x2 of an n x n cage, refined to level 3.
+std::vector<std::uint32_t> region_of(int n) { return block_patches(n, n / 2 - 1, n / 2 - 1, 2); }
+
+std::vector<std::uint32_t> dense_ids(const Mesh& cage, std::uint32_t level, int n = 6) {
+    MultiresSurface dense = build(cage);
+    MultiresSurface part = build(cage);
+    for (std::uint32_t l = 0; l < level; ++l) REQUIRE(dense.add_level());
+    REQUIRE(part.refine_patches_to_level(region_of(n), 3));
+    const std::map<std::array<float, 3>, std::uint32_t> of = vertex_by_position(dense, level);
+    std::vector<std::uint32_t> out;
+    for (const cfloat3& p : part.positions_at(level)) {
+        const auto it = of.find({p.x, p.y, p.z});
+        REQUIRE(it != of.end());
+        out.push_back(it->second);
+    }
+    return out;
+}
+
+// The regional vertices of `level` whose own face ring is shorter than the
+// dense vertex's — the rim, where the level stores only part of the ring.
+std::vector<char> short_ring(MultiresSurface& dense, MultiresSurface& part, std::uint32_t level,
+                             const std::vector<std::uint32_t>& ids) {
+    std::vector<char> out(ids.size(), 0);
+    for (std::uint32_t v = 0; v < ids.size(); ++v) {
+        std::size_t own = 0, full = 0;
+        (void)part.connectivity_at(level).faces_of(v, &own);
+        (void)dense.connectivity_at(level).faces_of(ids[v], &full);
+        out[v] = own < full ? 1 : 0;
+    }
+    return out;
+}
+
+struct Disagreement {
+    std::size_t count = 0;      // entries further apart than the bound
+    std::size_t off_rim = 0;    // ...of which NOT on the short-ring rim
+    double worst = 0.0;
+};
+
+// The bound sits between two measured numbers, as the ROADMAP's "put the
+// bound between the noise floor and the wrong answer" asks. A correct port
+// differs only by summation order: worst 4.1e-07 on a unit normal and 6.0e-08
+// on a position, on these grids and on a cube-sphere. The defect, with the
+// neighbourhood input reverted, reads 0.154 on a level-3 frame normal and
+// 0.0054 on a position on the 6x6 cage, and 0.029 and 0.0012 on a
+// cube-sphere. Exact equality is NOT asked for: the dense level sums one
+// contiguous ring and the regional level sums its own faces and then the
+// derived ones, and float addition is not associative.
+constexpr double kBoundaryBound = 1e-5;
+
+Disagreement compare(const std::vector<cfloat3>& dense, const std::vector<cfloat3>& part,
+                     const std::vector<std::uint32_t>& ids, const std::vector<char>& rim) {
+    Disagreement d;
+    for (std::uint32_t v = 0; v < ids.size(); ++v) {
+        const cfloat3 e = dense[ids[v]] - part[v];
+        const double len = std::sqrt(static_cast<double>(cdot2(e)));
+        d.worst = std::max(d.worst, len);
+        if (len <= kBoundaryBound) continue;
+        ++d.count;
+        if (!rim[v]) ++d.off_rim;
+    }
+    return d;
+}
+
+std::vector<cfloat3> frame_normals(MultiresSurface& s, std::uint32_t level) {
+    std::vector<cfloat3> out;
+    for (const mesh::SurfaceFrame& f : s.frames_at(level)) out.push_back(f.normal);
+    return out;
+}
+
+std::vector<cfloat3> frame_tangents(MultiresSurface& s, std::uint32_t level) {
+    std::vector<cfloat3> out;
+    for (const mesh::SurfaceFrame& f : s.frames_at(level)) out.push_back(f.tangent);
+    return out;
+}
+
+// One coefficient, deliberately off every axis so no component of the frame
+// can hide behind a zero.
+constexpr LocalDetail kBoundaryCoefficient{0.013f, -0.021f, 0.034f};
+
+void author_on_stored(MultiresSurface& dense, MultiresSurface& part,
+                      const std::vector<std::uint32_t>& ids) {
+    for (std::uint32_t v = 0; v < ids.size(); ++v) {
+        part.detail_mutable(3).set(v, kBoundaryCoefficient);
+        dense.detail_mutable(3).set(ids[v], kBoundaryCoefficient);
+    }
+}
+
+}  // namespace
+
+TEST_CASE("regional boundary: a coefficient authored on the rim reconstructs where the dense one does") {
+    const Mesh cage = grid_quads(6, 1.0f);
+    const std::vector<std::uint32_t> ids = dense_ids(cage, 3);
+
+    MultiresSurface dense = build(cage);
+    MultiresSurface part = build(cage);
+    for (int l = 0; l < 3; ++l) REQUIRE(dense.add_level());
+    REQUIRE(part.refine_patches_to_level(block_patches(6, 2, 2, 2), 3));
+    const std::vector<char> rim = short_ring(dense, part, 3, ids);
+
+    // PRECONDITIONS, asserted so the gate cannot pass on a fixture that has no
+    // rim or no detail on it.
+    const std::size_t rim_count = static_cast<std::size_t>(std::count(rim.begin(), rim.end(), 1));
+    REQUIRE(ids.size() == 289);
+    REQUIRE(rim_count == 64);
+
+    // Identical detail at every level-3 vertex the regional hierarchy stores,
+    // written in both before the level is first evaluated — the
+    // full-evaluation path. NOT at the dense vertices the regional level does
+    // not store: those have nowhere to hold a coefficient on the regional side,
+    // so the regional surface there is the pure subdivision, and detail on the
+    // dense side would move the display normal at the rim for a reason that is
+    // not the defect.
+    author_on_stored(dense, part, ids);
+    std::size_t rim_with_detail = 0;
+    for (std::uint32_t v = 0; v < ids.size(); ++v) {
+        if (rim[v] && !part.detail_at(3).get(v).zero()) ++rim_with_detail;
+    }
+    REQUIRE(rim_with_detail == rim_count);
+
+    // THE CLAIM: the same coefficient lands in the same place. A COUNT of
+    // shared vertices that land elsewhere, and it is 0.
+    const Disagreement pos = compare(dense.positions_at(3), part.positions_at(3), ids, rim);
+    const Disagreement nrm = compare(frame_normals(dense, 3), frame_normals(part, 3), ids, rim);
+    const Disagreement tan = compare(frame_tangents(dense, 3), frame_tangents(part, 3), ids, rim);
+    const Disagreement shade = compare(dense.normals_at(3), part.normals_at(3), ids, rim);
+    INFO("positions: " << pos.count << " differ, worst " << pos.worst);
+    INFO("frame normals: " << nrm.count << " differ, worst " << nrm.worst);
+    INFO("frame tangents: " << tan.count << " differ, worst " << tan.worst);
+    INFO("display normals: " << shade.count << " differ, worst " << shade.worst);
+    CHECK(pos.count == 0);
+    CHECK(nrm.count == 0);
+    CHECK(tan.count == 0);
+    CHECK(shade.count == 0);
+    // And the detail really does move the surface, so a position that agrees
+    // agrees about something.
+    MultiresSurface plain = build(cage);
+    REQUIRE(plain.refine_patches_to_level(block_patches(6, 2, 2, 2), 3));
+    CHECK_FALSE(same_bits(plain.positions_at(3), part.positions_at(3)));
+}
+
+TEST_CASE("regional boundary: every graded level carries the dense hierarchy's frames") {
+    // The same comparison with NO detail anywhere, at each of the three levels
+    // the grading builds. Levels 1 and 2 are graded rather than refined, so
+    // their rim is a different rim from level 3's, and each is its own
+    // `full_evaluate`.
+    //
+    // TEN CELLS ACROSS, not six: on a six-cell cage the two rings the grading
+    // adds reach every patch at level 1, so level 1 has no rim at all and the
+    // gate would read 0 there for the wrong reason.
+    const int n = 10;
+    const Mesh cage = grid_quads(n, 1.0f);
+    MultiresSurface dense = build(cage);
+    MultiresSurface part = build(cage);
+    for (int l = 0; l < 3; ++l) REQUIRE(dense.add_level());
+    REQUIRE(part.refine_patches_to_level(region_of(n), 3));
+
+    std::size_t rims_seen = 0;
+    for (std::uint32_t level = 1; level <= 3; ++level) {
+        const std::vector<std::uint32_t> ids = dense_ids(cage, level, n);
+        const std::vector<char> rim = short_ring(dense, part, level, ids);
+        const std::size_t rim_count =
+            static_cast<std::size_t>(std::count(rim.begin(), rim.end(), 1));
+        if (rim_count > 0) ++rims_seen;
+        const Disagreement nrm =
+            compare(frame_normals(dense, level), frame_normals(part, level), ids, rim);
+        const Disagreement shade =
+            compare(dense.normals_at(level), part.normals_at(level), ids, rim);
+        INFO("level " << level << ": rim " << rim_count << " of " << ids.size()
+                      << "; frame normals " << nrm.count << " differ, worst " << nrm.worst
+                      << "; display normals " << shade.count << " differ, worst "
+                      << shade.worst);
+        CHECK(nrm.count == 0);
+        CHECK(shade.count == 0);
+    }
+    // PRECONDITION: every level has a rim. A level whose ring is complete
+    // everywhere would pass this without exercising the neighbourhood.
+    CHECK(rims_seen == 3);
+}
+
+TEST_CASE("regional boundary: an edit below the rim re-derives the frames the dense hierarchy re-derives") {
+    // THE PARTIAL PATH, which is the one a stroke takes. The first gate
+    // evaluates each level once and in full; this one evaluates first, then
+    // writes the detail through `set_detail` — the display normals go through
+    // the pending drain — and then moves the level below and lets
+    // `partial_evaluate` decide which rim vertices to redo.
+    //
+    // WHY THE HALO NEEDS NO CROSS-LEVEL WALK (finish-regional-multires 2.8).
+    // `dirty_children` marks every child of every parent face incident to a
+    // moved parent vertex, which is a superset of the children whose stencil
+    // reads it. A rim vertex whose normal moved only because an OUTSIDE vertex
+    // o moved shares a derived quad with o, and that quad's vertex-point
+    // corner is a corner of the kept face on the rim's other side — stored,
+    // dirty (it is a child of a face incident to the moved parent), and one
+    // stored face away from the rim vertex. So the level's own face ring
+    // already reaches it. The single level-2 edits below measure that argument.
+    const Mesh cage = grid_quads(6, 1.0f);
+    const std::vector<std::uint32_t> ids = dense_ids(cage, 3);
+
+    MultiresSurface dense = build(cage);
+    MultiresSurface part = build(cage);
+    for (int l = 0; l < 3; ++l) REQUIRE(dense.add_level());
+    REQUIRE(part.refine_patches_to_level(block_patches(6, 2, 2, 2), 3));
+    const std::vector<char> rim = short_ring(dense, part, 3, ids);
+    REQUIRE(std::count(rim.begin(), rim.end(), 1) == 64);
+    (void)dense.positions_at(3);
+    (void)part.positions_at(3);
+    const std::uint64_t full_before = part.eval_stats().full_level_rebuilds;
+    for (std::uint32_t v = 0; v < ids.size(); ++v) {
+        part.set_detail(3, v, kBoundaryCoefficient);
+        dense.set_detail(3, ids[v], kBoundaryCoefficient);
+    }
+    const Disagreement authored = compare(dense.positions_at(3), part.positions_at(3), ids, rim);
+    const Disagreement shaded = compare(dense.normals_at(3), part.normals_at(3), ids, rim);
+    INFO("authored after evaluation: positions " << authored.count << " differ, worst "
+                                                 << authored.worst << "; display normals "
+                                                 << shaded.count << " differ, worst "
+                                                 << shaded.worst);
+    CHECK(authored.count == 0);
+    CHECK(shaded.count == 0);
+
+    // Every cage vertex in turn, lifted by the same amount in both, and the
+    // level-3 surface compared after EACH move so a stale rim vertex cannot be
+    // repaired by a later move that happens to reach it.
+    std::size_t moves = 0, stale_moves = 0, worst_count = 0;
+    double worst = 0.0, worst_shade = 0.0;
+    for (std::uint32_t c = 0; c < static_cast<std::uint32_t>(cage.positions.size()); ++c) {
+        const cfloat3 lifted = cage.positions[c] + cf3(0.0f, 0.2f, 0.0f);
+        dense.set_base_position(c, lifted);
+        part.set_base_position(c, lifted);
+        const Disagreement d = compare(dense.positions_at(3), part.positions_at(3), ids, rim);
+        const Disagreement n = compare(dense.normals_at(3), part.normals_at(3), ids, rim);
+        ++moves;
+        if (d.count > 0 || n.count > 0) ++stale_moves;
+        worst_count = std::max(worst_count, d.count + n.count);
+        worst = std::max(worst, d.worst);
+        worst_shade = std::max(worst_shade, n.worst);
+    }
+    INFO(stale_moves << " of " << moves << " cage moves leave a level-3 vertex elsewhere; worst "
+                     << worst_count << " vertices, position " << worst << ", normal "
+                     << worst_shade);
+    CHECK(moves == 49);
+    CHECK(stale_moves == 0);
+    // PRECONDITION: this was the partial path, not a level rebuilt from
+    // scratch that would be right whatever the halo did.
+    CHECK(part.eval_stats().full_level_rebuilds == full_before);
+    CHECK(part.eval_stats().partial_level_updates > 0);
+
+    // ONE LEVEL-2 VERTEX AT A TIME, which is the case a halo can get wrong. A
+    // cage move on this cage marks nearly every level-3 vertex dirty, so the
+    // loop above would pass with no halo at all; a single level-2 coefficient
+    // marks exactly the children of its own faces, and a vertex one face beyond
+    // them has a frame that moved and a subdivided position that did not.
+    //
+    // TWO ORACLES, because each is blind where the other sees. The dense
+    // hierarchy runs the SAME partial path, so a halo that stops short stops
+    // short in both and the two agree; the regional hierarchy's own full
+    // evaluation — every cache dropped and rebuilt — is what a stale frame is
+    // measured against. The dense one is still what says the rim is right.
+    const std::vector<std::uint32_t> ids2 = dense_ids(cage, 2);
+    std::vector<std::uint32_t> self(ids.size());
+    for (std::uint32_t v = 0; v < self.size(); ++v) self[v] = v;
+    std::size_t edits = 0, stale_edits = 0, stale_partial = 0;
+    double worst_edit = 0.0, worst_partial = 0.0;
+    for (std::uint32_t v = 0; v < static_cast<std::uint32_t>(ids2.size()); ++v) {
+        part.set_detail(2, v, kBoundaryCoefficient);
+        dense.set_detail(2, ids2[v], kBoundaryCoefficient);
+        const std::vector<cfloat3> partial = part.positions_at(3);
+        const Disagreement d = compare(dense.positions_at(3), partial, ids, rim);
+        const Disagreement n = compare(dense.normals_at(3), part.normals_at(3), ids, rim);
+        ++edits;
+        if (d.count > 0 || n.count > 0) ++stale_edits;
+        worst_edit = std::max({worst_edit, d.worst, n.worst});
+        part.drop_all_caches();
+        const Disagreement f = compare(part.positions_at(3), partial, self, rim);
+        if (f.count > 0) ++stale_partial;
+        worst_partial = std::max(worst_partial, f.worst);
+    }
+    INFO(stale_edits << " of " << edits << " level-2 edits disagree with the dense hierarchy, worst "
+                     << worst_edit << "; " << stale_partial
+                     << " disagree with a full re-evaluation, worst " << worst_partial);
+    CHECK(edits == 289);
+    CHECK(stale_edits == 0);
+    CHECK(stale_partial == 0);
+}

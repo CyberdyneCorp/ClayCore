@@ -858,6 +858,21 @@ class MultiresSurface {
     // is exactly where a stamp taken right after a memory warning lands.
     std::uint64_t cache_generation() const;
 
+    // Moves whenever the LEVEL NUMBERING may have changed: a level added or
+    // removed, the cage replaced, or a different hierarchy decoded or moved
+    // into this object. Never on a cache release, which rebuilds the same
+    // level bit-identically, and never on a sculpt or detail edit.
+    //
+    // WHY IT IS NOT `cache_generation`. A sculptor keeps its stroke's records
+    // across a generation-only rebind -- `MeshBrush::Layer` measures its
+    // ceiling from them -- and those records are indexed by vertex. Removing
+    // the top level and refining a different region leaves the sculpt level's
+    // NUMBER where it was and renumbers every vertex under it; and replacing
+    // the cage starts a fresh state whose generation can land on the very
+    // value a bound sculptor last saw. Drawn from one process-wide counter, so
+    // two structures never share a value.
+    std::uint64_t structure_revision() const;
+
     // WHAT THE HOST WILL SPEND. Filled by the host, never detected: the
     // portable core makes no platform call and branches on no device model, so
     // constrained behaviour is exercised by a desktop test in three lines.

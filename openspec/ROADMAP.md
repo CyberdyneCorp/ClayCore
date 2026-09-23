@@ -118,7 +118,7 @@ Full-grid source sampling now reuses boundary samples shared by neighboring
 bricks. On a 13³ grid this removes 27.7% of source evaluations while preserving
 sample bits and volume bounds. The one-item engine initialization probe improves
 10.68→8.96 ms; full CPU, 104 sanitizer and 93 enabled combined desktop cases pass. See
-[reuse-source-grid-samples](changes/reuse-source-grid-samples/validation.md)
+[reuse-source-grid-samples](changes/archive/2026-09-22-reuse-source-grid-samples/validation.md)
 for measurement scope. The current-main performance-core comparison improves
 Smooth preparation 61.19→57.67 ms; Relax preparation and other action changes
 remain mixed. All 260 paired application cases preserve upload counts, and the
@@ -135,9 +135,35 @@ storage and recomputing its bounds remain proportional to retained storage.
 See `keep-regional-volume-bakes-local` for compatibility, regression coverage,
 and measured results. This does not add an automatic maintenance trigger.
 
-## Where the engine is (2026-09-06, v0.87.0)
+## Follow-ups filed 2026-09-22, from the v0.120.0 work
 
-21 capabilities, 205 archived changes, 19 still open. Complete enough that the
+Each was found while building or measuring a change that has now been archived,
+and each was left out of that change on purpose. They are issues rather than rows
+because none has a proposal yet:
+
+- #629: a `session::History` undo of a DynamicMesh step leaves a C++-held
+  `DynamicSculptor` with a stale index (200 of 6,912 and 2,638 of 49,152 live
+  faces unindexed, measured in #617). No C ABI path reaches it.
+- #630: `refit_around_moved_vertices` (#617) finds nothing on any record this
+  library writes. Keep it with a test that can fail, or delete it.
+- #631: the mesh Draw brush's averaged normal tilts 16.8 deg on a symmetric fin
+  (#618). Cause not investigated.
+- #632: per-dab `move_surface`, the exact draw frame, divides the safe step scale
+  by 1.5 per overlapping dab: 0.6667, 0.017342 and 5.2151e-6 at 1, 10 and 30 dabs
+  (#618). Relief's own bound adds rather than multiplies.
+- #633: a faithful SDF Standard cannot be a combine op. It needs its own
+  proposal: one deformation per stroke, or a stamp baked into the working volume.
+- #634: device watch item. `stroke_build` read 0.298 -> 0.488 ms (1.64x) across
+  iOS 26.5.2 -> 27.0, and cannot be attributed until a same-OS gate runs.
+
+## Where the engine is (2026-09-22, v0.120.0)
+
+21 capabilities, 233 archived changes, 43 still open. v0.120.0 was published
+2026-09-18. Of the 43, one — `record-the-layer-a-crossing-creates` — has every
+task ticked and is open only because its `scene-model` delta modifies a
+requirement that `unify-the-undo-history` (9 open tasks) adds; its `tasks.md`
+records why neither workaround is acceptable. The other 42 each have at least
+one open task. Complete enough that the
 gaps below are about *sculpting affordances*, not about the field engine — and
 as of the 2026-09-06 reconciliation below, about what a HOST can reach rather
 than about what the engine can do.
@@ -149,6 +175,17 @@ v0.84.0, and it disagrees with the ordering above it in three places. Where they
 disagree, theirs is the one with a shipping product behind it.
 
 ### Why this file went stale, and what fixes it
+
+**It happened a third time, and the rule below is still the fix.** On
+2026-09-22 eighteen changes had read 0 open tasks with their code on main —
+the work of #586, #601, #602, #611–#613, #615–#619 and #621–#624, the adaptive-surface
+stroke and undo among it — and none had been archived by the PR that
+finished it. They were archived in one sweep, in merge order. The one conflict
+it met is the kind this section predicts: `stroke-an-adaptive-surface` (#619)
+added the adaptive stroke requirement with the grab rule of the day, and
+`capture-the-grab-region` (#624) replaced that rule while only modifying the
+fixed-mesh requirement, because the adaptive one was not in the living spec
+yet. The living spec was corrected to what `apply_to_dynamic` does.
 
 **The batch above — 205 archived, up from 119 — is the fix applied late.** The
 changes had shipped and read 0 open tasks for weeks; none had been archived. A
@@ -288,7 +325,7 @@ structural gap in it was `add-curve-objects`, which landed 2026-08-06.
 | ~~`add-voxel-verbs`~~ **landed 2026-08-06** | fill-cavities, scrape (flatten+smooth), smudge, carve-with-alpha — the verbs our four are missing against their voxel set. |
 | ~~`add-voxel-repair`~~ **landed 2026-08-06** | Close holes and fill interior voids, so a voxel layer can be made airtight before meshing. Lower priority than it sounds: SDF layers are watertight by construction, and the mesh importer's winding-number sign tolerates small holes — this is only for voxel layers that were sculpted into a non-manifold state. Their "Close Invisible Holes + Fill Voids" is the standard pre-bake step. |
 | ~~`add-mesh-to-field-import`~~ **landed 2026-08-06** | Triangle mesh → field, by BVH distance and generalized winding number for sign. Neither binding could LOAD a mesh, only save one, so the import had nothing to import until this row added it. |
-| `add-tape-abi-export` | The compiled tape (instrs / params / blob) across the C ABI, so a host can upload a **live** document to its own GPU. `add-host-kernel-package` did the hard half — the headers ship, so the host-side evaluator is `ctape_eval` compiled from our own source, and the parity fixture already proves it agrees. What is left is three buffers and their lifetime across the boundary. Blocks WYSIWYG preview-vs-bake for any host that draws its own frames. |
+| ~~`add-tape-abi-export`~~ **landed, archived 2026-08-14 (#125)** — see its row under "The interactive path" | The compiled tape (instrs / params / blob) across the C ABI, so a host can upload a **live** document to its own GPU. `add-host-kernel-package` did the hard half — the headers ship, so the host-side evaluator is `ctape_eval` compiled from our own source, and the parity fixture already proves it agrees. What is left is three buffers and their lifetime across the boundary. Blocks WYSIWYG preview-vs-bake for any host that draws its own frames. |
 
 ## Phase 2 — the plan for what is left
 
@@ -334,7 +371,7 @@ from outside, which the engine did not have.
 | ~~`add-voxel-repair`~~ **landed 2026-08-06** | Report (non-destructive), close holes, fill voids, all mask-gated. Enclosure is decided by a flood over **empty** cells from outside the bounds — `flood_select` walks occupied cells from a seed, which is a different question. |
 | ~~`add-loft-opcode`~~ **landed 2026-08-06** | N profiles along Z, not two — nothing about the opcode wanted the limit, and taking N now means the guide row changes where profiles are *placed* rather than how they are *stored*. Three or more are bracketed, so wide-narrow-wide gives a waist. The Lipschitz warning was real: a loft's safe step scale falls from 0.53 to 0.10 as the depth shrinks, and the example fails if that ordering stops holding. `cop_extrude_to` became `cop_loft`, taking the interpolation parameter instead of deriving it, because a signature that derived it could only ever serve exactly two. |
 | ~~`add-swept-n`~~ **landed 2026-08-06** | Profiles carried along a guide, with **parallel-transported** frames computed when the item compiles — a Frenet frame flips at an inflection and is undefined where the guide is straight, and transport is sequential so it cannot be per-sample. Profiles distribute by arc length; the ends are the profile itself, flat, because a profile need not be a circle. The Lipschitz has two terms — curvature `R/(R-r)` **and** the profile lerp — and leaving the second out made a straight tapering sweep report Lipschitz 1, the exact defect the spec warns against. Curvature is estimated by circumradius, not turn-angle-over-arc, which is fooled by tessellation density. Closed guides are out: transport around a loop does not close the seam, and that is refused rather than ignored. |
-| `add-tape-abi-export` **(new row)** | Three buffers across the C ABI, and no new math: `add-host-kernel-package` shipped the headers, so the host-side evaluator is `ctape_eval` compiled from our own source and the parity fixture already proves it agrees. What will bite is **lifetime, not content**. The tape is recompiled on every edit (Finding 2 above), so the boundary has to say who owns the buffers and when a handle a host is mid-upload with goes stale — an opaque handle with an explicit release, not a pointer into a `std::vector` that the next edit reallocates. Second: a host that uploads instrs/params/blob must also get `safe_step_scale` and the bounds, or its raymarcher oversteps a tape ours would have stepped conservatively. |
+| ~~`add-tape-abi-export`~~ **landed, archived 2026-08-14 (#125)** | Three buffers across the C ABI, and no new math: `add-host-kernel-package` shipped the headers, so the host-side evaluator is `ctape_eval` compiled from our own source and the parity fixture already proves it agrees. What will bite is **lifetime, not content**. The tape is recompiled on every edit (Finding 2 above), so the boundary has to say who owns the buffers and when a handle a host is mid-upload with goes stale — an opaque handle with an explicit release, not a pointer into a `std::vector` that the next edit reallocates. Second: a host that uploads instrs/params/blob must also get `safe_step_scale` and the bounds, or its raymarcher oversteps a tape ours would have stepped conservatively. |
 
 ### Track B — gated on a prerequisite
 
@@ -403,7 +440,7 @@ uncovered one is an error and an exemption is a decision on the record.
 ## Sculpting verbs on SDF layers — all landed
 
 Read the table before concluding anything is missing here. Every row below
-except `add-blob-brush` has **landed**, and the surface is not on `Layer`:
+has **landed** — `add-blob-brush`, the last, archived 2026-08-15 — and the surface is not on `Layer`:
 `Volume.relaxed` is the smooth verb, `Volume.flattened` / `flattened_from` is
 flatten, `Volume.moved_topologically_from` and `Layer.move_surface` are Move,
 `clay.snakehook` is the tendril, and `MaskField` is a full mask brush with
@@ -427,7 +464,7 @@ tractable, and each one is a row rather than a project.
 | ~~`add-mask-extrude`~~ **landed 2026-08-07** | ZBrush's Extract, and what a mask is *for* once it can do more than freeze. Almost nothing new was needed: `op_shell_union`'s operand is already the shell of a field, `FieldVolume` is already blob-carried and backend-portable, and `flatten` already established "sample a fresh volume and hand it back". The one real blocker was that **a mask is a [0,1] scalar on a lattice and not a distance field** — composing one directly puts a step in the result and the Lipschitz bound becomes a fiction — so `mask_to_field` measures it with an exact Euclidean distance transform first. THE MASK IS THE REGION: no `region_radius`, unlike relax and flatten, because the painted region bounds itself. Two paths that must agree — SDF samples, voxels stay in cell space and keep their palette — checked against each other rather than asserted. It lives in `brush` rather than `field` for the cycle above. Not done: no parametric link back to the source (that needs a tape op referencing another layer), no rim profile, no mesh-level extract (meshing the result already works). |
 | ~~`add-noise-field`~~ **landed 2026-08-07** | Gradient noise on an integer lattice. The three open decisions answered each other: parity is tolerance-based (1e-6 CPU / 1e-4 GPU), and a float hash turns each backend's own `sin` into an O(1) disagreement, so the hash had to be INTEGER — which decided the noise and forced the dialect's first integer type into the shim. The seed is a plain deformer parameter. Blob is now unblocked. |
 | ~~`add-move-brush`~~ **landed 2026-08-07** | ZBrush's Move for SDF layers. The deformation was never missing — `grab` has been there since `add-region-deformers` — but three things stood between it and a brush, all of them the kind of geometric step the cut tool and snakehook exist to absorb. A deformer is per ITEM and its centre is in that item's LOCAL frame, so grabbing one item of a blended form pulls its share and leaves the rest (measured: 0.070 and 0.000 on two blended balls). The warp has to go at the FRONT of the chain, because `deformers[0]` is the outermost warp on the geometry and one appended behind an existing deformer has its region weight read at a point that deformer already moved. And there was **nowhere to put the result**: the command vocabulary had no way to change a node's deformers at all, so a deformer could only be set when its node was created — `SetDeformersCmd` is the other half of this row. The expected hard part, accumulating a transform chain through groups, turned out not to exist: a group's transform never reaches its children, which is worth knowing on its own. Followed by `add-move-drag-continuity`: a Move is a stream of drags, not one, and each frame prepended another warp — 120 of them on a two-second drag at 60fps, each multiplying into the declared Lipschitz. A drag now coalesces on its fixed centre and radius, and can be previewed. |
-| `add-blob-brush` | Now unblocked by `add-noise-field`. ZBrush's Blob: an irregular surface response under a brush region, which is noise applied locally rather than to a whole item. |
+| ~~`add-blob-brush`~~ **landed, archived 2026-08-15** | Now unblocked by `add-noise-field`. ZBrush's Blob: an irregular surface response under a brush region, which is noise applied locally rather than to a whole item. |
 
 Not planned: Morph (needs a stored morph target, which is a document concept
 rather than a brush), Elastic and ZProject (both mesh-era ideas that do not
@@ -479,9 +516,9 @@ They are ordered by how much each one costs a sculptor today.
 
 | Change | Why it ranks here |
 |---|---|
-| `add-multi-resolution` | **The ceiling, and the only one that is not additive.** `VoxelGrid` takes its cell size in the constructor and there is no resample, resize, subdivide or adaptive refinement anywhere in `voxel/`, `mesh/` or `brick/` — the brick cache is a sparse narrow band, not an LOD hierarchy. So the finest detail in a model must be chosen before the first stroke and paid for everywhere, and cannot be added locally afterwards. This removes the loop sculpting is made of: block out coarse, subdivide, refine. Recommends discrete levels over an octree, because the falloff dither hashes a CELL COORDINATE and the parity suite enforces that strokes reproduce across platforms — a uniform lattice per level keeps that property, an adaptive one puts it in question. Do it first: retrofitting levels under verbs, a file format and an ABI that all assume one cell size is harder than building on them. |
+| ~~`add-multi-resolution`~~ **landed, archived 2026-08-16 (#156)** | **The ceiling, and the only one that is not additive.** `VoxelGrid` takes its cell size in the constructor and there is no resample, resize, subdivide or adaptive refinement anywhere in `voxel/`, `mesh/` or `brick/` — the brick cache is a sparse narrow band, not an LOD hierarchy. So the finest detail in a model must be chosen before the first stroke and paid for everywhere, and cannot be added locally afterwards. This removes the loop sculpting is made of: block out coarse, subdivide, refine. Recommends discrete levels over an octree, because the falloff dither hashes a CELL COORDINATE and the parity suite enforces that strokes reproduce across platforms — a uniform lattice per level keeps that property, an adaptive one puts it in question. Do it first: retrofitting levels under verbs, a file format and an ABI that all assume one cell size is harder than building on them. |
 | ~~`add-consolidation-policy`~~ **landed 2026-08-09** | The SDF verbs existed and did not chain, for two different reasons: hPolish sampled the previous pass's VOLUME (1.00 -> 14.0 Lipschitz on the second pass, corrupt by the third) and Move stacked a grab per drag (x0.615 per drag, 79x by nine). Advisory reporting plus a layer-scoped bake that redistances; see the section above for what the row got wrong about baking. |
-| `add-representation-round-trip` | The bridge runs one way. SDF to voxel is `rasterize_tape`; voxel back is only mesh -> `to_field` -> volume, which resamples onto a frozen lattice and drops the palette. So a sculptor picks a representation and lives inside its half of the toolkit, when the natural workflow is to keep moving between them. Honest framing is a conversion, not a view: quantisation and lost procedural history are the price and the spec should say so. |
+| ~~`add-representation-round-trip`~~ **superseded by `voxel-to-field`, archived unticked 2026-08-14 (#125)** — `clay_voxel_to_layer`, `clay_item_volume_from_voxels`, example 42; its proposal maps each requirement to what delivered it | The bridge runs one way. SDF to voxel is `rasterize_tape`; voxel back is only mesh -> `to_field` -> volume, which resamples onto a frozen lattice and drops the palette. So a sculptor picks a representation and lives inside its half of the toolkit, when the natural workflow is to keep moving between them. Honest framing is a conversion, not a view: quantisation and lost procedural history are the price and the spec should say so. |
 | `add-sculpt-layers` | No way to record a pass and dial it back. Undo is a stack — removing an old pass discards everything after it; a sculpt layer is addressable. Partial strength on binary occupancy is the interesting part, and the answer is the dither the falloff brushes already use. |
 
 Two changes proposed on the same day were **withdrawn as wrong**:
@@ -491,6 +528,12 @@ entirely, and concluded the SDF side had neither verbs nor masks. It has both.
 The real gap in that area is consolidation, above.
 
 ## What can run in parallel, and what cannot
+
+*Written 2026-08-09. As of v0.120.0 five of the six are archived —
+`expose-scene-groups`, `add-consolidation-policy`, `add-mesh-layers`,
+`add-multi-resolution` and `add-representation-round-trip` (superseded) — and
+`add-sculpt-layers` is open on one task, 1.9, the SDF decision. The section is
+kept for the minor-assignment rule, which still applies.*
 
 Six changes are open. The constraint is not their size — it is that three of
 them rewrite the same object and three do not touch it at all.
@@ -620,18 +663,20 @@ way to know whether it is met.
 
 | Change | Why |
 |---|---|
-| `add-item-spatial-index` | **The one that matters most.** A dab's brick count is flat with document size; its cost is not. `clay_brick_cache_eval_requests` compiles a culled tape per brick and the cull walks every item — ~64 ns per item per brick, ~24 bricks per dab, so ~3.6 ms at 2 400 items and past the whole budget at 10 000, before a sample is evaluated. The tape cache cannot help: consecutive bricks want different cull regions. Fanning out halves the constant and leaves the slope. |
+| ~~`add-item-spatial-index`~~ **closed without a tree, archived 2026-09-05, merged 2026-09-06 (#470)** — task 1.1 decided against it by measurement, and `pack-the-cull-scan` (#441) took `plan()` at 50 000 items 0.1368 -> 0.0258 ms; see the P1 row under "Revised priorities" | **The one that matters most.** A dab's brick count is flat with document size; its cost is not. `clay_brick_cache_eval_requests` compiles a culled tape per brick and the cull walks every item — ~64 ns per item per brick, ~24 bricks per dab, so ~3.6 ms at 2 400 items and past the whole budget at 10 000, before a sample is evaluated. The tape cache cannot help: consecutive bricks want different cull regions. Fanning out halves the constant and leaves the slope. |
 | `add-cpu-simd-path` | The spec has required a SIMD batch path since v1 — "Apple `simd` on Apple platforms, SSE/NEON via xsimd elsewhere", with a parity scenario gating it — and there is none. `xsimd` is fetched by CMake and included by nothing; the "batch path" is the scalar evaluator sliced across threads. This is the path brick fills actually run on, per the 0.24.0 measurement that keeps them off Metal. |
 | `speed-the-metal-path` | Every dispatch re-uploads the whole tape, allocates and frees six buffers, blocks on `waitUntilCompleted` and copies results back out of shared memory. That is the dispatch cost the 288 µs-per-brick measurement was measuring. Also: `device_meshing` is false while the spec says the backend meshes on device, and gradients fall back to the CPU for the whole batch. |
 | `add-mobile-thread-scheduling` | "The caller owns threading and queues" is not true of the CPU backend: a process-wide pool spawns `hardware_concurrency - 1` threads with no QoS class, counts efficiency cores as equal workers, and spins on `yield()` at the join — on the thread the user is waiting for. |
-| `add-brick-cache-eviction` | The memory budget can be hit and never backed away from: no evict, no trim, no clear. Past the budget a submit is refused, so the surface stops updating where the artist is working, and the only recourse is destroying the cache. iOS asks for memory back and then takes it. |
+| ~~`add-brick-cache-eviction`~~ **landed, archived 2026-08-20 (#163)** | The memory budget can be hit and never backed away from: no evict, no trim, no clear. Past the budget a submit is refused, so the surface stops updating where the artist is working, and the only recourse is destroying the cache. iOS asks for memory back and then takes it. |
 | `add-tape-abi-export` **landed** | Carried since Phase 2 and closed as issue #43 item 5. `clay_tape_export` hands out an immutable snapshot the caller releases — an edit installs a new tape rather than mutating the old, so borrowed buffers cannot be invalidated and a warm export costs a refcount (0.000 ms measured). Culled tapes export too, with the header saying plainly that they compile where the whole-document one does not. Measured against what it replaces: a 512x512 preview round-trip is 8.4 MB and 131 ms per FRAME at 50 items, against 8 KB and 0.02 ms per EDIT. |
 | `add-device-perf-budgets` | Every number in this repository was taken on a desktop or an M2 Max. Nothing measures the budget, nothing measures the path end to end, nothing measures sustained behaviour, and the decision to keep brick fills on the CPU rests on a crossover found on a machine with a fan. This is how the six rows above are judged. |
 | `close-webgpu-host-abi-gaps` **landed** | Issue #43, from ClaySpaceDesktop: the brick cache is a GPU upload path that stopped one step short. Now carries an opt-in RGBA8 colour lattice and an apron on the readback, so a host uploads the narrow band as a filterable `r16float` + `rgba8unorm` atlas and traces it in WGSL with **no kernel math in the shader** — a second, cheaper route to the anti-drift property `docs/06` exists for, and the only one that works in a shading language our dialect does not target. `clay_brick_cache_mesh` takes a key list and reports per-key ranges (22.6 ms → 0.64 ms on the benchmark scene for a dab's worth of bricks), `clay_mesh_copy_vertices` writes a host's own interleaved layout, and the brick raycast has a batched form. |
 | `mesh-brick-cache-lod` **landed** | Issue #93, also from ClaySpaceDesktop. The LOD half that shipped was the half a MESHING host could not use: `clay_brick_cache_build_mip` built a level, `clay_brick_cache_read_bricks` read one and `clay_brick_cache_current_lod` reported one, while `clay_brick_cache_mesh` took a key list and no level — so coarse triangles meant reimplementing the marcher over the fp16 samples, which is the thing a host adopts this cache to avoid. The mip turned out to need nothing from the mesher: it is the cache's own lattice at twice the spacing, so `clay_brick_cache_mesh_lod` is plumbing plus two rules — an unbuilt level is `CLAY_ERROR_NOT_FOUND` rather than the empty mesh that already means "no surface", and field attributes stay at level 0 where the culled tape's exactness argument holds. |
 | `add-device-interop` **landed (Vulkan verified, Metal CI-only)** | The other half of #43. Even on the atlas route every brick and every mesh crosses host memory, because `eval::Backend` has no notion of a device — `eval_grid` writes `float*` by type — so a host that was going to draw on a GPU pays an upload it should not need. Lend claycore your `VkDevice` or `MTLDevice` and have evaluation land in your own buffer. Pairs with `add-vulkan-backend`, which made this the same physical device on both supported platforms. The limit worth stating up front: this makes evaluation OUTPUT device-resident, not brick STORAGE — the cache's generation and classification state machine is host code. Vulkan adoption is verified on lavapipe (device output bit-identical to host output); Metal adoption is written and compiled by CI but has not run on hardware. CUDA reports that it cannot adopt. |
 
-`add-vulkan-backend` is proposed alongside these and is **not** one of them: on
+`add-vulkan-backend` — **landed, archived 2026-09-05, merged 2026-09-06 (#470)**, with 1.12, the
+brick crossover, deferred as a benchmark — was proposed alongside these and is
+**not** one of them: on
 Apple hardware Vulkan means MoltenVK over Metal, which cannot beat the Metal
 backend it translates into. Its case is portability and the retirement path for
 OpenCL, whose CI job was removed because pocl's arithmetic is the CPU's. The
@@ -890,12 +935,11 @@ after.
 |---|---|---|
 | 1 | `add-shared-brush-kernels` | **Landed** (#377). The prerequisite the other four assume. Representation-neutral kernels, a compiled per-stroke runtime plan, a reusable workset, brush frames and automasking over the workset, and a versioned `BrushPreset` so the artist-facing families (ClayBuildup, DamStandard, hPolish, TrimDynamic, Rake) become presets rather than engine paths. **Shipped zero behaviour change on the fixed path, which was the acceptance criterion.** Two items of this row's scope were NOT in it and are row 1b: the scratch arena, which was named here and never written, and "neutral", which was true of the kernels and not of the runtime around them |
 | 1b | `add-shared-brush-runtime` | **Landed.** Row 1's residual, and it is a behaviour fix rather than a refactor: `DynamicSculptor` decoded `clay_mesh_brush_desc.automask` and never read it, so an automask an artist enabled was **silently absent** on the adaptive representation while the header promised "the same descriptor the fixed path takes". What shipped: `BrushScratchArena` (bump, one per sculptor, reset not freed — a warm stamp on a stable surface allocates nothing on any of the three), a 64-bit `WorkItemId` and a two-question `WorkItemTopology` so one automask serves three representations instead of three copies serving one each, `StampFrame` and `MeshBrushSettings::stamp_azimuth` (the grain a rake, a chisel and a rotated alpha are presets over), and parity suites on the adaptive surface and the hierarchy where only the fixed mesh had one. The neutral runtime stays in `mesh/` rather than the `brush/` the implementation guide proposes — `check_layering.py` records `brush -> mesh`, so the guide's layout is a cycle on the first include. The three golden `.inc` tables are byte-identical |
-| 2 | `add-dynamic-topology` | A stable-ID mutable triangular surface beside `mesh::Mesh`, local split/collapse/flip under constraints, a chunked mutable spatial index, a local remesher driven by brush-relative detail, sparse topology undo, and a dirty-chunk C ABI. The largest single row in the file |
+| 2 | `add-dynamic-topology` | **Landed**, archived 2026-09-02 (#444). A stable-ID mutable triangular surface beside `mesh::Mesh`, local split/collapse/flip under constraints, a chunked mutable spatial index, a local remesher driven by brush-relative detail, sparse topology undo, and a dirty-chunk C ABI. The largest single row in the file |
 | 2b | `add-voxel-remesher` | **Landed.** The GLOBAL counterpart to row 2's local one, and a different operation rather than a bigger version of it: a whole surface sampled into a signed narrow-band field at an explicit world voxel size and rebuilt from it — overlaps fused, open surfaces closed under policy, the result validated watertight, the cost preflighted, cancellation and a typed refusal for everything that can go wrong. It is an INTEGRATION change and not new mathematics: the BVH, the generalized winding sign, the sparse sampled field, the watertight marcher, the validator and the attribute transfer all existed; what did not was the operation that composes them and owns the decisions between them. Its one piece of new engineering is the sampling domain, which follows the source's surface and band instead of the bounding box the existing converter walks. Slotted here rather than after row 3 because it depends on nothing rows 1 and 2 build, and because a stretched or kitbashed surface wants a global reset before it wants a subdivision hierarchy |
 | 3 | `add-mesh-multires` | **Landed.** A deterministic Catmull-Clark hierarchy with detail stored in a transported local frame, sculpt level independent of display level, local low→high propagation. Ordered after dynamic topology because the free-form construction stage feeds it, and because both want the same chunk runtime. What shipped: `mesh::MultiresSurface`, `mesh::MultiresSculptor` over the fixed sculptor rather than a second copy of it, blocked-sparse fp32 `DetailField`, per-level preflight that refuses over budget rather than allocating half, base-patch changed-block transport, `project_surface` with `transfer_attributes` untouched, a `Multires` undo kind, and a versioned encoding that prices a declared depth before building it. It is a STANDALONE handle like `DynamicSurface` — no `scene::Layer` owns one, and `io::document_memory` therefore does not see one; the accounting is `MultiresSurface::memory()`, per surface. Region-scoped levels (the mesh analogue of `add_level_region`) are deferred and the reason is recorded in the change |
 | 4 | `add-mesh-sculpt-layers` | **Landed.** Non-destructive detail passes on the multires detail representation — the mesh answer to what voxel sculpt layers already are, and the second of three representations to get them. The instruction held: a layer's coefficients ARE `DetailField` coefficients, in the same transported frame at the same block size, so `E(n) = B(n) + SUM s_i * m_i * L_i(n)` composes one representation instead of reconciling two. What shipped: `mesh::SculptLayerStack` with stable 64-bit ids that are never vector indices, a sparse per-layer mask distinct from the brush gate, base deformation layers at level 0 over the cage's rest frames, `mesh::LayeredMultiresSculptor` as a begin/stamp/commit/cancel transaction that pins its channel per dab and holds the composition, height and tangent-space vector `stamp_detail`, three smoothing modes plus `erase` and `restore`, `SculptLayerDelta` and `SculptLayerProperty` as two new `session::History` kinds — so layer PROPERTY changes are undoable, which the voxel stack still does not do — surface version 2 with version 1 still loading as a hierarchy with no layers, the C ABI, pyclay with a cancelling context manager, and `examples/69_mesh_sculpt_layers.py`. Three decisions worth carrying: additive displacement **commutes** where voxel layers replay cell writes and do not, so reordering is organisation and not geometry — enforced rather than assumed, since a reorder invalidates no block and float addition does not *associate*, so composition sums a block's contributors in **layer-id** order and a drag stays free; merge-down and bake are defined by **visual parity** rather than by concatenating coefficients, which divides by the lower layer's strength and is undefined at zero; and there is no memory cap, because a cap that stops recording leaves the pass on the surface and un-dialable. Colour layers were ruled out of scope — colour blends and blending does not commute |
-| 5 | `add-extreme-poly-runtime` | **Implemented on `feat/extreme-poly-runtime`** (v0.78.0, PR #423, cut from main at a44b1f5 and stacked LAST of the three; rows 1 and 4 merged first as #419 and #417, and this branch is merged onto both — 31 conflict hunks over 17 files, of which four did not compile after a clean three-way merge, so the branch carries the resolution rather than a rebase). Chunk revisions, dirty-chunk transport, memory profiles and pressure trim, subdivision preflight, and the scaling gates that make "a dab costs what it touches" testable at 1M–20M vertices. Last because it optimises an architecture rather than compensating for a missing one — and first to be pulled forward if an iPad build stalls. What shipped: `mesh::ChunkTable`, ONE chunk unit under the fixed mesh, the adaptive surface and every multires level — the multires chunk id is `(base patch, quadrant at depth d)` so a base patch, which quadruples per level, is still a fixed SIZE and still the only identity subdivision preserves; four revisions (topology, geometry, normals, attributes) so a stable-topology dab re-uploads positions and not an index buffer; an epoch-marked dirty set; `clay_surface_view` as ONE caller-owned transport over all three representations beside the two that already shipped, with the whole-surface path kept as the correctness reference the tests reconstruct against; a `memory` leaf module (`budget`, `capacity`, `scratch`) with its own `check_layering.py` entry; a HOST-filled `SculptMemoryProfile` with no device detection anywhere in the portable core; `trim(pressure)` in the published eviction order with `memory::MemoryPin`; five checked-arithmetic preflights that refuse on the PEAK before allocating; and `mesh::MaintenanceQueue`, which a host services between gestures and in which the normal flush is the one item that is not optional. **The chunk size is 128 faces because a matrix over 64/128/256/512/1024 was run here** — the number is not adopted from prior art, and the one place the measurement falsifies the rule that chose it is recorded in the change's `design.md` D2a. Gated rather than claimed: locality, allocation (in BYTES as well as counts, because a gate that counts touches cannot see an O(surface) read), preview and memory-pressure all run as ordinary tests, and each was proven by reverting the mechanism and watching the gate fail. Measured: 200x the vertices at the same touched region is 0.92–1.00x the dab on P50, with an IDENTICAL gathered workset from 100k to 20M. Two defects it found and fixed: a cache generation that moved on BUILD and not on RELEASE, so a memory warning landing between two dabs of a drag silently lost every second dab; and a short chunk buffer reported as `CLAY_ERROR_INVALID_ARGUMENT` rather than `CLAY_ERROR_BUFFER_TOO_SMALL`, which tells a host to stop retrying the one call it should retry. Not done, and why: no reference iPad on the development box (7.8); the hierarchy's query path still SCANS when no caller supplies a seed, so 3.1 stays open even though 3.2 shipped the seed that avoids it; per-stage timing is six stages of fourteen, the eight inside `MeshSculptor::stamp` deliberately left un-instrumented while two branches edit that file; and the `multires with layers` benchmark rows are scripted but unrun |
-| 5 | `add-extreme-poly-runtime` | Chunk revisions, dirty-chunk transport, memory profiles and pressure trim, subdivision preflight, and the scaling gates that make "a dab costs what it touches" testable at 1M–20M vertices. Last because it optimises an architecture rather than compensating for a missing one — and first to be pulled forward if an iPad build stalls |
+| 5 | `add-extreme-poly-runtime` | **Landed** as #423 (v0.78.0) and finished by `finish-extreme-poly-integration` (#448); archived 2026-09-05, merged 2026-09-06 (#470), with 0.1 open by kind and 7.8/7.9 open. **Implemented on `feat/extreme-poly-runtime`** (PR #423, cut from main at a44b1f5 and stacked LAST of the three; rows 1 and 4 merged first as #419 and #417, and this branch is merged onto both — 31 conflict hunks over 17 files, of which four did not compile after a clean three-way merge, so the branch carries the resolution rather than a rebase). Chunk revisions, dirty-chunk transport, memory profiles and pressure trim, subdivision preflight, and the scaling gates that make "a dab costs what it touches" testable at 1M–20M vertices. Last because it optimises an architecture rather than compensating for a missing one — and first to be pulled forward if an iPad build stalls. What shipped: `mesh::ChunkTable`, ONE chunk unit under the fixed mesh, the adaptive surface and every multires level — the multires chunk id is `(base patch, quadrant at depth d)` so a base patch, which quadruples per level, is still a fixed SIZE and still the only identity subdivision preserves; four revisions (topology, geometry, normals, attributes) so a stable-topology dab re-uploads positions and not an index buffer; an epoch-marked dirty set; `clay_surface_view` as ONE caller-owned transport over all three representations beside the two that already shipped, with the whole-surface path kept as the correctness reference the tests reconstruct against; a `memory` leaf module (`budget`, `capacity`, `scratch`) with its own `check_layering.py` entry; a HOST-filled `SculptMemoryProfile` with no device detection anywhere in the portable core; `trim(pressure)` in the published eviction order with `memory::MemoryPin`; five checked-arithmetic preflights that refuse on the PEAK before allocating; and `mesh::MaintenanceQueue`, which a host services between gestures and in which the normal flush is the one item that is not optional. **The chunk size is 128 faces because a matrix over 64/128/256/512/1024 was run here** — the number is not adopted from prior art, and the one place the measurement falsifies the rule that chose it is recorded in the change's `design.md` D2a. Gated rather than claimed: locality, allocation (in BYTES as well as counts, because a gate that counts touches cannot see an O(surface) read), preview and memory-pressure all run as ordinary tests, and each was proven by reverting the mechanism and watching the gate fail. Measured: 200x the vertices at the same touched region is 0.92–1.00x the dab on P50, with an IDENTICAL gathered workset from 100k to 20M. Two defects it found and fixed: a cache generation that moved on BUILD and not on RELEASE, so a memory warning landing between two dabs of a drag silently lost every second dab; and a short chunk buffer reported as `CLAY_ERROR_INVALID_ARGUMENT` rather than `CLAY_ERROR_BUFFER_TOO_SMALL`, which tells a host to stop retrying the one call it should retry. Not done, and why: no reference iPad on the development box (7.8); the hierarchy's query path still SCANS when no caller supplies a seed, so 3.1 stays open even though 3.2 shipped the seed that avoids it; per-stage timing is six stages of fourteen, the eight inside `MeshSculptor::stamp` deliberately left un-instrumented while two branches edit that file; and the `multires with layers` benchmark rows are scripted but unrun |
 
 ### What the documents leave out, and this file requires
 
@@ -938,7 +982,7 @@ Three changes raised by `ClayCore_Field_Stamps_Regional_Multires_Layer_Boolean_I
 | Order | Change | Why here |
 |---|---|---|
 | 1 | `stamp-a-captured-field` **landed 2026-09-05** | **Smaller than the guide describes**, because three of its four pillars already exist: `PrimType::Volume` compiles through the tape, the Node holds a volume by `shared_ptr` so "a thousand uses of one 4 MB asset must not consume ~4 GB" is already true, and `clay_item_volume_from_document` already captures a finite world region with redistance. What is missing is an ORIENTED capture frame (today's region is world-axis-aligned), an asset IDENTITY with a standalone form, a placement helper on `calpha_frame`, and stroke integration. First because it is the smallest and touches nothing the other two need |
-| 2 | `refine-one-region-of-a-hierarchy` **landed; three residuals subsequently closed** | Mixed-depth export, cross-level neighborhoods and crossing brushes are implemented and exercised by `test_multires_regional.cpp`. See the [2026-09-16 mesh investigation](investigations/2026-09-16-mesh-sculpt/README.md). The following host discussion records the earlier prioritization; hierarchy persistence has also since landed (see the host section). **The host does not need any of the three** — it exports no hierarchies — and names a different multires gap as its rank 2: a `.clayspace` carries no hierarchy and the engine reports a hierarchy's layer as a MESH layer, so a host's side-car is the only record that a row ever was one. See the host section. Originally: the gap `add-mesh-multires` recorded in its own row. Depth becomes a property of a base patch, with 2:1 balance in stable patch-id order, transitions watertight by construction rather than by repair, and refinement monotonic in v1 — removal needs a policy for the detail authored there, and picking one silently is worse than not offering it. Reuses the extreme-poly chunk identity; adds no second table |
+| 2 | `refine-one-region-of-a-hierarchy` **landed; its three residuals closed in code by `finish-regional-multires`, one piece of the second still open** | Checked against the tree on 2026-09-22 rather than repeated. **2.3, export transitions:** `mixed_mesh_at_level` and `build_mixed_block` (finish-regional-multires section 5), gated by "regional export: a mixed-depth export closes what the per-patch loop leaves open" (0 open edges where the per-patch loop leaves 72 / 168 / 264). **3.4, cross-level neighbours:** `CrossLevelNeighborhood` (sections 2-3), gated for the brush's normal, relax, smooth, the normal recompute and boundary automasking in `test_multires_sculpt.cpp` ("a smoothing verb is not dragged inward at a depth transition", "relax and a normal-steered verb agree with the uniform hierarchy at a seam", "a depth transition is not a border of the model"); and for the FRAME and display normal — the half with a user — by commit f40ee3fe, gated only since 2026-09-22 by the "regional boundary:" cases in `test_multires_regional.cpp`, which author nonzero detail on the rim and fail at 60 of 289 moved positions with the input reverted. **Still open under 3.4:** the layered sculptor's coefficient and form smoothing (`smooth_detail`, `form_shift`) read `level_adjacency` and so still average a short ring at the rim — finish-regional-multires 3.7. **5.3, crossing brushes:** `stamp_coarse` / `partition_coarse_write` (section 4), gated by "a stamp crossing a depth boundary writes the coarse side too". The boxes in `refine-one-region-of-a-hierarchy/tasks.md` are still unticked; they are closed by the other change's work, not by their own. Earlier text of this row: Mixed-depth export, cross-level neighborhoods and crossing brushes are implemented and exercised by `test_multires_regional.cpp`. See the [2026-09-16 mesh investigation](investigations/2026-09-16-mesh-sculpt/README.md). The following host discussion records the earlier prioritization; hierarchy persistence has also since landed (see the host section). **The host does not need any of the three** — it exports no hierarchies — and names a different multires gap as its rank 2: a `.clayspace` carries no hierarchy and the engine reports a hierarchy's layer as a MESH layer, so a host's side-car is the only record that a row ever was one. See the host section. Originally: the gap `add-mesh-multires` recorded in its own row. Depth becomes a property of a base patch, with 2:1 balance in stable patch-id order, transitions watertight by construction rather than by repair, and refinement monotonic in v1 — removal needs a policy for the detail authored there, and picking one silently is worse than not offering it. Reuses the extreme-poly chunk identity; adds no second table |
 | 3 | `fold-the-layers-with-an-operator` **DONE — 43/43, archived** | Landed in stages through v0.86.0–v0.120.0 and finished by the bounds task (3.1): visible SDF layers fold under a per-layer operator with the item vocabulary, the first visible layer initialises, the eight sites that assumed a hard union each decide what they do (the refill's multi-layer split is refused on a composed top layer; `compile_document_except` callers refuse a composed stack), and `tape.bounds` is narrowed per operator at every level through `scene::combine_extent` — a subtract keeps what it cuts, an intersect the overlap — with a smooth group's own ring added and `TapeCheckpoint` carrying the extents a resume needs. Layer-versus-group parity is gated through the C ABI (`test_c_layer_group_parity.cpp`), not only in C++. Measured: a large subtract carving a small sphere meshes 77x fewer cells (8.0x faster at 200 samples) and plans 41x fewer bricks at 0.16 m; an intersect of two offset spheres 4x/1.5x/3.5x; a union-only document is unchanged |
 
 ## Deferred, but recorded
@@ -1061,7 +1105,7 @@ needs them, and listed so they are not mistaken for oversights:
   one applies to an SDF item; a mesh layer takes a lattice cage and nothing
   else, so ZBrush's Deformation palette — Taper, Twist, Bend — is unreachable
   on the representation an artist holds after a retopo pass or an import.
-  Scoped by `add-mesh-deformers`. Worth recording why it is cheaper than it
+  Scoped by `add-mesh-deformers` — **landed, archived 2026-08-21 (#178)**. Worth recording why it is cheaper than it
   looks: an SDF deformer must run BACKWARDS, which for free-form deformation
   has no closed-form inverse (the SDF lattice accepts ~1.5% error and a 4³ cap
   for it), while a mesh deformer runs FORWARDS once per vertex and inherits
@@ -1367,7 +1411,7 @@ moves are the ones already shipped.
 | ~~**P0**~~ | ~~`unify-the-undo-history`~~ **landed 2026-08-23** | Three history mechanisms and no step spanning two — `correct-the-undo-scope` found it and only wrote it down. Closed by a `session` module above scene/voxel/mesh, because `check_layering.py` forbids `scene` from seeing the other two. Three things the plan got wrong, all caught by tests: consolidate IS undoable (the barrier examples were consolidate and rasterize, and both are recorded), the cell sink first journaled writes that changed nothing and a unit test enshrined it, and `UndoStack::begin_group` pushes its entry at BEGIN so grouped edits recorded no step at all. **The finding worth carrying forward: `voxel::MaskField` is a FOURTH representation** — twenty mutating ABI entry points, zero command variants — which the audit that counted three did not count. Still open: VOXEL sculpt-layer property changes, and masks. The mesh stack closed its half in `add-mesh-sculpt-layers` by registering two kinds through the existing resolver inversion rather than a fifth resolver, which is the shape the voxel side should copy |
 | ~~**P1**~~ | ~~`add-operation-cancellation`~~ **landed 2026-08-24** | The third budget class had no exit: `mask_extrude` measures 4403 ms and `sdf_consolidate` 661 ms on the reference iPad, and a host could neither cancel one nor draw a progress bar — the threading rule forbids reading the document from another thread while it runs. `cancel()` is now the one call in the library safe from another thread, and the token carries progress the host POLLS rather than a callback the engine fires. A cancel is a DISCARD: the document is byte-identical afterwards, so a host never has to undo one. **The constraint that shaped it:** `parallel_for`'s join waits on `done >= num_tasks` and increments only after `fn` returns, so a cancelled chunk must return normally and never throw, or the join hangs forever |
 | ~~**P1**~~ | ~~Procedural masks~~ **landed 2026-08-24, reachable 2026-08-24** | Cheap on a field representation, high artist value — and it repeated surface groups' mistake exactly: curvature, cavity, convexity and normal-direction shipped in C++ with tests, no C entry point, no pyclay, and no change folder. `add-claycore-bridge` closed it, and moved the measure to a per-point form with the mask as one of its callers, so a cavity mask and a baked map cannot disagree about the same surface |
-| **P1** | `add-item-spatial-index` | **Measured 2026-08-24, and the implementation was REVERTED rather than shipped.** A median-split BVH made `plan()` 590x faster and the whole thing 2.4x SLOWER: build 2.584 -> 9.228 ms at 50 000 items against a query saving of 0.14 ms. The query really did become sublinear — per-item cost fell from a flat 2.8 ns to near zero across a 300x range — it is simply the smaller term. **The ratio that decides it is BUILD-TO-PLAN, and it is 1:1**: the index is cached on the document revision, every stamp bumps it, and `CullPlan` exists so one cull serves every brick in a dab. No tree amortises against that. The only remaining direction is incremental insertion, so the build is paid per EDIT rather than per document; the tests that would guard any index shipped without one.
+| ~~**P1**~~ | ~~`add-item-spatial-index`~~ **closed 2026-09-02, archived 2026-09-05, merged 2026-09-06 (#470)** | **Measured 2026-08-24, and the implementation was REVERTED rather than shipped.** A median-split BVH made `plan()` 590x faster and the whole thing 2.4x SLOWER: build 2.584 -> 9.228 ms at 50 000 items against a query saving of 0.14 ms. The query really did become sublinear — per-item cost fell from a flat 2.8 ns to near zero across a 300x range — it is simply the smaller term. **The ratio that decides it is BUILD-TO-PLAN, and it is 1:1**: the index is cached on the document revision, every stamp bumps it, and `CullPlan` exists so one cull serves every brick in a dab. No tree amortises against that. The only remaining direction is incremental insertion, so the build is paid per EDIT rather than per document; the tests that would guard any index shipped without one.
 
 **Re-read 2026-09-02 against a fixture that grows in EXTENT, and the earlier measurement was taken on the wrong axis.** Every SDF benchmark fixture — `sculpted_sphere`, `pole_dense_sphere`, `deep_sphere`, `spread_sculpt` — grows a unit sphere's DENSITY, so a dab's cull region keeps the same FRACTION of the model and survives a flat 28.3% of the items at 2 000, 10 000 and 50 000 alike. There `plan` is ~3% of a dab's cull and the per-brick compiles over its survivors are the other 97%, so the fastest imaginable broad phase wins 3% — which is how a 590x query landed inside a 2.4x slower operation. On dabs at a FIXED SPACING over a growing sheet, survivors stay at 36 and `plan` is 89% of the cull at 50 000. `BM_CullPlanLocal{10000,50000}` (`pack-the-cull-scan`) is that axis, and it is the row a broad phase has to flatten; the density rows cannot show one either way. **The BUILD-TO-PLAN argument above survives intact** and is now the harder of the two: `append` (`append-the-cull-index`) already pays the build per edit, and a prototype of the dynamic tree this row would need adds +0.140 ms to the `append_cached` copy at 50 000 against a query saving of 0.137 ms — so the copy alone can eat the whole win, and the guide's "measure this separately" is the decision, not a footnote. Two more numbers from that prototype, both against its own guide: unbalanced insertion of a fixed-spacing sheet gives height 450 at 50 000 (build 107 ms), so the rotations are not optional; and even balanced, building by repeated insertion costs 7.9 ms against the 2.6 ms full `CullIndex` build it would replace, so a bulk builder belongs in the first PR rather than a later one. **`pack-the-cull-scan` landed the cheap half meanwhile** — folding the constant clauses out of the survive test and packing the boxes it reads — for 5.3x on `plan` at 50 000, which lowers the constant and leaves this row's slope exactly where it was.
 
@@ -1795,6 +1839,19 @@ Recorded because a negative result about our own culling, measured from outside,
 is evidence nothing in this repository can produce for itself.
 
 ### Regional multires: the bit-identity gate passes because the fixture has no boundary detail
+
+**FIXED ON MAIN 2026-09-07, GATED 2026-09-22.** Commit f40ee3fe
+(`complete-regional-multires-neighbours`) sums the cross-level neighbourhood into
+every normal the evaluation builds, frame input and display alike, and it landed
+without a gate that could fail: its ticked "dense oracle" and
+"coefficient-reconstruction" gates are not in `tests/unit`, and reverting the
+input left every pre-existing case green. `finish-regional-multires` section 1
+now carries three "regional boundary:" cases that author nonzero detail on the
+rim. Reverting the input reproduces every number below to the printed digits
+(0.104052 / 0.0485619 / 0.0293633 on the cube-sphere, 0.170116 / 0.154028 on
+the 6x6 grid) and moves 60 of 289 level-3 positions, worst 0.00537; restored, it
+is 0 of 289 with the worst frame difference 4.1e-07, which is summation order.
+What follows is the audit as it was written, kept for the reasoning.
 
 Found by auditing `finish-regional-multires` against the tree, and it is a defect
 in SHIPPED code rather than in the change that found it.
@@ -2280,7 +2337,14 @@ points long for v0.84.0 — and a real session trace for `reference/host_loop.py
 which covers the sequence and not the hours. Both are worth more than another
 synthetic fixture, and neither costs this repository anything to accept.
 
-### The host cannot evaluate the fold, because main is untagged
+### The host cannot evaluate the fold, because main is untagged — DISCHARGED
+
+**Discharged by v0.97.0 (published 2026-09-08), and v0.120.0 (published
+2026-09-18) is the current tag.** Both carry the fold (ABI 0.86.0 and later), so
+the host can pin a tag and call it instead of reading a header. What is left is
+theirs: fit is still "arriving, not evaluated" until they report back from a
+pinned build. The paragraphs below are the record as written on
+2026-09-06.
 
 The consuming host is pinned at **v0.84.0**. The fold is on main at 0.87.0 with
 no tag, so they cannot pin it, cannot call it, and declined to say whether it
@@ -2386,6 +2450,42 @@ representation we already offer.**
 Of the three majors the review confirmed, that is the one with a user behind it.
 The other two are a corrupted display normal and a silent no-op; both are real
 and neither is reachable by anyone we know of yet.
+
+**CLOSED, and it had been since v0.97.0 without this section saying so** (#627).
+The engine fix landed in 142010b6, ten minutes after this section was written:
+`bind_coarse(level, keep_records)` carries each coarse level's record across a
+rebind in which only `cache_generation` moved, and still drops them on a change
+of sculpt level, because a level change is the one rebind that renumbers the
+vertices a record is indexed by. A generation-only rebind rebuilds the same
+level's topology bit-identically, so its records stay valid. What was missing
+was a gate on the path a host takes: the shipped case releases with
+`drop_all_caches`, which no binding exposes. A host releases with
+`clay_multires_trim`, and both `urgent` — which drops exactly the coarse levels a
+crossing stamp writes — and `critical` rebind a live stroke. Both are now gated
+through the C ABI (`test_c_multires_layer_ceiling.cpp`), in C++ with and without
+an unrevisioned seed, and through pyclay; each asserts the rebind happened
+(the seed token moved) before it asserts the ceiling. Measured on the regional
+6x6 cage, two Layer dabs with a trim between them: **0.116** of coarse travel
+against a 0.08 ceiling with the records emptied, **0.0583** with them kept,
+byte-identical to the stroke that was never trimmed.
+
+pyclay could not reach any of it: `MultiresSculptor.stamp` passed a layer height
+of zero, so `stamp("layer", ...)` moved nothing and returned 0 (243 classes for
+`draw` at the same settings). It now takes `layer_height`, default 0.05 as
+`MeshSculptor.stamp` does.
+
+Reviewing that fix found its other edge open. "Only a level change drops the
+records" keyed the drop on the level NUMBER, and removing the top level then
+refining a different region lands back on the same number with every vertex
+renumbered (289 -> 81 on the regional cage): the stroke's record was read
+against the new numbering, 0.078 of difference from a stroke begun afresh. The
+same key let a sculptor survive `set_base_mesh` without rebinding, because the
+replacement state's cache generation started over at the value it had last
+seen (2 and 2), leaving it holding the freed level mesh. Both are closed by
+`MultiresSurface::structure_revision()`, a process-wide counter that moves on
+every add, removal, cage replacement and decode, and that the sculptor compares
+at every bind; gated in C++ and through `clay_multires_remove_highest_level` +
+`clay_multires_add_level_for_patches`.
 
 ### A fixture whose normals all point the same way hides a wrong normal
 
@@ -2529,7 +2629,9 @@ to hold a record at all. So whatever those rows show is not level-dependent and
 is not the seam: if the defect were reachable this way, 1 and 2 would have to
 diverge from 0, and they do not by a digit.
 
-**It rules out one path and nothing else, and #1 is NOT downgraded on it.** The
+**It rules out one path and nothing else, and #1 is NOT downgraded on it.**
+(The defect was in fact already fixed when this was written; see the section
+above, which now records the fix and the host-path gates.) The
 defect needs something that bumps `cache_generation` MID-STROKE, and their probe
 drove segments within a gesture without ever rebinding. An absence of evidence
 from a probe that never induces the precondition is not evidence of absence.
@@ -2553,6 +2655,20 @@ induce, because a bare "could not reproduce" would have downgraded a real defect
 that a live host can still reach.
 
 ### The frame at a region boundary: what it costs to land it unfixed
+
+**It did not land unfixed.** The input fix reached main on 2026-09-07 through
+`complete-regional-multires-neighbours` (commit f40ee3fe) and this section went on
+stating the cost for two weeks afterwards, because the change that fixed it
+ticked no box here and left no gate. Measured 2026-09-22: 0 of 1024 emitted
+corners carry a different frame on either audited fixture (124 of 1024 before on
+the cube-sphere; the "0.170116" below is the 6x6 grid's worst, a different
+fixture from the 124), and a coefficient authored at a boundary vertex
+reconstructs where the dense hierarchy puts it — 0 of 289 positions, worst
+6.0e-08. The host's condition is honoured the other way round: the frame was
+fixable, it was fixed, and sections 1.1-1.5 of `finish-regional-multires` are
+now the gate and the record. The halo half (2.8) was measured to need no
+cross-level walk; the coefficient-smoothing half (3.7) is still open and is the
+one residual this section's cost statement still applies to. Original text:
 
 The host reviewed the regional-multires residual and asked for one thing, on the
 row that is theirs: **if the boundary frame is fixable inside the change, fix it

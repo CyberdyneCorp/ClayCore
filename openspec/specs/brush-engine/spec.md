@@ -11,7 +11,9 @@ applies in its own vocabulary.
 Apart from the representations it drives, and that separation is the point: a
 gesture must mean the same thing on a voxel layer, an SDF layer, a mask and a
 mesh, and it can only do that if "what the gesture was" is decided in one place.
+
 ## Requirements
+
 ### Requirement: Strokes resolve to stamps
 The module SHALL resolve a sequence of stroke samples — position, pressure, tilt and a monotone path parameter — into an ordered list of stamps, each carrying a position, radius, strength and orientation. Resolution SHALL be pure: it SHALL NOT read or modify a document.
 
@@ -378,7 +380,7 @@ Each stamp's world radius and strength SHALL come from the stamp rather than fro
 
 Under `Buildup` accumulation, overlapping stamps SHALL act repeatedly; under `Clamped`, the stroke SHALL reach its strength once however many stamps overlap. This is what makes one `clay` stamp into ClayBuildup.
 
-`grab` and `snakehook` SHALL derive their per-stamp displacement from the motion between consecutive stamps, so a drag is a drag rather than a repeated identical pull.
+`snakehook` SHALL derive its per-stamp displacement from the motion between consecutive stamps, so a drag is a drag rather than a repeated identical pull. `grab` SHALL derive its displacement from the motion since the stroke BEGAN, applied to the region it captured — see "A grab carries the region it captured" — because a grab is one gesture moving one piece of surface and not a sequence of independent nudges.
 
 It SHALL return the number of stamps that actually moved a vertex, and SHALL report the accumulated vertex deltas for the whole call as one coalesced record when the caller asks for it.
 
@@ -675,37 +677,6 @@ This requirement is written because the library did the ignored thing. The adapt
 - **WHEN** a brush carries a factor a representation cannot compute
 - **THEN** the call is refused with a reason, and no stamp is applied
 
-### Requirement: The estimators a mesh module cannot compute are set once per stroke on every sculptor
-The callbacks a mesh module structurally cannot compute for itself — the cavity measure, which is a field's Laplacian, and the surface-group field, which is a world lattice — SHALL be settable on EVERY sculptor that offers the automask, with the same signature, and SHALL be set once per STROKE rather than per stamp.
-
-Per stroke is not a preference. They hold callable objects, and copying those per dab is an allocation per dab, which the allocation discipline forbids.
-
-A sculptor that composes another — a multiresolution sculptor over a level sculptor — SHALL forward them, including to a level bound after they were set, so that changing the sculpt level mid-stroke does not silently drop them.
-
-#### Scenario: Every sculptor takes the estimators
-- **WHEN** a host sets the cavity and group estimators on the fixed, adaptive and multiresolution sculptors
-- **THEN** all three accept them through the same call, and a stamp on each applies the cavity and surface-group factors
-
-A STROKE RESOLVER THAT DRIVES A SCULPTOR SHALL WIRE THEM, and where no such
-resolver exists for a representation the change SHALL say so rather than leave
-the gap unnamed. `brush::apply_to_mesh` and `brush::apply_to_multires` wire
-them from `MeshStrokeOptions`; there is no `brush::apply_to_dynamic`, so an
-adaptive stroke is driven by the host calling `DynamicSculptor::stamp` directly,
-and it is the host that calls `set_automask_inputs` — which it now can, and
-before this change could not. Adding an adaptive stroke resolver is a larger
-piece of work than this change is: it owns spacing, drag re-anchoring, the
-snakehook anchor and the remesh schedule around every dab, none of which is
-about the automask. What this change is responsible for is that the estimators
-have somewhere to go on all three sculptors, and they do.
-
-#### Scenario: Setting them allocates nothing per dab
-- **WHEN** a stroke of many stamps runs after the estimators were set once
-- **THEN** no stamp allocates on their behalf
-
-#### Scenario: The adaptive path has no stroke resolver of its own
-- **WHEN** a host drives an adaptive surface
-- **THEN** it sets the estimators on the sculptor itself, with the same call the fixed sculptor takes, because there is no `brush::apply_to_dynamic` to do it on the host's behalf
-
 ### Requirement: A directional brush family is a preset over the shared frame
 Rake, chisel, clay strips, a directional scratch and a rotated alpha SHALL be expressible as axis values over the shared stamp frame, and SHALL NOT require a frame, a sampler or a code path of their own.
 
@@ -809,3 +780,177 @@ sculptor that can carry them.
 - **THEN** it SHALL REPLACE the first rather than compose with it, so the point
   is placed once and not twice
 
+### Requirement: Stamps apply to an adaptive surface
+The stroke engine SHALL provide `apply_to_dynamic`, a consumer of `resolve_stroke`'s stamps alongside `apply_to_mesh` and `apply_to_multires`, so spacing, pressure response, deterministic jitter, taper, steady stroke, accumulation, the stylus azimuth and brush presets reach an adaptive surface with no new machinery.
+
+It SHALL apply exactly one `DynamicSculptor::stamp` per resolved stamp, with each stamp's radius and strength taken from the stamp and the rest of the brush from the settings — the same resolution of a stamp into brush settings that the fixed and multiresolution consumers use, shared rather than copied.
+
+`grab` SHALL carry the region it captured at its first stamp and displace it by the motion since the stroke began, as `apply_to_mesh` does — see "A grab carries the region it captured" — with the remesh maintaining that region and each stamp's remesh run at that stamp's own centre once the region is captured, per "An adaptive surface maintains a carried region rather than losing it". `snakehook` SHALL centre every stamp on the surface VERTEX it is dragging, so the brush keeps up with the pull.
+
+Because the adaptive surface retires vertex identities when it collapses an edge, a `snakehook` stroke SHALL revalidate its anchor before every stamp and, when the anchor no longer exists, SHALL re-find it as the vertex nearest the previous stamp's position, using the same nearest-vertex estimator the sculptor seeds its walk with. A stroke SHALL NOT keep stamping at a retired anchor's last position: measured, that reaches only 15–18% of a pull-out where the anchor dies often, and 41–88% where it dies one to three times.
+
+A mask SHALL gate the stroke as it gates the other mesh consumers: a stamp centred in a fully masked region SHALL be skipped, and each vertex SHALL be weighed by the mask at its placed position. The cavity and surface-group estimators in the stroke options SHALL be wired once for the stroke. With `orient_alpha_by_stamp` set, each stamp's rotation SHALL orient the alpha; without it the alpha's tangent SHALL be exactly what the caller set.
+
+It SHALL refuse, applying nothing and touching neither the surface, the record nor the sculptor's automask inputs: `MeshBrush::Layer`, which an adaptive surface does not offer; and a request to defer normals, which the adaptive sculptor cannot honour. A refusal SHALL NOT be a silent remap to another verb or a silently ignored option.
+
+With a topology record given, the whole call SHALL accumulate into it as one reversible gesture. It SHALL return the number of stamps that changed the surface, and SHALL accumulate, when asked, the moved vertices, the topology operations, whether any stamp hit its operation budget, and the union of the dirty bounds.
+
+#### Scenario: A stroke equals its stamps
+- **WHEN** a stroke with taper, jitter and a pressure curve is applied to an adaptive surface through `apply_to_dynamic`, and the same resolved stamps are applied one by one through `DynamicSculptor::stamp` with the same per-stamp settings to an identical surface
+- **THEN** the two surfaces are bit-identical, topology included, and the applied counts agree
+
+#### Scenario: A snakehook keeps pulling
+- **WHEN** a snakehook stroke pulls away from an adaptive surface
+- **THEN** the surface follows the drag the way the same stroke through `apply_to_mesh` follows it on a fixed mesh, and not the way a loop centring each stamp on the cursor falls behind it
+
+#### Scenario: A retired anchor is re-found
+- **WHEN** the remesher retires the vertex a snakehook stroke is dragging
+- **THEN** the next stamp re-finds the anchor nearest the previous stamp's position and the stroke keeps pulling, rather than stamping where the retired vertex was
+
+#### Scenario: Layer is refused, not remapped
+- **WHEN** a Layer stroke is applied to an adaptive surface
+- **THEN** no stamp is applied, the surface and the record are unchanged, and the call reports zero
+
+#### Scenario: The azimuth reaches the alpha on request
+- **WHEN** two strokes that differ only in stylus azimuth are applied with an asymmetric alpha and a preset that turns the stamp to the barrel
+- **THEN** with `orient_alpha_by_stamp` the surfaces differ, and without it they are bit-identical
+
+#### Scenario: One stroke is one undo step
+- **WHEN** a whole adaptive stroke is applied with a topology record and the record is reverted
+- **THEN** the surface is bit-identical to its pre-stroke state and validates
+
+### Requirement: The estimators a mesh module cannot compute are set once per stroke and wired by every stroke resolver
+The callbacks a mesh module structurally cannot compute for itself — the cavity measure, which is a field's Laplacian, and the surface-group field, which is a world lattice — SHALL be settable on EVERY sculptor that offers the automask, with the same signature, and SHALL be set once per STROKE rather than per stamp.
+
+Per stroke is not a preference. They hold callable objects, and copying those per dab is an allocation per dab, which the allocation discipline forbids.
+
+A sculptor that composes another — a multiresolution sculptor over a level sculptor — SHALL forward them, including to a level bound after they were set, so that changing the sculpt level mid-stroke does not silently drop them.
+
+A STROKE RESOLVER THAT DRIVES A SCULPTOR SHALL WIRE THEM. `brush::apply_to_mesh`, `brush::apply_to_multires` and `brush::apply_to_dynamic` wire them from `MeshStrokeOptions`, once per call. A host that drives any sculptor stamp by stamp instead sets them on the sculptor itself, with the same call on all three. Where the stroke options carry no estimator, the resolver SHALL leave whatever the host set on the sculptor in place rather than clearing it.
+
+#### Scenario: Every sculptor takes the estimators
+- **WHEN** a host sets the cavity and group estimators on the fixed, adaptive and multiresolution sculptors
+- **THEN** all three accept them through the same call, and a stamp on each applies the cavity and surface-group factors
+
+#### Scenario: Setting them allocates nothing per dab
+- **WHEN** a stroke of many stamps runs after the estimators were set once
+- **THEN** no stamp allocates on their behalf
+
+#### Scenario: The adaptive stroke resolver wires them
+- **WHEN** a host applies a stroke to an adaptive surface through `brush::apply_to_dynamic` with a cavity estimator in the stroke options
+- **THEN** every stamp of the stroke applies the cavity factor, exactly as the same options do through `apply_to_mesh`
+
+### Requirement: An adaptive stroke records into a replayable gesture
+The brush engine SHALL offer a recorded sibling of the adaptive stroke consumer that captures the whole stroke into a replayable gesture — the topology delta together with the surface marks at both ends — so that one stroke, with the stroke's own drag anchoring and remesh schedule, is one undo step the sculptor's guarded replay accepts.
+
+The surface mark SHALL be checked ONCE, before the first stamp: a non-empty record whose end is not the surface's current state SHALL be refused with nothing stamped, no revision advanced and the record unchanged. The refusals of the unrecorded consumer (a Layer verb, a request to defer normals, no stamps) SHALL be decided before the mark check and SHALL also leave the record unchanged. A mark check between stamps SHALL NOT be added while every write inside the stroke is a sculptor stamp into the same record, because such a check cannot fire.
+
+A non-empty record whose end is the current state SHALL be continued, so stamps and strokes captured in sequence revert and apply as one step.
+
+The surface a recorded stroke produces SHALL be bit-identical to the unrecorded stroke's with the same inputs, and the record SHALL be the same size as the one the same stamps produce when captured one by one with the stroke's rules.
+
+#### Scenario: A recorded stroke undoes and redoes exactly
+- **WHEN** a Draw, Clay, Smooth, Flatten, Grab or Snakehook stroke is applied through the recorded consumer with the relax pass on, then the record is reverted and applied through the sculptor
+- **THEN** after the revert the export and the stored normals of every live element equal the pre-stroke surface bit for bit, after the apply they equal the post-stroke surface, the surface validates at both ends, and the sculptor's index covers every live face
+
+#### Scenario: A Snakehook whose anchor dies records exactly
+- **WHEN** a recorded Snakehook stroke runs on a coarse detail where the remesher retires the dragged vertex at least once
+- **THEN** reverting and applying the record reproduce the pre- and post-stroke surfaces exactly
+
+#### Scenario: Recording does not change the stroke
+- **WHEN** the same stamps are applied to identical surfaces by the recorded and the unrecorded consumer
+- **THEN** the surfaces are bit-identical, the applied counts and summaries are equal, and the record's encoded size equals that of the same stamps captured one by one with the stroke's rules
+
+#### Scenario: A stale record refuses the whole stroke
+- **WHEN** a record captured on a surface is followed by an unrecorded stamp, and a stroke is then applied into that record
+- **THEN** the call reports the mismatch, no stamp is applied, and the record's size and both marks are unchanged
+
+#### Scenario: A refused stroke leaves the record untouched
+- **WHEN** a Layer stroke, a stroke asking to defer normals, or an empty stroke is applied into a non-empty record
+- **THEN** the call applies nothing and the record's size and both marks are unchanged
+
+#### Scenario: A refused stroke into a stale record is a refusal, not a mismatch
+- **WHEN** a Layer stroke, a stroke asking to defer normals, or an empty stroke is applied into a record the surface has moved away from
+- **THEN** the call reports the stroke's own refusal rather than a mismatch, applies nothing, and the record's size and both marks are unchanged
+
+#### Scenario: Strokes accumulate into one step
+- **WHEN** a recorded stamp and two recorded strokes are captured into one record and the record is reverted once
+- **THEN** the surface equals the one before the stamp
+
+### Requirement: A grab carries the region it captured
+A `grab` stroke SHALL gather its region ONCE, at its first stamp, and SHALL carry that region — the items, the positions they were gathered at, and their falloff weights — for the whole gesture. Every stamp SHALL place each carried item at its captured position offset by its weight times the motion of the stroke SINCE ITS FIRST SAMPLE, rather than re-gathering a region around a point the surface has already left.
+
+This SHALL hold identically on a fixed mesh, on a multiresolution level and on an adaptive surface, because it is a fact about what a grab IS and not about a representation.
+
+Re-gathering every stamp around the first sample is what this requirement replaces, and it is replaced because the falloff weights shrink as the surface leaves the anchor: measured on a unit sphere at `cube_sphere(24)` with a brush radius of 0.3, a grab reached 41% of a 0.6 drag and 18% of a 1.5 drag, on both representations. A carried region reaches the whole drag at its centre, which is the weight-1 vertex, on both.
+
+Centring each stamp on the CURSOR and re-gathering SHALL NOT be adopted, and the reasons are two and independent. It makes the representations disagree by a tenth of the drag, where a carried region makes them agree to within 2e-5. And it loses the surface: the vertex at the centre moves by its falloff weight rather than the whole delta, so the brush falls behind the cursor and is soon outside its own radius — measured, 11 of 26 stamps applied on a 1.5 drag, on both representations, after which the stroke moves nothing at all.
+
+#### Scenario: A grab reaches the whole drag on both representations
+- **WHEN** a grab stroke pulls a distance away from a fixed mesh and the same stroke pulls away from an adaptive surface built from the same model
+- **THEN** each surface's furthest travel along the drag is the whole drag, and the two representations agree to within 1e-3
+
+#### Scenario: The reach is the rule's and not the fixture's
+- **WHEN** the same grab is measured with the drag's sign reversed and on the opposite pole of the same model
+- **THEN** the reach is the same, rather than depending on which way the fixture happened to face
+
+#### Scenario: A curved drag carries the same region
+- **WHEN** a grab stroke follows a curve rather than a straight line
+- **THEN** the captured region is carried along the whole path and arrives at the last sample — displaced by the motion from the first sample to the last, which on a curve is shorter than the path the cursor travelled — rather than being re-gathered around the first
+
+#### Scenario: A grab is one gather, not one per stamp
+- **WHEN** a grab stroke of many stamps is applied to a fixed mesh
+- **THEN** the surface is walked once for the gesture rather than once per stamp, and the stroke costs less than the same stroke re-gathering every stamp
+
+### Requirement: An adaptive surface maintains a carried region rather than losing it
+An adaptive surface retires vertex identities when it collapses an edge and creates them when it splits one, and it does so BETWEEN the stamps of a gesture. A gesture carrying a captured region SHALL therefore have that region MAINTAINED by the remesh rather than left to decay: a split inside the carried region SHALL insert its new vertex into the region with the midpoint of its parents' CAPTURED positions and the mean of their weights, and a collapse SHALL remove the entry whose vertex it retired.
+
+A new vertex's captured position SHALL be reconstructed from its parents' captured positions and SHALL NOT be read from the surface, because its parents have already taken part of the drag and reading the surface would apply that part to it twice.
+
+A COLLAPSE SHALL NOT RETIRE A CARRIED VERTEX for the length of the gesture. Maintaining the region is necessary and is not sufficient: measured over twelve fixtures, maintenance alone keeps the region growing — nine captured entries becoming fifty-nine to sixty-four live, forty-five becoming four hundred and thirty-four to five hundred and thirty-eight — and still loses the weight that carries the drag, because the weight-one centre is collapsed in the first half of the gesture and no operation can create a weight above the one it inherits. With maintenance alone the gesture reaches between 73% and 97% of the drag and the two representations disagree by up to 0.375 in world units, which is worse than re-gathering; with the collapse refused, every one of the twelve fixtures reaches the whole drag and the two representations agree to within 1.6e-4.
+
+Refusing those collapses SHALL NOT be treated as the remesher giving up its work, because measurably it does not: the collapses refused are the ones consuming the gesture's own region, so the region stays dense and the splits refine what the gesture stretched. Measured after a 1.5 drag, the surface left by the protected rule has a longest edge of 0.27 against 0.62 for the unprotected maintenance, 0.12 before the gesture reached that far, and 1.32 with no remesher at all; on four of six fixtures the protected rule leaves the surface exactly as fine as re-gathering does. The gesture is also CHEAPER than re-gathering — between 0.39 and 0.89 of it — because a gesture walks the surface once instead of once per stamp.
+
+A split with exactly ONE carried parent SHALL also insert its new vertex, at the midpoint of the carried parent's CAPTURED position and the uncarried parent's CURRENT position, with half the carried parent's weight. The uncarried parent has taken no part of the drag, so where it is now is where it was captured, and the child is exactly reconstructible. This does not change the reach; it keeps the surface finer and reduces the collapses the rule above has to refuse.
+
+A carried vertex the REMESHER ITSELF moves — a collapse placing its survivor, a relaxation sliding one along the surface — SHALL take the same shift in its captured position. Without it the next stamp writes the captured position plus its weighted share of the drag and puts the vertex back where the remesher moved it from, so the relaxation inside a gesture has no effect at all. Measured, between one and two hundred and ninety-one carried vertices are moved by the remesher on every stamp of every fixture.
+
+A region left unmaintained is not a smaller region, it is a different answer per fixture, and on some brushes it is worse than re-gathering: measured, 7 to 13 of 45 captured vertices survived an eleven-stamp stroke, and the reach followed whether the weight-1 centre happened to be among them — the whole drag pulling one pole of a sphere and 44% of it pulling the other, with the two representations 57% of the drag apart. At a brush radius of 0.15 against a detail resolution of 4 the remesher retired ALL of the captured entries inside one stroke and the reach fell to between 2.8% and 7.0%, below the 9.3% to 22.3% that re-gathering reaches on the same fixtures. With the remesher unable to touch the region the same rule reaches the whole drag on both representations and they agree to within 2e-5.
+
+Because no maintenance operation can create a weight above the one it inherits — a split's child takes the MEAN of its parents' weights — the maintenance SHALL be verified by the weight it preserves and not only by the entries it counts: the largest weight carried at the end of a gesture SHALL be reported alongside the entry counts, so that a region which is numerically maintained while its high-weight core has been retired is visible as a number rather than as a surface that looks about right.
+
+A `grab` stamp's remesh SHALL run at that stamp's own centre and SHALL NOT stay at the gesture's first sample. A ball left at the first sample never reaches a tip five brush radii away, so the tip keeps the edges the drag stretched: measured after a 1.5 drag, the longest edge within a brush radius of the tip is 0.1450 with the remesh anchored against 0.0487 with it following, and 25 vertices are within a brush radius of the tip against 65. This SHALL be verified at the TIP and SHALL NOT be verified by the surface-wide longest edge, which cannot see the rule: that maximum lives in the neck behind the tip either way and reads 0.1450 anchored against 0.1466 following, so a check written against it passes with the rule removed. The anchored arm also does 40% more topology work — 1381 splits against 980 — so what the rule buys is a refined tip and less work, not a smaller surface-wide maximum. (An earlier measurement of 1.12 against 0.36 was taken on an UNMAINTAINED carried region, where a handful of surviving vertices were dragged away alone; it is not what the maintained rule leaves.)
+
+The maintenance SHALL be reported as counts — entries carried, entries inserted by a split, entries retired by a collapse, entries the remesher moved, and collapses refused — so that a maintenance which silently does nothing is visible as a count and not merely as a surface that looks about right. Collapses refused SHALL be reported as collapses AVOIDED and not as refusal events: the remesher asks about the same edge on each of its passes on each stamp, so the event count runs an order of magnitude above the operations it actually prevented.
+
+#### Scenario: A carried region survives the remesher
+- **WHEN** a long grab stroke drags an adaptive surface far enough that the remesher splits and collapses inside the carried region, with the split count asserted to be non-zero
+- **THEN** the region still carried at the end of the gesture accounts for every entry captured, plus those a split inserted, minus those a collapse retired
+
+#### Scenario: A maintained region keeps the weight that carries the drag
+- **WHEN** the same stroke is run on a brush small enough against the detail resolution that an unmaintained region loses every entry it captured
+- **THEN** the largest weight still carried at the last stamp is near the one captured at the first, rather than a region that is maintained in number while the vertices that carry the whole drag have been retired
+
+#### Scenario: A carried vertex is not collapsed away
+- **WHEN** a grab drags an adaptive surface with a brush small enough against the detail resolution that the remesher would otherwise retire the whole captured region
+- **THEN** no entry of the carried region is retired for the length of the gesture, the largest weight carried at the last stamp is the one captured at the first, and the gesture reaches the whole drag on both representations
+
+#### Scenario: Refusing those collapses does not coarsen the surface
+- **WHEN** the same stroke is compared against the same stroke with the collapse refusal removed
+- **THEN** the longest edge left on the surface is no longer with the refusal than without it, so the refusal is not the adaptive representation giving up the work it exists to do
+
+#### Scenario: A vertex born of one carried parent joins the region
+- **WHEN** the remesher splits an edge with exactly one endpoint in the carried region, partway through a grab
+- **THEN** the new vertex joins the region carrying half its carried parent's weight, and ends the gesture where the midpoint of that parent's captured position and the other endpoint's position, plus its weighted share of the whole drag, puts it
+
+#### Scenario: The remesher's own movement survives the next stamp
+- **WHEN** the remesh relaxes a carried vertex along the surface between two stamps of a grab
+- **THEN** the next stamp writes that vertex from its shifted captured position, so the relaxation is still visible at the end of the gesture rather than undone by the following write
+
+#### Scenario: A vertex born mid-gesture is not dragged twice
+- **WHEN** the remesher splits an edge whose endpoints are both carried, partway through a grab
+- **THEN** the new vertex ends the gesture where its parents' captured midpoint plus its weighted share of the whole drag puts it, rather than a further drag beyond it
+
+#### Scenario: The grab remesh follows the stamp
+- **WHEN** a grab drags an adaptive surface several brush radii from where it started
+- **THEN** the stretched region is remeshed as the gesture passes through it, rather than the remesh repeatedly refining the place the gesture began

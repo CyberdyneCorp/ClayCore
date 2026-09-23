@@ -123,6 +123,8 @@ The record SHALL be COALESCED over the gesture: one entry per element, keeping t
 
 Reverting SHALL restore the surface BIT-EXACTLY, connectivity included, and reverting then re-applying SHALL each be idempotent.
 
+Bit-exact SHALL include the DERIVED state an operator rewrites, face and vertex normals among them. Every pass that writes an element SHALL note it before the write and sync it after the last write of that pass, including normals recomputed after a position change. The record's `after` end SHALL therefore equal the live surface immediately after capture. Exactness is over LIVE elements. Slots a gesture created and a revert retired stay allocated, because a pool never compacts.
+
 The delta SHALL encode and decode through a versioned format whose decoder REJECTS hostile or truncated counts before allocating.
 
 One gesture SHALL be one undo step even when it contains hundreds of stamps and thousands of topology operations, and a step spanning a scene command and a topology delta SHALL undo as one.
@@ -134,6 +136,10 @@ One gesture SHALL be one undo step even when it contains hundreds of stamps and 
 #### Scenario: Undo size follows what was touched
 - **WHEN** a long gesture stamps repeatedly over one small region
 - **THEN** the delta records each affected element once, and its size does not grow with the number of stamps
+
+#### Scenario: The relax pass leaves an exact record
+- **WHEN** an adaptive stroke runs with `relax_after_remesh` enabled and its record is captured
+- **THEN** every entry's `after` end equals the live surface, normals included, and undoing then redoing the stroke reproduces the exported normals of both ends exactly
 
 ### Requirement: A host is told what changed, not handed the whole surface
 The library SHALL expose the surface's changed partitions with separate revisions for topology, geometry and attributes, so a host re-uploads an index buffer only when connectivity changed and vertex data only when it moved.
@@ -151,3 +157,45 @@ Borrowed pointers into mutable storage SHALL NOT be offered where a mutation can
 #### Scenario: The dirty path and the whole export agree
 - **WHEN** a stroke is applied and the surface is reconstructed from the changed-partition stream
 - **THEN** the reconstruction equals the whole-surface export
+
+### Requirement: Replaying a gesture keeps the sculptor in step
+Replaying a recorded gesture through the sculptor that owns the surface's chunked index SHALL leave that index covering exactly the live faces. Replay SHALL mark the chunks holding the faces it restored or removed as dirty. It SHALL do this incrementally, from the elements the record names, and SHALL NOT require `rebuild_index`.
+
+A surface SHALL carry a restorable mark that identifies its state: a lineage unique to the surface instance, and an epoch that advances whenever a revision advances. A recorded gesture SHALL hold the mark before its first stamp and the mark after its last. Reverting SHALL require the surface to be at the `after` mark, and applying SHALL require the `before` mark. A replay onto the other mark SHALL change nothing and succeed. Any other mark SHALL be refused BEFORE anything is written. Capture into a non-empty record whose `after` mark differs from the surface SHALL also be refused.
+
+**The mark, not a comparison of content, is the guard.** Two strokes on opposite sides of a surface still share slots, because the later one reuses slots the earlier one freed. So a replay that is not last-in first-out can corrupt a surface that no spatial test would connect to the edit. A content comparison catches the overlaps it can see, but cannot prove a replay sound across an edit it did not record.
+
+#### Scenario: The same stroke after an undo repeats the first
+- **WHEN** a sculptor records a stroke, the stroke is reverted through that sculptor, and the identical stroke is stamped again
+- **THEN** the surface equals the one the first stroke produced, and every live face is reachable through the index
+
+#### Scenario: An undo is visible in the chunk stream
+- **WHEN** the dirty set is cleared, a stroke is reverted, and the host reassembles the surface from the dirty chunks
+- **THEN** the reassembly equals the whole-surface export
+
+#### Scenario: A replay out of order is refused and changes nothing
+- **WHEN** strokes A and B are recorded in that order and A is reverted while B is still applied
+- **THEN** the revert is refused, and the surface, its revisions and its index are unchanged
+
+#### Scenario: An unrecorded edit in between is refused
+- **WHEN** a stroke is recorded, a further stamp changes the surface without a record, and the recorded stroke is reverted
+- **THEN** the revert is refused and nothing is written
+
+#### Scenario: Replay is idempotent at the target
+- **WHEN** a recorded stroke is reverted twice
+- **THEN** the second revert succeeds, writes nothing and advances no revision
+
+### Requirement: A stroke keeps the per-verb remesh schedule on every stamp
+An adaptive stroke SHALL run the remesher around EVERY stamp at the timing the verb's default records — after the deformation for Grab, before it for the deposit family including Clay, before and after it for Snakehook — exactly as a single stamp of that verb does. A stroke SHALL NOT substitute a stroke-level schedule, such as one remesh per several stamps, for the per-verb one.
+
+The schedule stays one function with one reason per verb, and a stroke's topology stays a pure function of its stamps: the same stamps applied one at a time produce the same surface.
+
+A verb the adaptive surface does not offer SHALL be refused for a whole stroke as it is for one stamp, before any remesh runs.
+
+#### Scenario: A stroke's topology is its stamps' topology
+- **WHEN** the same resolved stamps are applied as one adaptive stroke and as a sequence of single stamps, for a verb of each timing
+- **THEN** the split, collapse and flip counts agree and the surfaces are bit-identical
+
+#### Scenario: A refused verb runs no remesh
+- **WHEN** a Layer stroke is applied to an adaptive surface with topology enabled
+- **THEN** no split, collapse or flip runs and the topology revision is unchanged

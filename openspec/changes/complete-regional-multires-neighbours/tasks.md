@@ -50,6 +50,15 @@
 - [x] 5.1 Boundary normals against the dense oracle at levels 1–3
 - [x] 5.2 The coefficient-reconstruction gate — the one that says it reached
       storage rather than shading
+      CORRECTION, 2026-09-22: neither 5.1's nor 5.2's gate is in `tests/unit`
+      — no case compares a regional normal, frame or directly authored
+      coefficient with a dense hierarchy's, and nulling the neighbourhood input
+      at every evaluation site leaves every case that predates the correction
+      green. They now exist as the three "regional boundary:" cases in
+      `tests/unit/test_multires_regional.cpp`, written under
+      `finish-regional-multires` section 1. With every site's input nulled the
+      whole suite (2850 cases) fails 14 assertions, all of them in those
+      three cases
 - [x] 5.3 A uniform hierarchy unchanged
 - [x] 5.4 The memory test measures the FALL across the release, `floor_bytes`
       from the CSR sizes rather than from `bytes()`, plus positions AND normals

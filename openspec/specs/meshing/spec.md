@@ -10,7 +10,9 @@ Beside it are the preview, quad and dual-contouring meshers, decimation,
 validation, attribute transfer and the sculpting a mesh accepts once it exists.
 `mesh::Mesh` — flat arrays every producer and consumer shares — is defined here,
 which is why this capability is also where its invariants are written down.
+
 ## Requirements
+
 ### Requirement: Default mesher with watertight guarantee
 `clay::mesh` SHALL provide a default cell-marching mesher whose output is watertight and 2-manifold by construction, running only over surface-crossing bricks. v1 implements this with marching tetrahedra (Freudenthal 6-tet decomposition with globally consistent face diagonals — no ambiguous configurations exist, so the guarantee is structural); a table-based marching cubes with asymptotic-decider ambiguity resolution MAY replace it later as a triangle-count optimization provided the same guarantees hold. The CPU implementation is the golden reference; GPU implementations (Metal/CUDA) SHALL match its topology invariants (watertight, manifold, Euler characteristic on golden scenes) though not bit-identical vertex positions.
 
@@ -1311,3 +1313,37 @@ vertex along its edge and cannot add, remove or reconnect a triangle.
 - **WHEN** a brick mesh is built with the guard and without it
 - **THEN** the triangle count is the same, and only vertex positions differ
 
+### Requirement: Exact row classification for boundary cells
+Boundary enumeration SHALL emit exactly the unrequested owner's cells whose closed boxes touch a requested neighboring brick, in the existing z/y/x order.
+
+#### Scenario: First, interior and last planes
+- GIVEN a positive brick dimension greater than one and any requested-neighbor mask
+- WHEN row categories are reused
+- THEN emitted coordinates SHALL match independent closed-box intersection enumeration without duplicates
+
+#### Scenario: One-cell brick
+- GIVEN a brick dimension of one
+- WHEN one or more neighboring bricks are requested
+- THEN its single cell SHALL be emitted exactly once
+
+#### Scenario: Complete mesh replay
+- GIVEN full or subset brick requests, including boundary triangles
+- WHEN row classification replaces per-cell neighbor tests
+- THEN complete mesh attributes, indices and brick ranges SHALL remain unchanged
+
+### Requirement: Brick-local edge recording preserves exact mesh output
+
+The brick mesher MAY deduplicate repeated local lattice-edge records before global welding, but SHALL preserve the existing mesh positions, indices, attributes, ordering and per-brick ranges exactly. It SHALL retain cross-brick welding and boundary attribution and SHALL bound additional scratch memory independently of total document size.
+
+#### Scenario: Repeated tetrahedron edges
+- **WHEN** multiple tetrahedra in a brick reference the same lattice edge
+- **THEN** the recorder may reuse the first local edge record
+- **AND** the resulting mesh and ranges are byte-identical to unoptimized recording
+
+#### Scenario: Boundary cells and coarse meshes
+- **WHEN** a subset includes straddling triangles or a supported coarse LOD
+- **THEN** edge deduplication preserves boundary ownership, topology and exact output
+
+#### Scenario: Unsupported dense lookup
+- **WHEN** an edge or brick dimension is outside the bounded dense representation
+- **THEN** general recording preserves the established output without an unbounded dense allocation
