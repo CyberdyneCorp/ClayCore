@@ -84,6 +84,11 @@ The existing undo and redo entry points SHALL keep their signatures and their be
 - **WHEN** a grab's undo is redone
 - **THEN** the reported bound equals the one the undo reported
 
+#### Scenario: A grab ahead of a whole-item link in the common tail is narrowed
+- **GIVEN** a node whose chain ends in a twist, a lattice or a bend curve
+- **WHEN** a grab added at the front of that chain is undone through the reporting variant
+- **THEN** the reported bound marks a small fraction of the node's bricks, and refilling only it equals a rebuild
+
 #### Scenario: A head the argument does not cover keeps the node's bound
 - **WHEN** the step adds a radial pose at the head of a chain, or a grab behind a twist
 - **THEN** the reported bound marks exactly the bricks the node's own bound marks

@@ -786,13 +786,19 @@ TEST_CASE("undoing one segment of the host's Move marks the segment, not the nod
 
 namespace {
 
-// A sphere whose chain ends in a payload link -- a lattice cage or a bend
-// curve -- with a short grab chain added AHEAD of it, the way a Move lands
-// on a node that already carries one.
-clay_node_id add_payload_tailed_sphere(Doc& doc, bool lattice) {
+enum class Tail { lattice, curve, twist };
+
+// A sphere whose chain ends in a whole-item link -- a lattice cage, a bend
+// curve or a twist -- with a short grab chain added AHEAD of it, the way a
+// Move lands on a node that already carries one.
+clay_node_id add_tailed_sphere(Doc& doc, Tail tail) {
     const float at[3] = {0.0f, 0.0f, 0.0f};
     const clay_node_id node = add_sphere(doc, 0.6f, at);
-    if (lattice) {
+    if (tail == Tail::twist) {
+        const float k = 0.5f;
+        ok(clay_layer_add_deformer(doc.d, doc.layer, node, CLAY_DEFORM_TWIST, &k, 1,
+                                   CLAY_EASE_LINEAR, 0));
+    } else if (tail == Tail::lattice) {
         const float lo[3] = {-0.7f, -0.7f, -0.7f};
         const float hi[3] = {0.7f, 0.7f, 0.7f};
         std::vector<float> offsets(2 * 2 * 2 * 3, 0.0f);
@@ -809,14 +815,14 @@ clay_node_id add_payload_tailed_sphere(Doc& doc, bool lattice) {
 
 }  // namespace
 
-TEST_CASE("a grab ahead of a lattice or a bend curve in the common tail is narrowed") {
+TEST_CASE("a grab ahead of a twist, a lattice or a bend curve in the common tail is narrowed") {
     // The tail is the same on both sides of the step and sees the same point,
-    // whatever it does with it; a payload link there must be stripped like
-    // any other rather than end the comparison and refuse.
-    for (const bool lattice : {true, false}) {
-        CAPTURE(lattice);
+    // whatever it does with it; a whole-item link there -- a payload link
+    // included -- must be stripped like any other rather than refuse.
+    for (const Tail tail : {Tail::lattice, Tail::curve, Tail::twist}) {
+        CAPTURE(static_cast<int>(tail));
         Doc doc;
-        const clay_node_id node = add_payload_tailed_sphere(doc, lattice);
+        const clay_node_id node = add_tailed_sphere(doc, tail);
         check_undo_and_redo(doc, cube(1.4f));
         check_narrowed(count_undo(doc, node), 4);
     }

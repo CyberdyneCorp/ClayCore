@@ -15,8 +15,10 @@ The chain runs `p -> d0 -> d1 -> ... -> prim` (`ctape_prim_local`), accumulating
 `offset += deform_offset(link, wp)` and `wp = deform_point(link, wp)` per link.
 
 Take the two chains a step goes between. Strip their longest common TAIL (links
-compared bit for bit; a payload the comparison does not read makes them unequal,
-which is the safe direction). What is left is a HEAD on each side. Suppose every
+compared bit for bit on every field the kernel reads -- the record, the alpha
+stamp, a bend curve's guide, a lattice's cage and its placement -- so a lattice
+or a curve BEHIND the head is stripped like any other link; `gesture_id` is host
+bookkeeping and is not read). What is left is a HEAD on each side. Suppose every
 link in both heads is the identity outside its own ball -- returns `wp`
 untouched (a warp) or adds exactly `0.0f` (an offset) wherever its weight is
 zero. Then for a point `p` outside every one of those balls, link 0 hands `p` on
