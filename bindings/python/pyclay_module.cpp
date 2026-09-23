@@ -9755,13 +9755,14 @@ NB_MODULE(pyclay, m) {
             [](PySculptLayerStroke& s, const std::string& verb, nb::handle center, float radius,
                float strength, const std::string& falloff, nb::handle direction, nb::handle mask,
                bool geodesic, int smooth_iterations, nb::handle alpha,
-               nb::handle alpha_direction, nb::handle alpha_tangent, float alpha_extent) {
+               nb::handle alpha_direction, nb::handle alpha_tangent, float alpha_extent,
+               float layer_height) {
                 mesh::MeshBrush chosen = mesh::MeshBrush::Draw;
                 mesh::MeshBrushSettings settings = mesh_brush_settings(
                     verb, center, radius, strength, falloff, direction, nb::none(),
                     nb::cast(geodesic), nb::none(), nb::none(), "two_sided", nb::none(), nb::none(), 0.2f,
-                    smooth_iterations, 0.0f, alpha, alpha_direction, alpha_tangent, alpha_extent,
-                    nb::none(), nb::none(), 0.0f, &chosen);
+                    smooth_iterations, layer_height, alpha, alpha_direction, alpha_tangent,
+                    alpha_extent, nb::none(), nb::none(), 0.0f, &chosen);
                 field::MaskGate gate = mask_gate_of(mask);
                 nb::gil_scoped_release release;
                 return s.sculptor->stamp(chosen, settings, gate);
@@ -9770,10 +9771,12 @@ NB_MODULE(pyclay, m) {
             "direction"_a = nb::none(), "mask"_a = nb::none(), "geodesic"_a = true,
             "smooth_iterations"_a = 1, "alpha"_a = nb::none(),
             "alpha_direction"_a = nb::none(), "alpha_tangent"_a = nb::none(),
-            "alpha_extent"_a = 0.0f,
+            "alpha_extent"_a = 0.0f, "layer_height"_a = 0.05f,
             "One stamp at the surface's sculpt level, into this stroke's\n"
             "channel: the same sixteen verbs, the same falloffs, the same mask\n"
-            "and the same automasking, because it is the same code.")
+            "and the same automasking, because it is the same code.\n\n"
+            "`layer_height` is the `layer` verb's ceiling, as on\n"
+            "`MultiresSculptor.stamp`; every other verb ignores it.")
         .def(
             "stamp_detail",
             [](PySculptLayerStroke& s, nb::handle image, const std::string& mode,

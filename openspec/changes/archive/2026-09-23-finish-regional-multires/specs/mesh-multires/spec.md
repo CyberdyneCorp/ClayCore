@@ -101,6 +101,8 @@ not put it there.
 #### Scenario: A smoothing verb is not dragged inward at a seam
 - **WHEN** a smoothing stroke is applied across the boundary of a refined region, and the same stroke is applied to a uniformly refined hierarchy
 - **THEN** the vertices the two hierarchies share finish in the same place, rather than the boundary being pulled into the refined region by a one-sided average
+- **WHEN** the stroke is a detail-only smooth, which averages the stored coefficients, or a preserve-detail smooth, which averages the pure subdivision, over the same region of both hierarchies carrying the same coefficients on the vertices both store
+- **THEN** every vertex the two share holds the same coefficients and the same position afterwards, the rim's neighbours on the coarser level counting as zero detail and as the pure subdivision respectively
 
 #### Scenario: Boundary automasking ignores an internal seam
 - **WHEN** boundary automasking is enabled and a stroke crosses a depth transition

@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cmath>
 
+#include "clay/mesh/cross_level.h"
+
 namespace clay {
 namespace mesh {
 namespace {
@@ -262,32 +264,49 @@ std::size_t LayeredMultiresSculptor::stamp_detail(const DetailStampSettings& sta
 
 // -- smoothing ----------------------------------------------------------------
 
+void LayeredMultiresSculptor::sum_ring_detail(const Adjacency& adjacency, std::uint32_t level,
+                                              std::uint32_t cls, LocalDetail* sum,
+                                              std::size_t* count) const {
+    std::size_t ring_count = 0;
+    const std::uint32_t* ring = adjacency.ring(cls, &ring_count);
+    for (std::size_t k = 0; k < ring_count; ++k) {
+        std::size_t members = 0;
+        const std::uint32_t n = adjacency.members(ring[k], &members)[0];
+        const LocalDetail d = read_target(level, n);
+        sum->tangent += d.tangent;
+        sum->bitangent += d.bitangent;
+        sum->normal += d.normal;
+        ++*count;
+    }
+}
+
 std::size_t LayeredMultiresSculptor::smooth_detail(const MeshBrushSettings& settings,
                                                    const field::MaskGate& gate) {
     const std::uint32_t level = surface_.sculpt_level();
     if (!gather(settings, gate)) return 0;
+    const CrossLevelNeighborhood& cross = surface_.cross_level_at(level);
     const Adjacency& adjacency = surface_.level_adjacency(level);
 
     // A SIMULTANEOUS average, not a sweep: every entry reads the pre-stamp
     // coefficients, so the result does not depend on the order the region
     // happens to sit in. The same rule `SculptWorkset` states for positions.
     scratch_.resize(region_.size());
+    std::vector<std::uint32_t> outside;
     for (std::size_t i = 0; i < region_.size(); ++i) {
         const std::uint32_t v = region_[i].vertex;
         const std::uint32_t cls = adjacency.class_of(v);
-        std::size_t ring_count = 0;
-        const std::uint32_t* ring = adjacency.ring(cls, &ring_count);
         LocalDetail sum;
         std::size_t count = 0;
-        for (std::size_t k = 0; k < ring_count; ++k) {
-            std::size_t members = 0;
-            const std::uint32_t n = adjacency.members(ring[k], &members)[0];
-            const LocalDetail d = read_target(level, n);
-            sum.tangent += d.tangent;
-            sum.bitangent += d.bitangent;
-            sum.normal += d.normal;
-            ++count;
-        }
+        sum_ring_detail(adjacency, level, cls, &sum, &count);
+        // THE RIM'S OTHER SIDE. At a depth boundary part of the ring is on the
+        // level below, where this level stores no coefficient — so those
+        // neighbours hold ZERO, which is what the surface there is (the pure
+        // subdivision). They add nothing to the sum and one each to the count;
+        // leaving them out averaged a rim vertex over its inward half only.
+        std::size_t members = 0;
+        const std::uint32_t* member = adjacency.members(cls, &members);
+        cross.outside_ring(member, members, &outside);
+        count += outside.size();
         if (count == 0) {
             scratch_[i] = read_target(level, v);
             continue;
@@ -312,15 +331,18 @@ std::size_t LayeredMultiresSculptor::smooth_detail(const MeshBrushSettings& sett
 }
 
 void LayeredMultiresSculptor::form_shift(const Adjacency& adjacency,
+                                         const CrossLevelNeighborhood& cross,
                                          const std::vector<kernel::cfloat3>& form,
                                          float strength,
                                          std::vector<kernel::cfloat3>* shift) const {
     shift->assign(region_.size(), kernel::cf3(0, 0, 0));
+    std::vector<std::uint32_t> outside;
     for (std::size_t i = 0; i < region_.size(); ++i) {
         const std::uint32_t v = region_[i].vertex;
         if (v >= form.size()) continue;
+        const std::uint32_t cls = adjacency.class_of(v);
         std::size_t ring_count = 0;
-        const std::uint32_t* ring = adjacency.ring(adjacency.class_of(v), &ring_count);
+        const std::uint32_t* ring = adjacency.ring(cls, &ring_count);
         kernel::cfloat3 sum = kernel::cf3(0, 0, 0);
         std::size_t count = 0;
         for (std::size_t k = 0; k < ring_count; ++k) {
@@ -330,6 +352,15 @@ void LayeredMultiresSculptor::form_shift(const Adjacency& adjacency,
             sum = sum + form[n];
             ++count;
         }
+        // THE RIM'S OTHER SIDE: the ring neighbours on the level below. Their
+        // form IS `outside_positions` — the pure subdivision of the level
+        // below, the same `S(n)` this array holds for the level's own vertices.
+        std::size_t members = 0;
+        const std::uint32_t* member = adjacency.members(cls, &members);
+        cross.outside_ring(member, members, &outside);
+        for (const std::uint32_t id : outside)
+            sum = sum + cross.outside_positions[id - cross.vertex_count];
+        count += outside.size();
         if (count == 0) continue;
         const float t = std::clamp(region_[i].weight * strength, 0.0f, 1.0f);
         (*shift)[i] = (sum / static_cast<float>(count) - form[v]) * t;
@@ -350,12 +381,16 @@ std::size_t LayeredMultiresSculptor::smooth_form(const MeshBrushSettings& settin
     //
     // At level 0 the form is the cage itself, so the same statement is a
     // Laplacian over the cage's positions.
+    //
+    // The neighbourhood is fetched FIRST: it may bring the level below back
+    // (see `cross_level_at`), and `form` is a reference into this level.
+    const CrossLevelNeighborhood& cross = surface_.cross_level_at(level);
     const Adjacency& adjacency = surface_.level_adjacency(level);
     const std::vector<kernel::cfloat3>& form =
         level == 0 ? surface_.positions_at(level) : surface_.subdivided_at(level);
 
     std::vector<kernel::cfloat3> shift;
-    form_shift(adjacency, form, settings.strength, &shift);
+    form_shift(adjacency, cross, form, settings.strength, &shift);
 
     std::size_t moved = 0;
     for (std::size_t i = 0; i < region_.size(); ++i) {
