@@ -30,6 +30,7 @@
 #include "clay/field/relax.h"
 #include "clay/kernel/field.h"
 #include "clay/mesh/bvh.h"
+#include "clay/mesh/lattice.h"
 #include "clay/mesh/marching.h"
 #include "clay/mesh/surface_nets.h"
 #include "clay/mesh/to_field.h"
@@ -5286,6 +5287,39 @@ BENCHMARK(BM_MeshStampBoundaryAutomask)
     ->Arg(707)
     ->Unit(benchmark::kMicrosecond)
     ->Iterations(200);
+
+// ONE FRAME OF A CAGE DRAG, as a host previews one: the cage laid over the mesh
+// with a record, then taken back, so every iteration starts from the same form.
+// One control point dragged, at 3^3, 8^3 and the 32^3 ceiling, over ~100k
+// triangles.
+//
+// The three rows should sit close together. The cost of an evaluation is the
+// basis — O(n) an axis — plus one term per DRAGGED point, so a larger cage with
+// the same point in hand costs a little more and not n^3 more. Before the sum
+// ran over the dragged points alone it ran over all of them, and the 32^3 row
+// was ~1.7 s a frame on a 62k-vertex mesh against ~10 ms at 3^3.
+void BM_MeshLatticeDrag(benchmark::State& state) {
+    using namespace clay;
+    using namespace clay::kernel;
+    const int n = static_cast<int>(state.range(0));
+    mesh::Mesh patch = bench_surface_patch(224, 0.02f);
+    math::Aabb box;
+    for (const cfloat3& p : patch.positions) box.expand(p);
+    mesh::Lattice cage(box, n, n, n);
+    cage.set_offset(0, 0, 0, cf3(0.05f, 0.02f, 0.0f));
+    mesh::MeshSculptor sculptor(patch, 0.0f);
+
+    std::size_t moved = 0;
+    for (auto _ : state) {
+        mesh::VertexDeltas record;
+        moved = sculptor.apply_lattice(cage, &record);
+        record.revert(patch);
+    }
+    // A cage that moved nothing would time the identity early-out.
+    state.counters["moved"] = static_cast<double>(moved);
+    state.counters["dragged"] = static_cast<double>(cage.dragged_count());
+}
+BENCHMARK(BM_MeshLatticeDrag)->Arg(3)->Arg(8)->Arg(32)->Unit(benchmark::kMillisecond);
 
 // The same pair on the ADAPTIVE surface, where the topology object is a
 // different implementation of the same two methods — `one_ring` through the

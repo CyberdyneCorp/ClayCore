@@ -73,10 +73,23 @@ class Lattice {
     kernel::cfloat3 position(int i, int j, int k) const { return rest(i, j, k) + offset(i, j, k); }
 
     // Every offset zero: the identity, and worth asking before walking a mesh.
-    bool is_identity() const;
+    bool is_identity() const { return dragged_.empty(); }
+
+    // How many control points carry a non-zero offset — what one evaluation
+    // costs, since the points nobody dragged contribute nothing and are not
+    // visited.
+    std::size_t dragged_count() const { return dragged_.size(); }
 
     // The displacement this cage applies at a world point. Zero everywhere for
     // an untouched cage, exactly.
+    //
+    // PRICED BY THE DRAGGED POINTS, NOT BY THE CAGE. The offset field is linear
+    // in the offsets, so a point left at rest adds exactly nothing; the sum
+    // runs over `dragged_` alone, and the three axis bases are built in O(n)
+    // each. Summing every control point instead made one evaluation cost
+    // nx * ny * nz multiply-adds whatever was dragged — 32,768 at the 32^3
+    // ceiling, which is 1.7 s for one pass over a 62k-vertex mesh and so
+    // seconds per frame of a host's interactive preview.
     //
     // An axis on which the box is FLAT — which is what a cage over a plane's
     // own bounds gives — reads as the middle rather than as an end, so none of
@@ -89,6 +102,11 @@ class Lattice {
     math::Aabb box_;
     int nx_ = 3, ny_ = 3, nz_ = 3;
     std::vector<kernel::cfloat3> offsets_;
+    // The flat indices whose offset is non-zero, in the order they were first
+    // dragged. Kept by `set_offset`, so the set and `offsets_` cannot disagree.
+    std::vector<std::uint32_t> dragged_;
+    // Each axis's binomial coefficients C(n - 1, i), fixed by the divisions.
+    std::vector<double> binomial_x_, binomial_y_, binomial_z_;
 };
 
 }  // namespace mesh
