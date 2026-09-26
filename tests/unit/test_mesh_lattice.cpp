@@ -302,3 +302,108 @@ TEST_CASE("a flat cage still works on the axes that are not flat") {
     for (const cfloat3& p : m.positions) highest = std::max(highest, p.y);
     CHECK(highest > 0.1f);
 }
+
+namespace {
+
+// The offset field summed over EVERY control point, with the basis built by de
+// Casteljau's recurrence in double — the formula as the spec states it, written
+// the slow and obvious way, to hold the dragged-point evaluation against.
+cfloat3 reference_displacement(const Lattice& cage, cfloat3 p) {
+    const math::Aabb& box = cage.box();
+    const auto parameter = [](float v, float lo, float hi) {
+        const float span = hi - lo;
+        if (!(span > 1e-9f)) return 0.5;
+        return static_cast<double>(std::min(1.0f, std::max(0.0f, (v - lo) / span)));
+    };
+    const auto basis = [](int count, double t) {
+        std::vector<double> b(static_cast<std::size_t>(count), 0.0);
+        b[0] = 1.0;
+        for (int d = 1; d < count; ++d) {
+            b[d] = t * b[d - 1];
+            for (int i = d - 1; i > 0; --i) b[i] = (1.0 - t) * b[i] + t * b[i - 1];
+            b[0] = (1.0 - t) * b[0];
+        }
+        return b;
+    };
+    const std::vector<double> bx = basis(cage.nx(), parameter(p.x, box.min.x, box.max.x));
+    const std::vector<double> by = basis(cage.ny(), parameter(p.y, box.min.y, box.max.y));
+    const std::vector<double> bz = basis(cage.nz(), parameter(p.z, box.min.z, box.max.z));
+    double sx = 0.0, sy = 0.0, sz = 0.0;
+    for (int k = 0; k < cage.nz(); ++k)
+        for (int j = 0; j < cage.ny(); ++j)
+            for (int i = 0; i < cage.nx(); ++i) {
+                const double w = bx[i] * by[j] * bz[k];
+                const cfloat3 o = cage.offset(i, j, k);
+                sx += w * o.x;
+                sy += w * o.y;
+                sz += w * o.z;
+            }
+    return cf3(static_cast<float>(sx), static_cast<float>(sy), static_cast<float>(sz));
+}
+
+}  // namespace
+
+TEST_CASE("a cage counts the points that were dragged, and forgets one put back") {
+    // What one evaluation costs is the number of dragged points, so the count
+    // has to follow every write — including one that returns a point to rest.
+    Lattice cage(math::Aabb{cf3(-1, -1, -1), cf3(1, 1, 1)}, 32, 32, 32);
+    CHECK(cage.dragged_count() == 0);
+    cage.set_offset(0, 0, 0, cf3(0.05f, 0, 0));
+    cage.set_offset(31, 31, 31, cf3(0, 0.1f, 0));
+    CHECK(cage.dragged_count() == 2);
+    // Dragged again is still one point.
+    cage.set_offset(0, 0, 0, cf3(0.07f, 0, 0));
+    CHECK(cage.dragged_count() == 2);
+    // Back to rest leaves the sum, and the cage is the identity again.
+    cage.set_offset(0, 0, 0, cf3(0, 0, 0));
+    cage.set_offset(31, 31, 31, cf3(0, 0, 0));
+    CHECK(cage.dragged_count() == 0);
+    CHECK(cage.is_identity());
+    const cfloat3 d = cage.displacement(cf3(-1, -1, -1));
+    CHECK(d.x == 0.0f);
+    CHECK(d.y == 0.0f);
+    CHECK(d.z == 0.0f);
+}
+
+TEST_CASE("summing only the dragged points is the whole Bernstein sum") {
+    // The optimisation is only that a zero offset adds nothing, so it must
+    // agree with the full trivariate sum everywhere — inside the box, on its
+    // faces, and past it where the parameters clamp — up to the 32^3 ceiling
+    // and on an uneven cage.
+    const math::Aabb box{cf3(-0.6f, -0.5f, -0.4f), cf3(0.7f, 0.5f, 0.45f)};
+    for (const int n : {2, 3, 8, 32}) {
+        CAPTURE(n);
+        Lattice cage(box, n, n == 2 ? 5 : n, n);
+        cage.set_offset(0, 0, 0, cf3(0.05f, -0.02f, 0.01f));
+        cage.set_offset(n - 1, cage.ny() / 2, n / 3, cf3(-0.1f, 0.2f, 0.03f));
+        cage.set_offset(n / 2, cage.ny() - 1, n - 1, cf3(0.0f, 0.0f, -0.3f));
+        for (int step = 0; step <= 20; ++step) {
+            const float a = -0.9f + 1.8f * static_cast<float>(step) / 20.0f;
+            const cfloat3 p = cf3(a, 0.8f * a - 0.1f, 0.3f - 0.5f * a);
+            CAPTURE(step);
+            const cfloat3 got = cage.displacement(p);
+            const cfloat3 want = reference_displacement(cage, p);
+            CHECK(got.x == doctest::Approx(want.x).epsilon(1e-6).scale(1e-6));
+            CHECK(got.y == doctest::Approx(want.y).epsilon(1e-6).scale(1e-6));
+            CHECK(got.z == doctest::Approx(want.z).epsilon(1e-6).scale(1e-6));
+        }
+    }
+}
+
+TEST_CASE("a corner drag on the largest cage still moves its corner exactly") {
+    // At degree 31 the corner basis is t^31 — the term most exposed to how the
+    // basis is built — and Bernstein interpolates the corners, so the corner of
+    // the box moves by exactly the corner's offset and the far one not at all.
+    const math::Aabb box{cf3(-1, -1, -1), cf3(1, 1, 1)};
+    Lattice cage(box, 32, 32, 32);
+    const cfloat3 pull = cf3(0.05f, -0.04f, 0.03f);
+    cage.set_offset(31, 31, 31, pull);
+    const cfloat3 at_corner = cage.displacement(cf3(1, 1, 1));
+    CHECK(at_corner.x == pull.x);
+    CHECK(at_corner.y == pull.y);
+    CHECK(at_corner.z == pull.z);
+    const cfloat3 far = cage.displacement(cf3(-1, -1, -1));
+    CHECK(far.x == 0.0f);
+    CHECK(far.y == 0.0f);
+    CHECK(far.z == 0.0f);
+}
