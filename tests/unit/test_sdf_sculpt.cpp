@@ -641,7 +641,12 @@ TEST_CASE("sculpt: a live Move under a mirror is the drag move_brush commits") {
     CHECK(moved_b == moved_a);
 }
 
-TEST_CASE("sculpt: a live Move on the plane gives a straddler both grabs, every frame") {
+TEST_CASE("sculpt: a live Move on the plane shares its along-plane pull once, every frame") {
+    // Centred on the plane, the drag's reflection shares its ball: the two
+    // images agree on the pull along the plane and oppose across it. The shared
+    // part is ONE grab (#663: it used to ride both images and move the surface
+    // up to twice as far as the unmirrored drag), the opposed parts stay two,
+    // and a continuing drag replaces all three rather than stacking them.
     Document doc;
     Layer& layer = doc.add_sdf_layer("mirrored");
     layer.mirror_axes = kMirrorX;
@@ -655,18 +660,30 @@ TEST_CASE("sculpt: a live Move on the plane gives a straddler both grabs, every 
     REQUIRE(tx->affected_count() == 1);
     for (int i = 1; i <= 5; ++i) {
         tx->update(cf3(0.05f * static_cast<float>(i), 0.02f, 0));
-        // One grab per image, replaced frame to frame rather than stacked.
-        CHECK(tx->preview_layer().sdf->find(base)->deformers.size() == 2);
+        // Replaced frame to frame rather than stacked.
+        CHECK(tx->preview_layer().sdf->find(base)->deformers.size() == 3);
     }
     std::vector<Deformer> grabs;
     REQUIRE(tx->preview_grabs(base, &grabs));
-    REQUIRE(grabs.size() == 2);
-    CHECK(grabs[0].ext[0] == -grabs[1].ext[0]);  // opposite pulls across the plane
-    CHECK(grabs[0].ext[1] == grabs[1].ext[1]);   // the same pull along it
+    REQUIRE(grabs.size() == 3);
+    int along = 0;
+    float across = 0.0f;
+    for (const Deformer& g : grabs) {
+        if (g.ext[1] != 0.0f) {
+            ++along;
+            CHECK(g.ext[1] == doctest::Approx(0.02f));  // the pull along it, once
+            CHECK(g.ext[0] == 0.0f);
+        } else {
+            CHECK(std::fabs(g.ext[0]) == doctest::Approx(0.25f));
+            across += g.ext[0];
+        }
+    }
+    CHECK(along == 1);
+    CHECK(across == 0.0f);  // opposite pulls across the plane
 
     UndoStack undo;
     REQUIRE(tx->commit(&undo));
-    CHECK(doc.layers.front().sdf->find(base)->deformers.size() == 2);
+    CHECK(doc.layers.front().sdf->find(base)->deformers.size() == 3);
 }
 
 TEST_CASE("sculpt: a Move commit refuses a layer that changed underneath it") {

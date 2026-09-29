@@ -7549,7 +7549,12 @@ clay_result clay_sdf_move_preview_nodes(const clay_sdf_move_tx* tx, clay_node_id
  * the layer carries a mirror or a radial count, when it is one per IMAGE of the
  * drag that reaches the node — a straddler takes the ball's grab and its
  * reflection's, and a host that drew only the first would preview half the
- * drag. CLAY_ERROR_NOT_FOUND for a node the drag does not reach. */
+ * drag. Images that share ONE ball — a drag centred on the mirror plane or on
+ * the radial axis — are one brush (issue #663): a pull along the plane from on
+ * it is ONE grab, a pull across it two opposite ones, and an oblique pull
+ * three (the shared along-plane part once, then each image's remainder). So
+ * the count can differ from the number of reaching images; read it, never
+ * derive it. CLAY_ERROR_NOT_FOUND for a node the drag does not reach. */
 clay_result clay_sdf_move_preview_grab_count(const clay_sdf_move_tx* tx, clay_node_id node,
                                              size_t* out_count);
 

@@ -57,7 +57,31 @@
 // reach — one straddling the plane — takes both, as two brushes would, and a
 // drag centred on the plane gives it two grabs of opposite pull that compose
 // to a pinch, which is continuous as the centre approaches the plane and is
-// what a mesh sculptor's mirror does. The grabs are ordered by their VALUES,
+// what a mesh sculptor's mirror does.
+//
+// EXCEPT WHERE TWO IMAGES ARE ONE BALL (#663). On the plane, the reflection of
+// a pull ALONG the plane is the drag itself — same centre, same displacement —
+// and a grab composed with itself is not one brush but a second one: measured
+// on a unit sphere dragged from (0,1,0) by (0,.25,0) at radius .35, the
+// surface rose .2309 under mirror X against .1458 without (1.58x). Images
+// whose centres coincide (within a tolerance that absorbs a placed layer's
+// rounding, see `coincident`) are therefore resolved as ONE group: the mean of
+// their displacements is applied once, and each image keeps a grab only for
+// what it adds beyond that mean. A pull along the plane is then exactly the
+// unmirrored grab; a pull across it has a zero mean and keeps the two
+// opposite grabs, bit for bit, so the pinch above is unchanged; an oblique
+// pull applies its along-plane part once and pinches the rest. A radial drag
+// on its axis, pulling along it, is the same case N times over.
+//
+// NOT CONTINUOUS, and said so. Just off the plane the images are two balls and
+// the along-plane pull still composes twice where the balls overlap; on it,
+// once. The continuous rule — weighting overlapping images by the MAX of
+// their falloffs rather than composing them — is not a composition of grabs
+// at all (two composed half-grabs lift that sphere .160, not .1458), so it
+// needs a multi-centre deformer in the kernel, on every backend, in the
+// format and in the Lipschitz and bound code. That is a feature, not this fix.
+//
+// The grabs are ordered by their VALUES,
 // never by which image produced them: once the item is not itself
 // plane-symmetric the two orders are different fields, and the order has to
 // come out the same whichever side the drag was made from for the +x drag to
@@ -117,7 +141,9 @@ std::vector<DragImage> drag_images(const scene::Layer& layer, kernel::cfloat3 wo
 
 // One item's share of the drag: the grabs that reproduce it in that item's own
 // frame, one per image of the drag that reaches the item — usually one, two
-// for an item straddling a mirror plane. Already in the order the chain takes
+// for an item straddling a mirror plane. Images that share one ball are one
+// brush (#663): a pull along the plane from ON it is one grab, a pull across
+// it two. Already in the order the chain takes
 // them. They belong at the FRONT of the node's chain — see `moved_chain`.
 struct MoveWarp {
     scene::NodeId node = scene::kNoNode;
@@ -151,6 +177,14 @@ struct PreparedImage {
     // Whether this image's ball reaches the item's OWN bound. At least one
     // image of a prepared item does; an item no image reaches is not prepared.
     bool reaches = false;
+    // The first earlier image, in `drag_images` order, whose ball COINCIDES
+    // with this one — `kOwnBall` when none does (#663). A drag centred on a
+    // mirror plane, or on a radial axis, is its own image: the images that
+    // share a ball are one brush, and `resolve_prepared_move` builds their
+    // grabs once, at the leader's centre. Decided per drag, from world centres
+    // alone, so it holds for every frame of the gesture.
+    static constexpr std::size_t kOwnBall = static_cast<std::size_t>(-1);
+    std::size_t leader = kOwnBall;
 };
 
 // One affected item's share of a drag, resolved as far as it can be BEFORE the
@@ -227,7 +261,8 @@ std::vector<PreparedMove> prepare_move(const scene::Layer& layer, kernel::cfloat
                                        MovePrepareStats* out_stats = nullptr);
 
 // The other half: the warp for a TOTAL world displacement — one grab per image
-// that reaches the item, ordered by value, and the rest of the gesture's
+// that reaches the item, coincident images resolved as one brush (see
+// PreparedImage::leader), ordered by value, and the rest of the gesture's
 // identity in `gesture`. O(images), and no scene access at all — which is
 // what makes a live drag cost the items it moves.
 //

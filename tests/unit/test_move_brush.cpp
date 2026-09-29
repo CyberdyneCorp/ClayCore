@@ -973,7 +973,9 @@ TEST_CASE("move: a straddler's grabs are ordered by their values, not by their i
 
 TEST_CASE("move: a drag centred on the plane pinches rather than picking a side") {
     // Both images share the centre and pull opposite ways. Two grabs, not
-    // one — deduplicating coincident images would keep today's one-sided
+    // one: coincident images are merged by their MEAN pull (#663), which is
+    // zero here, so the two opposite grabs survive bit for bit. Keeping only
+    // the first of two coincident images would instead keep today's one-sided
     // pull at exactly x = 0 and drop it .03 the moment the centre moves off
     // the plane (measured extents .2805 at x .05, .238 at .01, .2285 at
     // .001, .2275 at 0: continuous), so the rule is the same on the plane as
@@ -1012,6 +1014,135 @@ TEST_CASE("move: a drag centred on the plane pinches rather than picking a side"
     CHECK(hi0 == doctest::Approx(0.25f).epsilon(0.01));
     CHECK(hi < hi0 - 0.01f);
     CHECK(hi == doctest::Approx(-lo).epsilon(1e-3));
+}
+
+// -- coincident images are one brush (#663) -----------------------------------
+// A drag centred ON a mirror plane and pulling along it has a reflection that
+// IS the drag: same centre, same displacement. One grab per reaching image
+// gave a straddler the same grab twice, and a grab composed with itself moves
+// the surface 1.58x as far (0.2307 against 0.1458 on the issue's sphere).
+// Coincident images are merged before any grab is built: what they share is
+// applied once, and only where they differ (a pull across the plane) does each
+// keep a grab of its own. Reverting the merge in `resolve_prepared_move` fails
+// every case below except the last, which pins the tolerance from the other
+// side.
+
+namespace {
+
+// The top of the surface above x = 0, by bisection between a point inside and
+// one outside. A march step would be the size of what is being measured.
+float top_at_centre(const Document& doc, float inside_y, float outside_y) {
+    Tape t = compile_document(doc);
+    float lo = inside_y, hi = outside_y;
+    for (int i = 0; i < 40; ++i) {
+        const float mid = 0.5f * (lo + hi);
+        (t.eval(cf3(0, mid, 0)).d <= 0.0f ? lo : hi) = mid;
+    }
+    return 0.5f * (lo + hi);
+}
+
+// S straddles the plane at y 1.5; the base sits out of reach below it. The
+// mirror seam is hard, so S and its copy coincide exactly and the mirrored
+// field above S is S's own.
+Document straddler(bool mirror_on) {
+    Document doc = symmetric_layer(mirror_on);
+    doc.layers[0].mirror_k = 0.0f;
+    add_ball(doc, cf3(0, 0, 0), 0.4f);
+    add_ball(doc, cf3(0, 1.5f, 0), 0.2f);
+    return doc;
+}
+
+}  // namespace
+
+TEST_CASE("move: a drag ON the plane pulling along it is one brush, not two (#663)") {
+    const cfloat3 w = cf3(0, 1.5f, 0);
+    const cfloat3 d = cf3(0, 0.15f, 0);
+    const MoveSettings s{0.35f, 0, false};
+
+    Document plain = straddler(false), mirrored = straddler(true);
+    const std::vector<MoveWarp> wp = brush::move_brush(plain.layers[0], w, d, s);
+    const std::vector<MoveWarp> wm = brush::move_brush(mirrored.layers[0], w, d, s);
+    REQUIRE(wp.size() == 1);
+    REQUIRE(wm.size() == 1);
+    REQUIRE(wp[0].deformers.size() == 1);
+    // The mirrored straddler takes exactly the unmirrored drag's grab.
+    REQUIRE(wm[0].deformers.size() == 1);
+    CHECK(same_grab(wm[0].deformers[0], wp[0].deformers[0]));
+
+    const float before = top_at_centre(plain, 1.5f, 2.2f);
+    apply_move(plain, 1, wp);
+    apply_move(mirrored, 1, wm);
+    const float lift_plain = top_at_centre(plain, 1.5f, 2.2f) - before;
+    const float lift_mirrored = top_at_centre(mirrored, 1.5f, 2.2f) - before;
+    CHECK(lift_plain > 0.02f);  // teeth: the drag moved something
+    CHECK(lift_mirrored == doctest::Approx(lift_plain).epsilon(1e-4));
+}
+
+TEST_CASE("move: an oblique drag on the plane shares its along-plane pull once") {
+    // The images agree on the pull along the plane and disagree across it. The
+    // shared part is one grab; the across-plane parts stay two opposite grabs,
+    // which is the pinch the pure across-plane drag already gives.
+    Document mirrored = straddler(true);
+    const std::vector<MoveWarp> warps = brush::move_brush(
+        mirrored.layers[0], cf3(0, 1.5f, 0), cf3(0.1f, 0.15f, 0), {0.35f, 0, false});
+    REQUIRE(warps.size() == 1);
+    REQUIRE(warps[0].deformers.size() == 3);
+    int along = 0, plus = 0, minus = 0;
+    for (const Deformer& g : warps[0].deformers) {
+        CHECK(g.k == 0.0f);  // every grab sits at the drag's centre
+        if (g.ext[1] != 0.0f) {
+            ++along;
+            CHECK(g.ext[1] == doctest::Approx(0.15f));
+            CHECK(g.ext[0] == doctest::Approx(0.0f));
+            continue;
+        }
+        plus += g.ext[0] == doctest::Approx(0.1f) ? 1 : 0;
+        minus += g.ext[0] == doctest::Approx(-0.1f) ? 1 : 0;
+    }
+    CHECK(along == 1);
+    CHECK(plus == 1);
+    CHECK(minus == 1);
+}
+
+TEST_CASE("move: coincident images merge through a placed layer's rounding") {
+    // Reflected in the layer's frame and mapped back, the image of a centre on
+    // the plane misses the drag by a rounding error, not by zero. The merge has
+    // to tolerate that or it only works on an identity layer.
+    Document mirrored = straddler(true);
+    Layer& layer = mirrored.layers[0];
+    layer.xform.position = cf3(0.3f, -0.2f, 0.1f);
+    layer.xform.rotation = math::Quat::from_axis_angle(cf3(0, 1, 0), 0.7f);
+    layer.xform.scale = 1.4f;
+    const cfloat3 w = layer.xform.apply(cf3(0, 1.5f, 0));
+    const cfloat3 d = layer.xform.rotation.rotate(cf3(0, 0.15f, 0.05f));
+    const std::vector<MoveWarp> warps = brush::move_brush(layer, w, d, {0.35f, 0, false});
+    REQUIRE(warps.size() == 1);
+    CHECK(warps[0].deformers.size() == 1);
+}
+
+TEST_CASE("move: a drag on a radial axis, along it, is one brush and not one per copy") {
+    // Every rotation of a centre on the axis is that centre, and every rotation
+    // of a pull along the axis is that pull: four coincident images.
+    Document doc = symmetric_layer(false);
+    doc.layers[0].radial_count = 4;
+    doc.layers[0].radial_axis = 1;
+    const NodeId base = add_ball(doc, cf3(0, 0, 0), 0.4f);
+    const std::vector<MoveWarp> warps =
+        brush::move_brush(doc.layers[0], cf3(0, 0.4f, 0), cf3(0, 0.1f, 0), {0.3f, 0, false});
+    const MoveWarp* b = warp_on(warps, base);
+    REQUIRE(b != nullptr);
+    CHECK(b->deformers.size() == 1);
+}
+
+TEST_CASE("move: images a hair apart are still two brushes") {
+    // The merge is for images that ARE one another, not for images that are
+    // close: off the plane by 1e-3 the two balls are distinct and each keeps
+    // its grab, as every off-plane drag always has.
+    Document mirrored = straddler(true);
+    const std::vector<MoveWarp> warps = brush::move_brush(
+        mirrored.layers[0], cf3(1e-3f, 1.5f, 0), cf3(0, 0.15f, 0), {0.35f, 0, false});
+    REQUIRE(warps.size() == 1);
+    CHECK(warps[0].deformers.size() == 2);
 }
 
 TEST_CASE("move: an opted-out item sees the ball, not its reflection") {
