@@ -1379,7 +1379,13 @@ struct clay_document {
     // sitting at revision R wants entries from `R - append_base_` onward, and
     // several readers at different revisions can each take their own tail of
     // the same log. `appends_since` is that lookup.
-    void touch_appended(scene::LayerId layer, scene::NodeId node) {
+    //
+    // `reach` is what the append can change -- the command_influence_bound
+    // apply_edit took on both sides of it. The log keeps one per entry so that
+    // a region invalidation arriving before any refill can tell which of the
+    // seeds this append left behind it may still carry forward (#665; see
+    // `carried_across_appends`).
+    void touch_appended(scene::LayerId layer, scene::NodeId node, const math::Aabb& reach) {
         std::lock_guard<std::mutex> lock(cache_mutex_);
         const std::uint64_t now = revision.load(std::memory_order_relaxed);
         // The log is only usable while it is CONTIGUOUS: it describes the
@@ -1391,8 +1397,12 @@ struct clay_document {
             append_layer_ = layer;
             append_base_ = now;
             append_log_.clear();
+            append_reach_.clear();
+            append_reach_union_ = math::Aabb{};
         }
         append_log_.push_back(node);
+        append_reach_.push_back(reach);
+        append_reach_union_.expand(reach.is_infinite() ? math::Aabb::infinite() : reach);
         // An append IS an order change: it grows the root list, so every
         // ordinal taken before it counts a different tail. This does not gate
         // the append fast path -- plan_resume never reads structure_revision_
@@ -2348,9 +2358,9 @@ struct clay_document {
     // against 0.16x for the same drag unmirrored).
     void touch_regions(std::span<const math::Aabb> changed) {
         std::lock_guard<std::mutex> lock(cache_mutex_);
-        forget_appends();  // not an append; no prefix may be reused
         const std::uint64_t next = revision.fetch_add(1, std::memory_order_relaxed) + 1;
         touch_region_locked(changed, kFrontierDrop, next);
+        forget_appends();  // not an append; no prefix may be reused
     }
 
     // The region invalidation for an edit that MOVES ordinals -- node
@@ -2361,10 +2371,10 @@ struct clay_document {
     // over-invalidating costs one full walk (the rule at touch(), restated).
     void touch_region_structural(const math::Aabb& changed) {
         std::lock_guard<std::mutex> lock(cache_mutex_);
-        forget_appends();
         ++structure_revision_;
         const std::uint64_t next = revision.fetch_add(1, std::memory_order_relaxed) + 1;
         touch_region_locked({&changed, 1}, kFrontierDrop, next);
+        forget_appends();
     }
 
     // The frontier invalidation (#360): a parameter edit inside root ordinal
@@ -2378,9 +2388,9 @@ struct clay_document {
     // touch_region_from over several boxes, as touch_regions is to touch_region.
     void touch_regions_from(std::span<const math::Aabb> changed, std::uint32_t frontier) {
         std::lock_guard<std::mutex> lock(cache_mutex_);
-        forget_appends();  // not an append either; the log's contiguity is broken
         const std::uint64_t next = revision.fetch_add(1, std::memory_order_relaxed) + 1;
         touch_region_locked(changed, frontier, next);
+        forget_appends();  // not an append either; the log's contiguity is broken
     }
 
     std::uint64_t current_revision() const { return revision.load(std::memory_order_relaxed); }
@@ -2776,6 +2786,43 @@ struct clay_document {
     void forget_appends() const {
         append_valid_ = false;
         append_log_.clear();
+        append_reach_.clear();
+        append_reach_union_ = math::Aabb{};
+    }
+
+    // May a seed at `rev` that THIS region edit does not reach be carried
+    // forward to `next`? Only if nothing between `rev` and this edit reached
+    // it either (#665). Caller holds cache_mutex_, before forget_appends.
+    //
+    // A region invalidation advances the seeds it misses, and that is only
+    // sound for a seed that was current just before it: the claim is "this
+    // edit did not change the brick", not "nothing did". A seed can lag the
+    // document by more than one revision because an append re-stamps no seed
+    // -- the log is what carries a seed across appends, and this edit is about
+    // to forget the log. So a lagging seed is carried only when the log covers
+    // every revision it lags by and no append in that span reaches its cull
+    // region. Anything else stays at its old revision, which no fast path can
+    // serve: the next refill of that brick walks it in full.
+    //
+    // The case that found it: append an intersect and move it before a
+    // refill. The append changes the whole layer, the move's swept surface
+    // delta (#471) is far smaller, and every seed outside the sweep was
+    // advanced past an append that had changed it -- after which `rev == now`
+    // handed the pre-append field back on every refill, however often the host
+    // dirtied the brick.
+    bool carried_across_appends(std::uint64_t rev, const math::Aabb& cull,
+                                std::uint64_t next) const {
+        if (rev + 1 == next) return true;
+        if (!append_valid_ || append_at_ + 1 != next || rev < append_base_) return false;
+        const std::size_t from = static_cast<std::size_t>(rev - append_base_);
+        if (from > append_reach_.size()) return false;
+        // The whole log's union first: a brick no dab came near -- most of
+        // them, after a stroke -- is decided without a scan.
+        if (!append_reach_union_.intersects(cull)) return true;
+        return std::none_of(append_reach_.begin() + static_cast<std::ptrdiff_t>(from),
+                            append_reach_.end(), [&](const math::Aabb& b) {
+                                return b.is_infinite() || b.intersects(cull);
+                            });
     }
 
     // The one loop behind the three touch_region fronts; caller holds
@@ -2849,7 +2896,11 @@ struct clay_document {
             // until an accepted submit clears it in store_active. For a store
             // that holds no dirty entries -- every path before #360 -- this is
             // byte-for-byte the old behaviour.
-            if (e.dirty_from == kFrontierClean) e.revision = next;
+            //
+            // And only while nothing ELSE since the seed was taken reached the
+            // brick: see carried_across_appends (#665).
+            if (e.dirty_from == kFrontierClean && carried_across_appends(e.revision, cull, next))
+                e.revision = next;
             ++it;
         }
     }
@@ -2876,6 +2927,11 @@ struct clay_document {
     // brings the document to append_at_.
     mutable scene::TapeCheckpoint tape_checkpoint_;
     mutable std::vector<scene::NodeId> append_log_;
+    // What each logged append could change, index for index with append_log_,
+    // and the union of all of them: what a region invalidation reads to decide
+    // which lagging seeds it may carry forward (carried_across_appends).
+    mutable std::vector<math::Aabb> append_reach_;
+    mutable math::Aabb append_reach_union_;
     mutable scene::LayerId append_layer_ = 0;
     mutable std::uint64_t append_base_ = 0;
     mutable std::uint64_t append_at_ = 0;
@@ -4432,7 +4488,7 @@ clay_result apply_edit(clay_document* doc, const scene::Command& cmd, const char
     // and what lets the next compile reuse its prefix. Everything else, here
     // and at every other call site, keeps the general invalidation.
     if (const TailAppend appended = tail_append(doc->doc.document, cmd); appended.layer != 0) {
-        doc->touch_appended(appended.layer, appended.node);
+        doc->touch_appended(appended.layer, appended.node, reach);
         return CLAY_OK;
     }
     // Not an append, but its reach is known: a brick the edit cannot touch keeps

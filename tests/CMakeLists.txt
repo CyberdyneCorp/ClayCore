@@ -244,6 +244,7 @@ add_executable(clay_unit_tests
   unit/test_cull_pad_stability.cpp
   unit/test_node_reach_bound.cpp
   unit/test_intersect_delta_bound.cpp
+  unit/test_c_intersect_append_move.cpp
   unit/test_intersect_delta_oracle.cpp
   unit/test_c_measure_reach.cpp
   unit/test_worker_config.cpp
