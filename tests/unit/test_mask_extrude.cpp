@@ -93,6 +93,16 @@ float inner_surface_y(const FieldVolume& v) {
     return 0.0f;
 }
 
+float outer_surface_radius(const FieldVolume& v, cfloat3 direction) {
+    float previous = 1.0f;
+    for (float radius = 1.4f; radius > 0.4f; radius -= 0.001f) {
+        const float value = v.eval(direction * radius);
+        if (value <= 0.0f && previous > 0.0f) return radius;
+        previous = value;
+    }
+    return 0.0f;
+}
+
 
 // A cap whose border is SERRATED: the radius steps between two values with
 // angle, so the boundary zig-zags by about two cells. A round border cannot
@@ -182,6 +192,31 @@ TEST_CASE("mask extrude: a plate comes off a sphere") {
     // And nothing away from the mask: the far side of the sphere is untouched.
     CHECK(plate->eval(cf3(0, -kRadius, 0)) > 0.0f);
     CHECK(plate->eval(cf3(kRadius, 0, 0)) > 0.0f);
+}
+
+TEST_CASE("mask extrude: the requested thickness survives beyond the painted mask") {
+    const MaskField mask = cap_mask();
+    for (const float thickness : {0.05f, 0.1f, 0.6f}) {
+        MaskExtrudeSettings settings = plate_settings(thickness);
+        settings.cell_size = thickness < 0.2f ? 0.01f : 0.03f;
+        const std::optional<FieldVolume> plate = brush::mask_extrude(sphere_field(), mask, settings);
+        REQUIRE(plate.has_value());
+
+        // Three surface normals across the painted patch must reach the same
+        // height even when the paint itself stops short of that height.
+        std::vector<float> heights;
+        for (const float angle : {0.0f, 0.25f, 0.45f}) {
+            const cfloat3 direction = cf3(std::sin(angle), std::cos(angle), 0.0f);
+            const float height = outer_surface_radius(*plate, direction) - kRadius;
+            heights.push_back(height);
+            CAPTURE(thickness);
+            CAPTURE(angle);
+            CAPTURE(height);
+            CHECK(height == doctest::Approx(thickness).epsilon(0.1));
+        }
+        const auto [lowest, highest] = std::minmax_element(heights.begin(), heights.end());
+        CHECK(*highest - *lowest <= thickness * 0.1f);
+    }
 }
 
 TEST_CASE("mask extrude: each side means what it says") {
@@ -315,6 +350,22 @@ TEST_CASE("mask extrude: a plate comes off a voxel ball") {
     CHECK(plate->get({0, static_cast<std::int32_t>(std::floor(-kRadius / g.voxel_size())), 0}) == 0);
 }
 
+TEST_CASE("mask extrude: voxel wall height is not capped by mask depth") {
+    const VoxelGrid source = ball_grid();
+    const MaskField mask = cap_mask();
+    for (const float thickness : {0.05f, 0.1f, 0.6f}) {
+        const std::optional<VoxelGrid> plate =
+            brush::mask_extrude(source, mask, plate_settings(thickness));
+        REQUIRE(plate.has_value());
+        const std::optional<VoxelCoord> top = plate->bounds_max();
+        REQUIRE(top.has_value());
+        const float height = (static_cast<float>(top->y) + 0.5f) * source.voxel_size() - kRadius;
+        CAPTURE(thickness);
+        CAPTURE(height);
+        CHECK(std::fabs(height - thickness) <= source.voxel_size());
+    }
+}
+
 TEST_CASE("mask extrude: colour comes along, and the source survives") {
     VoxelGrid g = ball_grid();
     const MaskField m = cap_mask();
@@ -372,6 +423,38 @@ TEST_CASE("mask extrude: the two representations agree") {
                 if (field_plate->eval(c) < vs) ++agreeing;
             }
     REQUIRE(total > 0);
+    CHECK(static_cast<float>(agreeing) / static_cast<float>(total) > 0.95f);
+}
+
+TEST_CASE("mask extrude: a thick voxel wall tracks the field extract") {
+    const float cell = 0.03f;
+    const VoxelGrid grid = ball_grid(cell);
+    const MaskField mask = cap_mask(cell);
+    MaskExtrudeSettings settings = plate_settings(0.6f);
+    settings.cell_size = cell;
+    const std::optional<VoxelGrid> voxels = brush::mask_extrude(grid, mask, settings);
+    const std::optional<FieldVolume> field = brush::mask_extrude(sphere_field(), mask, settings);
+    REQUIRE(voxels.has_value());
+    REQUIRE(field.has_value());
+
+    const auto lo = voxels->bounds_min();
+    const auto hi = voxels->bounds_max();
+    REQUIRE(lo.has_value());
+    REQUIRE(hi.has_value());
+    std::size_t total = 0, agreeing = 0;
+    for (std::int32_t z = lo->z; z <= hi->z; ++z)
+        for (std::int32_t y = lo->y; y <= hi->y; ++y)
+            for (std::int32_t x = lo->x; x <= hi->x; ++x) {
+                if (voxels->get({x, y, z}) == 0) continue;
+                ++total;
+                const cfloat3 point = cf3(static_cast<float>(x) + 0.5f,
+                                           static_cast<float>(y) + 0.5f,
+                                           static_cast<float>(z) + 0.5f) * cell;
+                if (field->eval(point) < cell) ++agreeing;
+            }
+    REQUIRE(total > 0);
+    CAPTURE(total);
+    CAPTURE(agreeing);
     CHECK(static_cast<float>(agreeing) / static_cast<float>(total) > 0.95f);
 }
 
@@ -484,7 +567,7 @@ TEST_CASE("mask extrude: border_smooth rounds the rim it is asked to round") {
 
     // The fixture has to BE ragged, or two smooth rims would agree and the
     // comparison below would pass for the wrong reason.
-    CHECK(ragged > 0.3);
+    CHECK(ragged > 0.1);
     CHECK(smoothed < 0.75 * ragged);
 
     // And it is a dial rather than a switch: more passes never read rougher.

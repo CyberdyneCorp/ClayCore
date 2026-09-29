@@ -20,7 +20,9 @@
 // distance to the boundary of the masked region — and after that the extrude is
 // ordinary op composition.
 //
-// THE MASK IS THE REGION. Relax and flatten both need a `region_radius` because
+// THE MASK IS THE REGION ON THE SOURCE SURFACE. It selects a patch there; its
+// painted depth away from the surface does not limit the resulting wall. Relax
+// and flatten both need a `region_radius` because
 // they have no other way to know where to act. This does not: the painted region
 // bounds itself, which is why there is no region parameter here and why the
 // volume it samples is smaller than either of theirs.
@@ -102,6 +104,8 @@ struct MaskExtrudeSettings {
 // would look like a bug in the caller's mask rather than in their aim.
 //
 // The mask is not modified.
+// Wall height follows `thickness` along the source normal even when the mask's
+// painted volume is thinner than the requested wall.
 //
 // CANCELLABLE (add-operation-cancellation). This is the most expensive verb in
 // the library — 4403 ms on the reference iPad — so it is the one a host most
@@ -119,6 +123,8 @@ std::optional<field::FieldVolume> mask_extrude(const std::function<float(kernel:
 //
 // The two agree to within a voxel, which is the point: what a document means
 // must not depend on which representation it is stored in.
+// The mask chooses surface seed cells; grown layers do not have to remain
+// inside the painted mask volume.
 //
 // `cell_size` and `band` are ignored here — the grid's own resolution is the
 // only one available. Neither the source nor the mask is modified.
