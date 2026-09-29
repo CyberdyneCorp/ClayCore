@@ -901,6 +901,11 @@ cell space and keeps the palette, since a grid already knows which of its cells
 are on its surface. The side is `Outward` (a plate sitting on the surface),
 `Inward` (a pocket) or `Centred`.
 
+The mask selects a patch **on the source surface**. Its painted volume can be
+thin: the wall still reaches the requested thickness along the surface normal.
+The SDF path reads the mask at the source surface under each wall sample; the
+voxel path grows from masked surface cells for the requested number of layers.
+
 The one thing it needed that did not already exist is `brush::mask_to_field`. A
 mask is a `[0,1]` scalar on a lattice and **not a distance field**: composing one
 into a field expression directly puts a near-vertical step in the result and the
@@ -908,7 +913,7 @@ Lipschitz bound stops meaning anything. So the mask is *measured* first, by an
 exact Euclidean distance transform — not a chamfer, whose error is anisotropic,
 which would leave the rim showing flats where the lattice has them. After that
 the extrude is ordinary op composition: the shell of the source intersected with
-the masked region, with `border_round` giving the soft rim.
+the surface-anchored masked region, with `border_round` giving the soft rim.
 
 It **refuses** rather than returning something empty when the mask is empty,
 never reaches the surface, or the wall is thinner than a cell. A mask that

@@ -236,6 +236,23 @@ int layers_for(float thickness, float cell) {
     return std::max(static_cast<int>(std::lround(thickness / cell)), 1);
 }
 
+// A painted mask describes a patch ON the source, not a volume that must
+// itself extend through the requested wall. Read it at the nearest point on
+// the source surface so the wall keeps the same footprint at every height.
+cfloat3 project_to_surface(const std::function<float(cfloat3)>& source, cfloat3 p,
+                           float distance, float cell) {
+    const float h = cell * 0.5f;
+    const cfloat3 dx = cf3(h, 0.0f, 0.0f);
+    const cfloat3 dy = cf3(0.0f, h, 0.0f);
+    const cfloat3 dz = cf3(0.0f, 0.0f, h);
+    const cfloat3 gradient = cf3(source(p + dx) - source(p - dx),
+                                  source(p + dy) - source(p - dy),
+                                  source(p + dz) - source(p - dz));
+    const float length = kernel::clength(gradient);
+    if (length < 1e-6f) return p;
+    return p - gradient * (distance / length);
+}
+
 }  // namespace
 
 // -- the public conversion ----------------------------------------------------
@@ -283,8 +300,9 @@ std::optional<field::FieldVolume> mask_extrude(const std::function<float(cfloat3
     bool cancelled = false;
     field::FieldVolume out = field::FieldVolume::sample(
         [&](cfloat3 p) {
-            const float shell = shell_of(source(p), settings.side, settings.thickness);
-            const float region = md->eval(p);
+            const float distance = source(p);
+            const float shell = shell_of(distance, settings.side, settings.thickness);
+            const float region = md->eval(project_to_surface(source, p, distance, cell));
             const float v = round > 0.0f ? kernel::op_sintersect_quadratic(shell, region, round)
                                          : kernel::op_intersect(shell, region);
             deepest = std::min(deepest, v);
@@ -325,8 +343,8 @@ std::optional<voxel::VoxelGrid> mask_extrude(const voxel::VoxelGrid& grid,
 
     std::optional<VoxelCoord> mlo = shaped.bounds_min(), mhi = shaped.bounds_max();
     if (!mlo || !mhi) return std::nullopt;
-    // Everything the extract can contain is masked, so the mask's own bounds
-    // bound the scan — no need to walk the grid, which may be far larger.
+    // The mask bounds where surface seeds can be found. The grown wall may
+    // extend beyond these bounds; its height is set by thickness alone.
     const float ms = shaped.cell_size();
     const auto to_grid = [vs](float world) {
         return static_cast<std::int32_t>(std::floor(world / vs));
@@ -395,44 +413,38 @@ std::optional<voxel::VoxelGrid> mask_extrude(const voxel::VoxelGrid& grid,
         return remap[src];
     };
 
-    // Inward includes the seed layer: those cells are the surface, which is
-    // inside the source by half a voxel, so they are the first of the -t..0 band.
-    if (in_layers > 0) {
-        std::vector<std::pair<VoxelCoord, std::uint8_t>> frontier;
-        for (const auto& [c, idx] : seeds) {
-            if (out.get(c) != 0) continue;
-            out.set(c, colour_of(idx));
-            frontier.emplace_back(c, idx);
-        }
-        for (int layer = 1; layer < in_layers; ++layer) {
-            std::vector<std::pair<VoxelCoord, std::uint8_t>> next;
-            for (const auto& [c, idx] : frontier)
-                for (VoxelCoord f : kFaces) {
-                    const VoxelCoord n = step(c, f);
-                    const std::uint8_t here = grid.get(n);
-                    if (here == 0 || out.get(n) != 0 || !masked(n)) continue;
-                    out.set(n, colour_of(here));
-                    next.emplace_back(n, here);
+    // Follow each seed's surface normal rather than flooding through adjacent
+    // mask cells. Flooding spreads sideways with each layer, so a thicker wall
+    // widens its footprint and diverges from the field extract.
+    for (const auto& [seed, idx] : seeds) {
+        if (parallel::cancelled(token)) return std::nullopt;
+        cfloat3 normal = cf3(0.0f, 0.0f, 0.0f);
+        for (int dz = -2; dz <= 2; ++dz)
+            for (int dy = -2; dy <= 2; ++dy)
+                for (int dx = -2; dx <= 2; ++dx) {
+                    const VoxelCoord near{seed.x + dx, seed.y + dy, seed.z + dz};
+                    if (grid.get(near) != 0) continue;
+                    normal = normal + cf3(static_cast<float>(dx), static_cast<float>(dy),
+                                           static_cast<float>(dz));
                 }
-            frontier = std::move(next);
-        }
-    }
+        const float length = kernel::clength(normal);
+        if (length == 0.0f) continue;
+        normal = normal / length;
+        const cfloat3 origin = centre(seed);
+        const auto cell_at = [&](float distance) {
+            const cfloat3 p = origin + normal * distance;
+            return VoxelCoord{to_grid(p.x), to_grid(p.y), to_grid(p.z)};
+        };
 
-    // Outward does NOT include the seeds: the plate sits ON the surface rather
-    // than replacing the voxel it grew from, which is what 0 <= d <= t means on
-    // the SDF side and what keeps the two representations agreeing.
-    if (out_layers > 0) {
-        std::vector<std::pair<VoxelCoord, std::uint8_t>> frontier = seeds;
-        for (int layer = 0; layer < out_layers; ++layer) {
-            std::vector<std::pair<VoxelCoord, std::uint8_t>> next;
-            for (const auto& [c, idx] : frontier)
-                for (VoxelCoord f : kFaces) {
-                    const VoxelCoord n = step(c, f);
-                    if (grid.get(n) != 0 || out.get(n) != 0 || !masked(n)) continue;
-                    out.set(n, colour_of(idx));
-                    next.emplace_back(n, idx);
-                }
-            frontier = std::move(next);
+        // Inward includes the surface seed; outward begins in empty space.
+        for (int layer = 0; layer < in_layers; ++layer) {
+            const VoxelCoord cell = cell_at(-static_cast<float>(layer) * vs);
+            const std::uint8_t here = grid.get(cell);
+            if (here != 0 && out.get(cell) == 0) out.set(cell, colour_of(here));
+        }
+        for (int layer = 1; layer <= out_layers; ++layer) {
+            const VoxelCoord cell = cell_at(static_cast<float>(layer) * vs);
+            if (grid.get(cell) == 0 && out.get(cell) == 0) out.set(cell, colour_of(idx));
         }
     }
 
