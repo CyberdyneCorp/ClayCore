@@ -1,0 +1,6 @@
+- [x] Keep the dragged control points in `mesh::Lattice`, maintained by `set_offset`.
+- [x] Sum `displacement` over the dragged points only, with an O(n) basis per axis.
+- [x] Hold the new evaluation against the full trivariate Bernstein sum at 2, 3, 8 and 32 divisions, inside and outside the box.
+- [x] Pin the corner interpolation at degree 31 and the dragged count through a point returned to rest.
+- [x] Add `BM_MeshLatticeDrag` at 3^3, 8^3 and 32^3.
+- [ ] Ship in a release, and move ClaySpace's engine pin to it (CyberdyneCorp/ClaySpaceDesktop#176).
