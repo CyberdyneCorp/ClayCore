@@ -281,6 +281,21 @@ struct Layer {
     // document evaluates to" structural rather than a rule to maintain.
 };
 
+// The mirror axes this item is actually reflected through on this layer: its
+// own when it carries them, else the layer's when it participates, else none
+// (issue #664). THE ONE DEFINITION — the compiler (emit_item), the bounds, the
+// cull pad, picking and the Move brush's drag images all read it, so an item
+// cannot be emitted with a copy that a bound or a drag does not know about.
+// A feathered volume replace is excluded on top of this by each consumer, as
+// it always was (item_is_feathered_replace, bounds.h).
+//
+// The RADIAL mode is not here: it still follows `Node::mirror` alone.
+inline std::uint8_t effective_mirror_axes(const Node& item, const Layer& layer) {
+    if (item.own_mirror_axes != kMirrorAxesInherit)
+        return static_cast<std::uint8_t>(item.own_mirror_axes & (kMirrorX | kMirrorY | kMirrorZ));
+    return item.mirror ? layer.mirror_axes : std::uint8_t{0};
+}
+
 // -- an item's PLACED frame, both per-axis scales composed --------------------
 //
 // One place each, so tape_build, bounds, pick and the two brushes cannot drift

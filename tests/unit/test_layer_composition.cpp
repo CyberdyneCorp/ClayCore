@@ -284,7 +284,9 @@ TEST_CASE("a document where every layer unions still writes at minor 17, byte fo
     // A one-sided gate — a writer that emits it at 17, or a reader that consumes
     // it at 17 — fails here, and it has to, because layer records carry no
     // length and every record after the first would desynchronise.
-    const std::vector<std::uint8_t> now = scene::serialize_document(doc, scene::kSceneMinor);
+    // Compared at 18, the minor that added the block: a later minor appends
+    // fields of its own (20 gives every node a byte), which is not this rule.
+    const std::vector<std::uint8_t> now = scene::serialize_document(doc, 18);
     CHECK(now.size() == old_bytes.size() + 10 * doc.layers.size());
     CHECK(now != old_bytes);
 

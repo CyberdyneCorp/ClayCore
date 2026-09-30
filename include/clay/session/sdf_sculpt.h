@@ -429,6 +429,9 @@ class SdfMoveTransaction {
     scene::BakePointEval point_eval_;
     brush::MoveSettings settings_;
     kernel::cfloat3 anchor_ = kernel::cf3(0, 0, 0);
+    // The affected items' own mirror axes (#664), which the dirty report's
+    // images add to the layer's so an item's own twin is not left stale.
+    std::uint8_t own_mirror_axes_ = 0;
     kernel::cfloat3 displacement_ = kernel::cf3(0, 0, 0);
     std::uint64_t source_ = 0;
     std::vector<Affected> affected_;

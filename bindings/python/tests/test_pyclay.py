@@ -8710,3 +8710,34 @@ def test_a_refused_save_leaves_the_file_that_was_there_alone(tmp_path):
     # A save that cannot represent the document must not first destroy the last
     # one that could.
     assert path.read_bytes() == before
+
+
+# --- per-item mirror axes (issue #664) ---------------------------------------
+
+
+def test_an_item_keeps_its_own_mirror_axes_when_the_layer_mirror_changes():
+    doc = clay.Document()
+    doc.enable_undo()
+    layer = doc.add_sdf_layer("body")
+    layer.mirror(axis="x")
+    lump = clay.Sphere(r=0.25).at((0.6, 0.4, 0.0))
+    kept = layer.add(lump, mirror_axes="x")
+    twin_x = np.array([[-0.6, 0.4, 0.0]], np.float32)
+    twin_y = np.array([[0.6, -0.4, 0.0]], np.float32)
+    assert doc.eval(twin_x)[0] < 0
+    assert layer.node_mirror(kept) == {"mirror": True, "axes": "x", "effective_axes": "x"}
+
+    # A placed item corrected in place, as one undoable step.
+    layer.set_node_mirror(kept, mirror=True, axes="y")
+    assert doc.eval(twin_x)[0] > 0 and doc.eval(twin_y)[0] < 0
+    assert doc.undo()
+    assert doc.eval(twin_x)[0] < 0 and doc.eval(twin_y)[0] > 0
+    assert layer.node_mirror(kept)["axes"] == "x"
+    assert doc.redo()
+    assert layer.node_mirror(kept)["axes"] == "y"
+
+    # None puts it back on the layer's mirror.
+    layer.set_node_mirror(kept, axes=None)
+    assert layer.node_mirror(kept) == {"mirror": True, "axes": None, "effective_axes": "x"}
+    with pytest.raises(ValueError):
+        layer.set_node_mirror(kept, axes="w")

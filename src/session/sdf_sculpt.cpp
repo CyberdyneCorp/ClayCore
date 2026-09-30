@@ -401,6 +401,7 @@ std::optional<SdfMoveTransaction> SdfMoveTransaction::begin(scene::Document& doc
     // displacement does, and that is `resolve_prepared_move`.
     const std::vector<brush::PreparedMove> prepared =
         brush::prepare_move(*layer, world_centre, settings, &tx.prepare_stats_);
+    tx.own_mirror_axes_ = brush::prepared_own_mirror_axes(prepared);
     tx.affected_.reserve(prepared.size());
     for (const brush::PreparedMove& p : prepared) {
         const scene::Node* n = layer->sdf->find(p.node);
@@ -458,7 +459,7 @@ SdfSculptDirty SdfMoveTransaction::update(cfloat3 total_world_displacement) {
     // drag began under, so this reads no document state.
     const cfloat3 r = cf3(settings_.radius, settings_.radius, settings_.radius);
     for (const brush::DragImage& image :
-         brush::drag_images(preview_, anchor_, total_world_displacement)) {
+         brush::drag_images(preview_, anchor_, total_world_displacement, own_mirror_axes_)) {
         dirty.bounds.expand(math::Aabb{image.centre - r, image.centre + r});
         const cfloat3 moved = image.centre + image.displacement;
         dirty.bounds.expand(math::Aabb{moved - r, moved + r});

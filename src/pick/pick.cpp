@@ -1209,9 +1209,11 @@ math::Aabb node_shape_bounds(const scene::SdfContent& content, const scene::Node
     // the item IS, not around the one its primitive was authored as.
     const math::cfloat4x4 axes = math::scale_matrix(n.scale_axes);
     math::Aabb bound = local.transformed(scene::placed_matrix(layer, n));
-    if (n.mirror && layer.mirror_axes != 0) {
+    // The item's EFFECTIVE axes (#664): its own when it carries them.
+    const std::uint8_t mirror_axes = scene::effective_mirror_axes(n, layer);
+    if (mirror_axes != 0) {
         for (int axis = 0; axis < 3; ++axis) {
-            if (!(layer.mirror_axes & (1u << axis))) continue;
+            if (!(mirror_axes & (1u << axis))) continue;
             bound.expand(local.transformed(math::mul(
                 scene::layer_matrix(layer),
                 math::mul(math::reflection_matrix(axis), math::mul(n.xform.matrix(), axes)))));

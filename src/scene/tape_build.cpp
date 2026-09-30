@@ -969,16 +969,19 @@ struct Compiler {
         // strokes it was baked from, or bake each side. Documented on
         // clay_volume_params.feather.
         //
-        // This gate -- `item.mirror && !is_feathered_replace(item)` -- is the
-        // one the move brush repeats to decide which images of a drag an item
-        // can see (brush/move.cpp, warp_for). Change one and change the other,
-        // or the brush warps an item where no copy was emitted.
-        if (item.mirror && layer.mirror_axes != 0 && !is_feathered_replace(item)) {
+        // This gate -- `effective_mirror_axes(item, layer)` minus a feathered
+        // replace -- is the one the move brush repeats to decide which images
+        // of a drag an item can see (brush/move.cpp, images_for). Change one
+        // and change the other, or the brush warps an item where no copy was
+        // emitted. The axes are the ITEM's own when it carries them (#664),
+        // and the layer's otherwise; the seam is the layer's either way.
+        const std::uint8_t mirror_axes = effective_mirror_axes(item, layer);
+        if (mirror_axes != 0 && !is_feathered_replace(item)) {
             Blend mirror_blend{layer.mirror_k > 0.0f ? BlendProfile::Quadratic
                                                      : BlendProfile::Hard,
                                layer.mirror_k};
             for (int axis = 0; axis < 3; ++axis) {
-                if (!(layer.mirror_axes & (1u << axis))) continue;
+                if (!(mirror_axes & (1u << axis))) continue;
                 // inv of (layer * diag(L) * R * item) = item^-1 * R * diag(1/L) * layer^-1.
                 // The reflection acts in the layer's LOCAL space, so the
                 // layer's per-axis scale is OUTSIDE it — and for a reflection

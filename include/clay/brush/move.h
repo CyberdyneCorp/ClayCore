@@ -53,6 +53,18 @@
 // Items that do not participate in the symmetry see the ball alone. With no
 // symmetry there is one image and this is byte-for-byte the rule it replaces.
 //
+// AN ITEM CARRYING ITS OWN MIRROR AXES (#664) IS REACHED THROUGH ITS OWN
+// REFLECTIONS, not the layer's: the drag, one reflection per axis the ITEM
+// sets, then the layer's rotations if the item takes the radial mode. That is
+// the same rule — the images are the copies the compiler emits of THIS item —
+// and it is the intended behaviour, stated because the alternative reads
+// plausibly: an item that kept its X twin after the layer's mirror was turned
+// off still moves on both sides under a drag, since both sides ARE the item;
+// one whose own axes are 0 moves on the touched side alone whatever the
+// layer's mirror says. A host that wants a formerly mirrored item to stop
+// following its twin sets that item's axes to 0 — the per-item spelling of
+// switching symmetry off for what was already made.
+//
 // ONE WARP PER NODE, CARRYING ONE GRAB PER REACHING IMAGE. An item both images
 // reach — one straddling the plane — takes both, as two brushes would, and a
 // drag centred on the plane gives it two grabs of opposite pull that compose
@@ -136,8 +148,15 @@ struct DragImage {
 // Exposed because the gesture's REACH is the union of these balls: the copies
 // move where the images are, and a host that invalidates the ball alone
 // serves the reflected side stale.
+//
+// `item_axes` adds reflections for axes the DRAGGED items carry as their own
+// (#664) — `prepared_own_mirror_axes` of the drag's prepared items — so the
+// reach covers the twin of an item whose axes the layer's mirror does not
+// set. The reflections are unioned with the layer's, in axis order; zero, the
+// default, is exactly the layer's images.
 std::vector<DragImage> drag_images(const scene::Layer& layer, kernel::cfloat3 world_centre,
-                                   kernel::cfloat3 world_displacement);
+                                   kernel::cfloat3 world_displacement,
+                                   std::uint8_t item_axes = 0);
 
 // One item's share of the drag: the grabs that reproduce it in that item's own
 // frame, one per image of the drag that reaches the item — usually one, two
@@ -215,7 +234,13 @@ struct PreparedMove {
     // The images of the drag this item can see, in `drag_images` order: the
     // drag itself first, then the copies the layer's symmetry emits. One,
     // reaching, under no symmetry; one for an item the compiler emits once.
+    // An item carrying its own mirror axes sees its own reflections in place
+    // of the layer's (#664).
     std::vector<PreparedImage> images;
+
+    // The item's own mirror axes when it carries them, else 0 — what
+    // `prepared_own_mirror_axes` folds into a drag's reach (#664).
+    std::uint8_t own_mirror_axes = 0;
 
     // The reach in this item's own scaled-local frame, shared by every image.
     float local_radius = 0.0f;
@@ -264,6 +289,11 @@ struct MovePrepareStats {
 std::vector<PreparedMove> prepare_move(const scene::Layer& layer, kernel::cfloat3 world_centre,
                                        const MoveSettings& settings = {},
                                        MovePrepareStats* out_stats = nullptr);
+
+// The union of the own mirror axes the prepared items carry (#664): what a
+// caller passes `drag_images` so the reach covers every copy the drag moves.
+// Zero on a layer where no item overrides the mirror.
+std::uint8_t prepared_own_mirror_axes(const std::vector<PreparedMove>& prepared);
 
 // The other half: the warp for a TOTAL world displacement — one grab per image
 // that reaches the item, coincident images resolved as one brush (see
