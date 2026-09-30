@@ -34,6 +34,12 @@ CullIndex::CullIndex(const Document& doc) : doc_(&doc) {
 // symmetry is constant; appends only grow `nodes`, and both factors of the
 // product only rise, keeping the raise-only append contract exact.
 //
+// An item's OWN mirror axes (#664) keep that true by riding the terms rather
+// than the layer: an appended item carrying them raises `own_mirror_axes`
+// with the rest of its terms, and a later change to a placed item's axes is a
+// SetNodeMirrorCmd — not an AddNodeCmd, so it takes the general invalidation
+// the layer-symmetry setters take.
+//
 // PLUS THE FOLDS ABOVE EACH LAYER, which is the term no per-layer walk can
 // produce: a smooth layer composition drags the value of every layer beneath
 // it, and a stack of them composes, so the items of the bottom layer need the
@@ -51,7 +57,8 @@ void CullIndex::refresh_pad() {
     pad_ = 0.0f;
     for (const LayerPad& p : pads_)
         pad_ = kernel::cmax(pad_,
-                            p.terms.total(p.nodes * layer_symmetry_multiplicity(*p.layer)) +
+                            p.terms.total(p.nodes * layer_symmetry_multiplicity(
+                                                     *p.layer, p.terms.own_mirror_axes)) +
                                 folds_from_layer_support(*doc_, p.layer->id));
 }
 

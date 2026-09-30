@@ -154,6 +154,26 @@ int parse_axis(const std::string& axis) {
     throw std::invalid_argument("axis must be 'x', 'y' or 'z'");
 }
 
+// An item's own mirror axes (#664), spelled as the letters it reflects across:
+// "x", "xz", "" for none — or None to take the layer's (the inherit sentinel).
+std::uint8_t parse_own_mirror_axes(nb::handle axes) {
+    if (axes.is_none()) return scene::kMirrorAxesInherit;
+    std::uint8_t mask = 0;
+    for (char c : nb::cast<std::string>(axes))
+        mask = static_cast<std::uint8_t>(mask | (1u << parse_axis(std::string(1, c))));
+    return mask;
+}
+
+// The inverse: the letters, or None for an item that takes the layer's axes.
+nb::object own_mirror_axes_object(std::uint8_t axes) {
+    if (axes == scene::kMirrorAxesInherit) return nb::none();
+    std::string out;
+    if (axes & scene::kMirrorX) out += 'x';
+    if (axes & scene::kMirrorY) out += 'y';
+    if (axes & scene::kMirrorZ) out += 'z';
+    return nb::str(out.c_str());
+}
+
 voxel::BrushShape parse_brush_shape(const std::string& shape) {
     if (shape == "cube") return voxel::BrushShape::Cube;
     if (shape == "sphere") return voxel::BrushShape::Sphere;
@@ -6040,7 +6060,7 @@ NB_MODULE(pyclay, m) {
         .def("add",
              [](PyLayer& l, const PyPrim& prim, scene::Op op, nb::handle blend, nb::handle color,
                 nb::handle rounding, bool mirror, nb::handle transition, nb::handle parent,
-                int index) {
+                int index, nb::handle mirror_axes) {
                  if (op == scene::Op::None)
                      throw std::invalid_argument(
                          "op must be a combine operator, not Op.INLINE — that one is for "
@@ -6079,6 +6099,7 @@ NB_MODULE(pyclay, m) {
                  n.rounding = rounding.is_none() ? prim.rounding : nb::cast<float>(rounding);
                  if (n.rounding < 0.0f) throw std::invalid_argument("rounding must be >= 0");
                  n.mirror = mirror;
+                 n.own_mirror_axes = parse_own_mirror_axes(mirror_axes);
                  if (scene::op_is_transition(op)) {
                      if (transition.is_none())
                          throw std::invalid_argument(
@@ -6099,11 +6120,14 @@ NB_MODULE(pyclay, m) {
              },
              "prim"_a, "op"_a = scene::Op::Add, "blend"_a = nb::none(), "color"_a = nb::none(),
              "rounding"_a = nb::none(), "mirror"_a = true, "transition"_a = nb::none(),
-             "parent"_a = nb::none(), "index"_a = -1,
+             "parent"_a = nb::none(), "index"_a = -1, "mirror_axes"_a = nb::none(),
              "Append an edit to the layer; returns the node id. parent=<group id> "
              "puts it inside that group instead of at the layer root, and index<0 "
              "appends. mirror=False keeps the item out of the layer's mirror "
-             "(items follow it by default).")
+             "(items follow it by default). mirror_axes='x' (or 'xz', or '' for "
+             "none) gives the item its OWN mirror axes, which replace the layer's "
+             "for it whatever the layer's mirror is later set to; None, the "
+             "default, follows the layer.")
         .def("add_group",
              [](PyLayer& l, scene::Op op, nb::handle blend, nb::handle color, float rounding,
                 nb::handle parent, int index) {
@@ -6587,6 +6611,40 @@ NB_MODULE(pyclay, m) {
                      "set_color", l.undo.get());
              },
              "node"_a, "color"_a)
+        .def("set_node_mirror",
+             [](PyLayer& l, scene::NodeId node, bool mirror, nb::handle axes) {
+                 const scene::Node* n = l.layer().sdf->find(node);
+                 if (!n) throw std::invalid_argument("no node with that id in this layer");
+                 if (n->is_group)
+                     throw std::invalid_argument("a group takes no mirror: set it on the items");
+                 apply_or_throw(l.doc->document,
+                                scene::Command{scene::SetNodeMirrorCmd{
+                                    l.id, node, mirror, parse_own_mirror_axes(axes)}},
+                                "set_node_mirror", l.undo.get());
+             },
+             "node"_a, "mirror"_a = true, "axes"_a = nb::none(),
+             "Set a PLACED item's mirror participation and its own axes as one undoable "
+             "edit (clay_layer_set_node_mirror). axes='x'/'xz'/'' gives the item its "
+             "own axes; None puts it back on the layer's mirror.")
+        .def("node_mirror",
+             [](const PyLayer& l, scene::NodeId node) {
+                 const scene::Node* n = l.layer().sdf->find(node);
+                 if (!n) throw std::invalid_argument("no node with that id in this layer");
+                 if (n->is_group)
+                     throw std::invalid_argument("a group takes no mirror: ask the items");
+                 const std::uint8_t effective = scene::item_is_feathered_replace(*n)
+                                                    ? std::uint8_t{0}
+                                                    : scene::effective_mirror_axes(*n, l.layer());
+                 nb::dict d;
+                 d["mirror"] = n->mirror;
+                 d["axes"] = own_mirror_axes_object(n->own_mirror_axes);
+                 d["effective_axes"] = own_mirror_axes_object(effective);
+                 return d;
+             },
+             "node"_a,
+             "A placed item's mirror state (clay_layer_node_mirror): 'mirror' its "
+             "participation flag, 'axes' its own axes or None when it follows the "
+             "layer, and 'effective_axes' the axes it is actually reflected through.")
         .def("set_op_blend",
              [](PyLayer& l, scene::NodeId node, nb::handle op, nb::handle blend,
                 nb::handle rounding) {

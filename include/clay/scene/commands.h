@@ -55,6 +55,17 @@ struct SetColorCmd {
     NodeId node = kNoNode;
     kernel::cfloat3 color = kernel::cf3(0, 0, 0);
 };
+// A placed item's mirror participation AND its own axes, as one command
+// (issue #664): they are one decision — which copies of this item the mirror
+// emits — so one undo step puts back both. `own_mirror_axes` takes
+// kMirrorAxesInherit to follow the layer again. Without this a host could fix
+// neither on an item already placed, only re-add it.
+struct SetNodeMirrorCmd {
+    LayerId layer = 0;
+    NodeId node = kNoNode;
+    bool mirror = true;
+    std::uint8_t own_mirror_axes = kMirrorAxesInherit;
+};
 struct SetOpBlendCmd {
     LayerId layer = 0;
     NodeId node = kNoNode;
@@ -211,7 +222,7 @@ using Command =
                  RemoveLayerCmd, SetLayerVisibleCmd, SetLayerTransformCmd,
                  SetLayerProtectionCmd, SetStrokePointsCmd, SetDeformersCmd,
                  SetLayerMirrorCmd, SetLayerRadialCmd, SetArmatureCmd, SetLayerNameCmd,
-                 SetLayerCompositionCmd>;
+                 SetLayerCompositionCmd, SetNodeMirrorCmd>;
 
 // The layer a command would edit, or 0 for one that edits no existing layer
 // (adding a layer creates its target; changing protection is how a protected
@@ -460,7 +471,22 @@ LayerId content_sharer_of(const Document& doc, LayerId layer);
 // bytes minor 18 always did, and `layer_blocking_minor` answers for 19 exactly
 // as it answers for 18, because the composition is still the only field whose
 // absence changes the model. This is minor 10's case, for minor 10's reason.
-inline constexpr std::uint16_t kSceneMinor = 19;
+//
+// Minor 20 adds an item's OWN MIRROR AXES (issue #664): one byte appended last
+// in the node record, kMirrorAxesInherit meaning "the layer's", which is what
+// every earlier document loads as — so each evaluates exactly as it was saved.
+// Same shape as minors 7, 8, 11 and 14, so a build that predates 20 reading a
+// 20 document is one byte long on the first node and FAILS on the reader's own
+// bounds and count checks rather than misreading it.
+//
+// ON THE WAY DOWN it takes minor 18's departure, not minor 14's degradation.
+// Dropping the byte would hand an item that kept its X twin after the layer's
+// mirror went off back to the layer — the twin gone, in a file that opens
+// cleanly — and hand an item held at 0 a twin it never had. That is a
+// different sculpture, so `layer_blocking_minor` names the first layer holding
+// an item with its own axes below 20 and serialize_document refuses; a
+// document whose items all inherit writes exactly the bytes 19 always did.
+inline constexpr std::uint16_t kSceneMinor = 20;
 
 // Apply a command; returns its inverse, or nullopt if the target does not
 // exist or is protected (ghosted or locked). The document is unchanged in
@@ -495,6 +521,12 @@ std::optional<Command> deserialize(const std::uint8_t* data, std::size_t size);
 // per-axis scale comes back unsquashed, 15's instances come back as copies, 16
 // the same one level up, and 17 writes each payload once per node. Every one of
 // those is smaller or plainer and none of them is a different sculpture.
+//
+// Every minor below 20 also refuses a layer holding an item that carries its
+// OWN mirror axes (#664), and names that layer first: dropping the byte would
+// hand the item the layer's twins in place of its own. A host that must write
+// for an older build puts such items back on the layer's mirror first
+// (SetNodeMirrorCmd with kMirrorAxesInherit).
 LayerId layer_blocking_minor(const Document& doc, std::uint16_t minor);
 
 // Whole-document snapshot (used by tests for bit-identity checks and by the
@@ -508,7 +540,8 @@ LayerId layer_blocking_minor(const Document& doc, std::uint16_t minor);
 // REFUSES — returns an EMPTY vector, which is never a valid stream since even
 // an empty document writes its layer count — when `minor` cannot express what
 // this document says. Today that is exactly `layer_blocking_minor(doc, minor)`
-// being non-zero: a layer carrying a composition, written below minor 18.
+// being non-zero: a layer carrying a composition, written below minor 18, or
+// an item carrying its own mirror axes, written below minor 20.
 //
 // Refusing rather than degrading is a departure from every earlier minor, and
 // it is deliberate. The rule this format has followed is "writable at the

@@ -152,6 +152,26 @@ the same as an add mirrors the deposit. Until 0.27.3 this flag was an
 **opt-in that defaulted to excluded**, which read as the layer mirror doing
 nothing at all (#60). Layers with no mirror axes cost nothing either way.
 
+**An item can carry its own axes** (#664, ABI 0.121.0, format minor 20). The
+flag above can only say "follow the layer or don't", so turning symmetry off, or
+moving it from X to Y, changed every item made under the old axes: a lump made
+on +x under X lost its -x twin (the field at the twin's centre went from -0.25
+to 0.95). `Node::own_mirror_axes` (C: `clay_item_set_mirror_axes` on a builder,
+`clay_layer_set_node_mirror` on a placed item; Python: `mirror_axes="x"` on
+`add`, `Layer.set_node_mirror`) holds the item's own `x|y|z`, `0` for none, or
+inherit, which is the default and what every older document loads as. Own axes
+replace the layer's for that item outright, whatever the participation flag
+says. A host that stamps each new item with the axes symmetry has at the time
+gets both halves: switching the layer's mirror changes only what inherits.
+The seam (`mirror_k`), the planes and the radial mode stay the layer's; radial
+participation is still the flag's. `scene::effective_mirror_axes` is the one
+definition the compiler, the bounds, the cull pad, picking and the Move brush
+read. A placed item's pair is one undoable command (`SetNodeMirrorCmd`), and
+`clay_layer_node_mirror` reports it together with the axes the item is actually
+reflected through. A document holding own axes cannot be written below minor 20:
+the write is refused and the layer named, because an older build would give
+the item the layer's copies.
+
 **Setting the symmetry to what the layer already carries is not an edit**
 (#536, ABI 0.103.0). Identical axes and an identical `mirror_k` — or, for the
 radial mode below, an identical count, axis and `radial_k` — leave the document
@@ -324,7 +344,12 @@ its **own** bound against each image. An image that reaches an item gives it a
 grab at that image's centre with that image's displacement, so the reflected
 ball grabs the items whose reflections sit under the ball. Items that opted out
 of the mirror (`mirror=False`, `-1` in C) and feathered volume replaces see the
-ball alone, because the compiler emits no copy of them. An item both images
+ball alone, because the compiler emits no copy of them. An item carrying its
+OWN mirror axes (#664) is tested against ITS reflections instead of the
+layer's. That is intended: an item that kept X after the layer's mirror went
+off moves on both sides under a drag, because both sides are the item, and one
+held at 0 moves on the touched side only. The gesture's reach adds the dragged
+items' own axes (`brush::prepared_own_mirror_axes`), so that twin is dirtied too. An item both images
 reach — one straddling the plane — takes both grabs in one warp, **composing
 the two pulls as two brushes would** when the two balls are distinct; pulling
 across the plane from on it, the two cancel to a pinch.

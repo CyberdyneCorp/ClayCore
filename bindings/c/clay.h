@@ -24,8 +24,8 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 120
-#define CLAY_ABI_PATCH 1
+#define CLAY_ABI_MINOR 121
+#define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
  * selected node ids, stroke points, polygon vertices. A count above it is
@@ -1817,7 +1817,12 @@ clay_result clay_document_layer_composition(const clay_document* doc, clay_layer
  * line every other minor draws: subdivision is deterministic, so a hierarchy
  * without detail rebuilds from its cage and losing it is the ordinary "smaller
  * or plainer" degrade. Detail is something an artist made and cannot be
- * rebuilt. */
+ * rebuilt.
+ *
+ * Minor 20 (ABI 0.121.0) adds a third: an item carrying its OWN mirror axes
+ * (clay_item_set_mirror_axes) blocks every minor below 20, since an older
+ * build would hand it the layer's twins instead. Put such items back on the
+ * layer's mirror (CLAY_MIRROR_AXES_INHERIT) to write for an older build. */
 clay_result clay_document_writable_at_minor(const clay_document* doc, uint32_t minor,
                                             clay_layer_id* out_blocking_layer);
 
@@ -1848,9 +1853,10 @@ clay_result clay_document_writable_at_minor(const clay_document* doc, uint32_t m
  * WHAT AN OLDER MINOR ACTUALLY LOSES, said once rather than per call: 14 comes
  * back unsquashed, 15's instances come back as copies, 17 writes each payload
  * once per node, and below 19 a hierarchy carrying no detail is absent and
- * rebuilds from its cage. Every one of those is smaller or plainer. The two
+ * rebuilds from its cage. Every one of those is smaller or plainer. The three
  * that would be a DIFFERENT SCULPTURE — a composition below 18, a hierarchy
- * with detail below 19 — are refused instead. */
+ * with detail below 19, an item carrying its own mirror axes below 20 (ABI
+ * 0.121.0) — are refused instead. */
 clay_result clay_document_save_at_minor(const clay_document* doc, const char* path,
                                         uint32_t minor, clay_layer_id* out_blocking_layer);
 
@@ -2229,6 +2235,12 @@ clay_result clay_layer_zero_to_origin(clay_document* doc, clay_layer_id layer);
  * mirror = 1 (#60); 1 is still accepted and means what it meant. Layers with
  * no mirror axes evaluate exactly as before, whatever the items' flags.
  *
+ * THE LAYER'S AXES ARE A DEFAULT, since ABI 0.121.0 (#664): an item that
+ * carries its own (clay_item_set_mirror_axes, clay_layer_set_node_mirror) is
+ * reflected through those instead, and this call no longer changes it. Items
+ * that never set any — every item in every document saved before — follow
+ * this call exactly as they always did.
+ *
  * SETTING WHAT THE LAYER ALREADY CARRIES DOES NOTHING, since ABI 0.103.0
  * (#536): identical axes and an identical mirror_k return CLAY_OK without
  * recording an undo step and without invalidating anything. Through 0.102.0
@@ -2469,8 +2481,42 @@ clay_result clay_item_set_rounding(clay_item* item, float rounding);     /* >= 0
 clay_result clay_item_set_color(clay_item* item, const float rgb[3]);
 /* Layer-mirror participation, the builder's spelling of clay_item_desc.mirror:
  * -1 excludes the item from the layer's mirror, 0 and 1 follow it (the
- * default). See clay_set_layer_mirror. */
+ * default). See clay_set_layer_mirror. Once the item carries its own axes
+ * (clay_item_set_mirror_axes) this decides only its RADIAL participation. */
 clay_result clay_item_set_mirror(clay_item* item, int32_t mirror);
+
+/* "Take the layer's mirror axes": the default own-axes value of every item,
+ * and what every document saved before ABI 0.121.0 loads with. */
+#define CLAY_MIRROR_AXES_INHERIT 255
+
+/* The item's OWN mirror axes, since ABI 0.121.0 (#664): CLAY_MIRROR_X|Y|Z OR'd
+ * together, 0 for none, or CLAY_MIRROR_AXES_INHERIT to follow the layer again.
+ * Anything else is CLAY_ERROR_INVALID_ARGUMENT.
+ *
+ * Set, the item's axes REPLACE the layer's for this item outright — whatever
+ * the layer's mirror is now or is changed to later, and whatever the item's
+ * participation flag says. That is what lets a host keep what was made under
+ * a symmetry as it was made: give each new item the axes symmetry had when it
+ * was made, and turning the layer's mirror off or pointing it at Y no longer
+ * moves any of them. An item set to 0 has no mirror copy on any layer.
+ *
+ * WHAT STAYS THE LAYER'S: the seam (mirror_k), the planes (the layer's local
+ * frame), and the radial mode, which still follows clay_item_set_mirror. A
+ * feathered volume replace takes no mirror copies whatever it carries, as it
+ * never has (clay_volume_params.feather).
+ *
+ * A Move or magnify drag reaches such an item through ITS reflections: both
+ * sides of an item that kept X move together, and an item held at 0 moves on
+ * the side the drag touched only (clay_layer_move_surface).
+ *
+ * NOT FREE ON THE WAY DOWN: a document holding an item with its own axes
+ * cannot be written at a format minor below 20 — clay_document_save_at_minor
+ * refuses it and names the layer — because dropping them would hand the item
+ * the layer's twins instead of its own. */
+clay_result clay_item_set_mirror_axes(clay_item* item, uint8_t axes);
+/* What clay_item_set_mirror_axes last set: CLAY_MIRROR_AXES_INHERIT for a
+ * builder that never set any. */
+clay_result clay_item_mirror_axes(const clay_item* item, uint8_t* out_axes);
 
 /* Appends one domain warp (clay_deform) to the item's chain: the local point
  * is warped by the first one added first. params/param_count are the kind's
@@ -3000,6 +3046,33 @@ clay_result clay_layer_node_op_blend(const clay_document* doc, clay_layer_id lay
  * behind a point on screen. */
 clay_result clay_layer_node_color(const clay_document* doc, clay_layer_id layer,
                                   clay_node_id node, float out_rgb[3]);
+
+/* A PLACED item's mirror participation and own axes, set as one undoable edit
+ * (#664) — the same two values clay_item_set_mirror and
+ * clay_item_set_mirror_axes give a builder, for an item already in the
+ * document. `mirror` takes clay_item_set_mirror's rule (negative excludes, 0
+ * and 1 follow); `axes` takes clay_item_set_mirror_axes's, so
+ * CLAY_MIRROR_AXES_INHERIT puts the item back on the layer's mirror. Before
+ * this a host could correct neither without removing and re-adding the item,
+ * which changes its id and its place in the chain.
+ *
+ * One command, one undo step: undo puts back both values the item had.
+ * Refused on a protected layer as every node edit is. A GROUP is
+ * CLAY_ERROR_INVALID_ARGUMENT: evaluation never reads a group's mirror, so a
+ * value there would be a control that does not act. Setting the values the
+ * item already holds is still recorded — it is not the layer mirror's no-op
+ * short-circuit — and invalidates only the item's own influence. */
+clay_result clay_layer_set_node_mirror(clay_document* doc, clay_layer_id layer,
+                                       clay_node_id node, int32_t mirror, uint8_t axes);
+/* The reader: `*out_mirror` 1 when the item follows the layer's mirror and -1
+ * when it opted out; `*out_axes` its own axes or CLAY_MIRROR_AXES_INHERIT;
+ * `*out_effective_axes` the axes it is ACTUALLY reflected through on this
+ * layer right now — its own, else the layer's when it participates, else 0,
+ * and 0 for a feathered volume replace. Any out pointer may be null. A group
+ * is CLAY_ERROR_INVALID_ARGUMENT, as its setter is. */
+clay_result clay_layer_node_mirror(const clay_document* doc, clay_layer_id layer,
+                                   clay_node_id node, int32_t* out_mirror, uint8_t* out_axes,
+                                   uint8_t* out_effective_axes);
 
 /* The layer's TOP-LEVEL nodes, count-then-index, in the layer's EVALUATION
  * order — index 0 is the node evaluated first, and the index is the one

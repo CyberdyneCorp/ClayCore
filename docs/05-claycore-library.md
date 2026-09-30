@@ -916,6 +916,15 @@ names the layer that blocks. pyclay has the same question as
 id rather than only a flag, so a script can say which subtool to change instead
 of leaving a person to find it.
 
+Scene minor 20 (ABI 0.121.0, #664) is the second field refused this way: an
+item's OWN mirror axes (`clay_item_set_mirror_axes`,
+`clay_layer_set_node_mirror`; see docs/07, "Symmetry: the layer mirror"). The
+node record gains one byte, and an older document loads with every item on its
+layer's mirror, which is exactly what it meant. A document where every item
+inherits still writes minor 19's bytes. One holding an item with its own axes
+is refused below 20 with its layer named, because dropping the byte would give
+that item the layer's copies instead of its own.
+
 ### An intersect is bounded by its layer
 
 `item_influence_bound` reported `Everything` for any op that is not local, and

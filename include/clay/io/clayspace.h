@@ -215,7 +215,14 @@ inline constexpr std::uint16_t kClaySpaceMajor = 1;
 // hardest to avoid. Nothing here can stop an older build; what this can do is
 // say so, and `multires_carries_detail` is what a host asks to know whether a
 // given document has anything to lose.
-inline constexpr std::uint16_t kClaySpaceMinor = 19;
+// Minor 20 adds an item's OWN MIRROR AXES (issue #664), an APPENDED scene field
+// like 11 and 14; see scene::kSceneMinor for the byte and its meaning. A build
+// that predates 20 FAILS on the first node rather than misreading it. Writing
+// AT 19 follows 18's rule, not 14's: a document whose items all take the
+// layer's mirror writes the bytes it always did, and one holding an item with
+// its own axes is REFUSED, because dropping them gives an item the layer's
+// twins instead of its own. scene::layer_blocking_minor names the layer.
+inline constexpr std::uint16_t kClaySpaceMinor = 20;
 
 // The document bundle a .clayspace file holds. Voxel layer content is keyed
 // by layer id (the scene module stays voxel-agnostic by layering rule).

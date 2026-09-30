@@ -6,8 +6,10 @@
 #include "clay/brush/move.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <map>
+#include <memory>
 #include <tuple>
 #include <utility>
 
@@ -24,18 +26,23 @@ namespace {
 
 // -- the images of a drag -----------------------------------------------------
 
-// The linear maps, in the LAYER's frame, of the copies the compiler emits of a
-// participating item: one reflection per set mirror axis, then one rotation
-// per radial copy. Empty without symmetry. Copy k of a radial item is the item
+// The linear maps, in the LAYER's frame, of the copies the compiler emits of an
+// item reflected through `mirror_axes` and, when `radial`, arrayed by the
+// layer's radial mode: one reflection per set axis, then one rotation per
+// radial copy. Empty without symmetry. Copy k of a radial item is the item
 // rotated by +angle, so the item that sits under the ball THROUGH copy k has
 // its body at the ball rotated by -angle — the inverse emit_item composes for
 // that copy.
-std::vector<math::cfloat4x4> copy_linears(const scene::Layer& layer) {
+//
+// The axes are a parameter rather than the layer's because an item may carry
+// its OWN (#664); the layer's are what every inheriting item reads.
+std::vector<math::cfloat4x4> copy_linears(const scene::Layer& layer, std::uint8_t mirror_axes,
+                                          bool radial) {
     std::vector<math::cfloat4x4> out;
     for (int axis = 0; axis < 3; ++axis) {
-        if (layer.mirror_axes & (1u << axis)) out.push_back(math::reflection_matrix(axis));
+        if (mirror_axes & (1u << axis)) out.push_back(math::reflection_matrix(axis));
     }
-    if (layer.radial_count > 1) {
+    if (radial && layer.radial_count > 1) {
         const int axis = layer.radial_axis < 3 ? layer.radial_axis : 1;
         const int count = static_cast<int>(layer.radial_count);
         for (int k = 1; k < count; ++k) {
@@ -188,16 +195,84 @@ bool reaches(const math::Aabb& influence, const math::Aabb& drag) {
              influence.max.z < drag.min.z || influence.min.z > drag.max.z);
 }
 
-// How many of the drag's images this item sees. EXACTLY the compiler's
-// participation gate (tape_build.cpp, emit_item): an item that opted out of
-// the mirror, or a feathered volume replace, is emitted once and has no copy
-// for a reflected image to reach. The two tests must stay identical, or the
-// brush warps an item where the compiler put no geometry.
-std::size_t images_seen(const scene::Node& n, std::size_t images) {
-    if (images == 1) return 1u;  // no symmetry: nothing to gate, and no call per item
-    const bool participates = n.mirror && !scene::item_is_feathered_replace(n);
-    return participates ? images : 1u;
-}
+// The images one symmetry makes of a drag: the copies' maps and their balls.
+// Held behind a pointer so `ImageBall::linear` keeps pointing at `linears`.
+struct ImageSet {
+    std::vector<math::cfloat4x4> linears;
+    std::vector<ImageBall> balls;
+};
+
+// The drag's images PER SYMMETRY an item can carry, built once per drag.
+//
+// Every item that inherits the layer's mirror sees a prefix of ONE set — the
+// layer's, all of it or the drag alone — which is the whole story for every
+// document written before items could carry their own axes, and it is built
+// and read exactly as it always was, so those drags stay bit-identical.
+//
+// An item carrying its OWN axes (#664) is emitted with ITS reflections, and a
+// drag has to reach it through those or the brush warps the item where no copy
+// is (or misses the copy that is): an item that kept its X twin after the
+// layer's mirror went off still moves on both sides, and one whose axes are 0
+// moves on the side the drag touched only. Its set is keyed on (axes, radial)
+// and built the first time an item asks — at most sixteen per drag, and none
+// at all on a layer no item overrides.
+class DragImageSets {
+public:
+    DragImageSets(const scene::Layer& layer, cfloat3 centre, float radius)
+        : layer_(layer), centre_(centre), radius_(radius),
+          layer_key_(key(layer.mirror_axes, layer.radial_count > 1)),
+          layer_set_(build(layer.mirror_axes, true)) {}
+
+    // The images `n` can be reached through, and how many of them it sees.
+    // EXACTLY the compiler's gate (tape_build.cpp, emit_item): an item with no
+    // effective axes that takes no radial copy, or a feathered volume replace,
+    // is emitted once and has no copy for a reflected image to reach. The two
+    // tests must stay identical, or the brush warps an item where the compiler
+    // put no geometry.
+    const std::vector<ImageBall>& for_item(const scene::Node& n, std::size_t* seen) {
+        const std::vector<ImageBall>& layer_balls = layer_set_->balls;
+        *seen = 1u;
+        // No symmetry anywhere: nothing to gate, and no call per item.
+        if (layer_balls.size() == 1 && n.own_mirror_axes == scene::kMirrorAxesInherit)
+            return layer_balls;
+        if (scene::item_is_feathered_replace(n)) return layer_balls;  // ball 0 is the drag
+        if (n.own_mirror_axes == scene::kMirrorAxesInherit) {
+            if (n.mirror) *seen = layer_balls.size();
+            return layer_balls;
+        }
+        const std::uint8_t axes = scene::effective_mirror_axes(n, layer_);
+        const bool radial = n.mirror && layer_.radial_count > 1;
+        const unsigned k = key(axes, radial);
+        const ImageSet& set = k == layer_key_ ? *layer_set_ : variant(k, axes, radial);
+        *seen = set.balls.size();
+        return set.balls;
+    }
+
+private:
+    static unsigned key(std::uint8_t axes, bool radial) {
+        return (axes & 0x7u) | (radial ? 0x8u : 0u);
+    }
+
+    std::unique_ptr<ImageSet> build(std::uint8_t axes, bool radial) const {
+        auto set = std::make_unique<ImageSet>();
+        set->linears = copy_linears(layer_, axes, radial);
+        set->balls = image_balls(layer_.xform, centre_, set->linears, radius_);
+        return set;
+    }
+
+    const ImageSet& variant(unsigned k, std::uint8_t axes, bool radial) {
+        std::unique_ptr<ImageSet>& slot = variants_[k];
+        if (!slot) slot = build(axes, radial);
+        return *slot;
+    }
+
+    const scene::Layer& layer_;
+    cfloat3 centre_;
+    float radius_;
+    unsigned layer_key_;
+    std::unique_ptr<ImageSet> layer_set_;
+    std::array<std::unique_ptr<ImageSet>, 16> variants_{};
+};
 
 bool any_reaches(const math::Aabb& own, const std::vector<ImageBall>& balls, std::size_t seen) {
     for (std::size_t k = 0; k < seen; ++k) {
@@ -307,7 +382,7 @@ PreparedMove prepare_item(const scene::Layer& layer, const scene::Node& n, scene
 // anchor and the radius and NOT on the displacement, which is what lets a live
 // drag pay for it once — see brush/move.h.
 void collect(const scene::SdfContent& content, const scene::Layer& layer,
-             const std::vector<scene::NodeId>& ids, const std::vector<ImageBall>& balls,
+             const std::vector<scene::NodeId>& ids, DragImageSets& images,
              const MoveSettings& settings, std::vector<PreparedMove>* out,
              MovePrepareStats* stats) {
     for (scene::NodeId id : ids) {
@@ -318,7 +393,7 @@ void collect(const scene::SdfContent& content, const scene::Layer& layer,
         if (n->is_group) {
             // A group takes no warp of its own: its transform does not reach
             // its children here, so the children are what carry the drag.
-            collect(content, layer, n->children, balls, settings, out, stats);
+            collect(content, layer, n->children, images, settings, out, stats);
             continue;
         }
         // Reach is decided here, before anything is prepared: the resolver
@@ -328,10 +403,13 @@ void collect(const scene::SdfContent& content, const scene::Layer& layer,
         // -- 1.4-1.6x on BM_MoveDrag1000/10000 for output that was
         // byte-identical.
         const math::Aabb own = scene::item_own_influence_bound(*n, layer);
-        const std::size_t seen = images_seen(*n, balls.size());
+        std::size_t seen = 1u;
+        const std::vector<ImageBall>& balls = images.for_item(*n, &seen);
         if (!any_reaches(own, balls, seen)) continue;
         if (stats) ++stats->reached;
         out->push_back(prepare_item(layer, *n, id, own, balls, seen, settings));
+        if (n->own_mirror_axes != scene::kMirrorAxesInherit)
+            out->back().own_mirror_axes = scene::effective_mirror_axes(*n, layer);
     }
 }
 
@@ -405,10 +483,11 @@ void order_by_value(std::vector<scene::Deformer>* deformers) {
 }
 
 std::vector<DragImage> drag_images(const scene::Layer& layer, cfloat3 world_centre,
-                                   cfloat3 world_displacement) {
+                                   cfloat3 world_displacement, std::uint8_t item_axes) {
     std::vector<DragImage> out;
     out.push_back({world_centre, world_displacement});
-    for (const math::cfloat4x4& linear : copy_linears(layer)) {
+    const auto axes = static_cast<std::uint8_t>((layer.mirror_axes | item_axes) & 0x7u);
+    for (const math::cfloat4x4& linear : copy_linears(layer, axes, true)) {
         out.push_back({image_centre(layer.xform, linear, world_centre),
                        image_displacement(layer.xform, linear, world_displacement)});
     }
@@ -422,11 +501,15 @@ std::vector<PreparedMove> prepare_move(const scene::Layer& layer, cfloat3 world_
     if (out_stats) *out_stats = MovePrepareStats{};
     if (!(settings.radius > 0.0f)) return out;
     if (!layer.sdf) return out;
-    const std::vector<math::cfloat4x4> linears = copy_linears(layer);
-    const std::vector<ImageBall> balls =
-        image_balls(layer.xform, world_centre, linears, settings.radius);
-    collect(*layer.sdf, layer, layer.sdf->roots, balls, settings, &out, out_stats);
+    DragImageSets images(layer, world_centre, settings.radius);
+    collect(*layer.sdf, layer, layer.sdf->roots, images, settings, &out, out_stats);
     return out;
+}
+
+std::uint8_t prepared_own_mirror_axes(const std::vector<PreparedMove>& prepared) {
+    std::uint8_t axes = 0;
+    for (const PreparedMove& p : prepared) axes = static_cast<std::uint8_t>(axes | p.own_mirror_axes);
+    return axes;
 }
 
 MoveWarp resolve_prepared_move(const PreparedMove& prepared, cfloat3 total_world_displacement) {

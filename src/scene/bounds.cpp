@@ -942,12 +942,18 @@ namespace {
 // The copy's map is on the order emit_item uses: the reflection acts in the
 // layer's LOCAL space, so the layer's per-axis scale is outside it, and the
 // item's per-axis scale is innermost.
+//
+// The axes are the item's EFFECTIVE ones (#664): its own when it carries them,
+// the layer's when it participates. A bound that read the layer's alone would
+// miss the twin of an item that kept its own X after the layer's mirror went
+// off, and the cull would drop a copy that is on screen.
 void expand_by_mirror_copies(const Node& item, const Layer& layer, const Aabb& local,
                              const math::cfloat4x4& lm, Aabb* bound) {
-    if (layer.mirror_axes == 0) return;
+    const std::uint8_t mirror_axes = effective_mirror_axes(item, layer);
+    if (mirror_axes == 0) return;
     const math::cfloat4x4 axes = math::scale_matrix(item.scale_axes);
     for (int axis = 0; axis < 3; ++axis) {
-        if (!(layer.mirror_axes & (1u << axis))) continue;
+        if (!(mirror_axes & (1u << axis))) continue;
         math::cfloat4x4 m = math::mul(
             lm, math::mul(math::reflection_matrix(axis), math::mul(item.xform.matrix(), axes)));
         bound->expand(local.transformed(m));
@@ -1001,9 +1007,11 @@ Aabb placed_local_bound(const Node& item, const Layer& layer, const Aabb& local,
     // missed either would be tight around a shape the item no longer is, and
     // the cull would drop a squashed cylinder that is on screen.
     Aabb bound = local.transformed(math::mul(lm, item_matrix(item)));
-    if (with_copies && item.mirror) {
+    if (with_copies) {
+        // The mirror reads the item's effective axes, which already fold in
+        // its participation; the radial mode still follows the flag alone.
         expand_by_mirror_copies(item, layer, local, lm, &bound);
-        expand_by_radial_copies(item, layer, local, lm, &bound);
+        if (item.mirror) expand_by_radial_copies(item, layer, local, lm, &bound);
     }
     // Rounding is authored in item-local units (tape emits round*scale);
     // erosion (negative rounding) shrinks the surface, never the bound.
@@ -1154,9 +1162,15 @@ float chain_pad_envelope(BlendProfile profile, std::size_t nodes) {
 // counts groups, invisible nodes and items that opted out of the mirror,
 // which only raises the envelope, and every term blend_total resolves stays
 // clamped at its own support, so the pad never exceeds the pre-#335 one.
-std::size_t layer_symmetry_multiplicity(const Layer& layer) {
+//
+// `item_axes` is the union of the axes the layer's items carry as their OWN
+// (CullPadTerms::own_mirror_axes, #664): an item can reflect through an axis
+// the layer's mirror does not set, and its copies lengthen the chain exactly
+// as the layer's would. Unioned rather than added, because one item emits at
+// most one copy per axis whichever of the two named it.
+std::size_t layer_symmetry_multiplicity(const Layer& layer, std::uint8_t item_axes) {
     std::size_t m = 1 + static_cast<std::size_t>(std::popcount(
-                            static_cast<unsigned>(layer.mirror_axes & 0x7u)));
+                            static_cast<unsigned>((layer.mirror_axes | item_axes) & 0x7u)));
     if (layer.radial_count > 1) m += static_cast<std::size_t>(layer.radial_count) - 1;
     return m;
 }
@@ -1301,8 +1315,9 @@ float chain_drag_reach(const Node& item, std::size_t effective_nodes) {
 // since the drag grows with length -- and tape.h says so rather than
 // implying otherwise.
 float blend_cull_pad(const SdfContent& content, const Layer& layer) {
-    return cull_pad_terms(content, layer)
-        .blend_total(content.nodes().size() * layer_symmetry_multiplicity(layer));
+    const CullPadTerms terms = cull_pad_terms(content, layer);
+    return terms.blend_total(content.nodes().size() *
+                             layer_symmetry_multiplicity(layer, terms.own_mirror_axes));
 }
 
 // ONE node's contribution to both pads, and the ONE definition of either: the
@@ -1318,13 +1333,20 @@ CullPadTerms cull_pad_terms(const Node& n, const Layer& layer) {
         t.feather = n.volume->band() * placed_distance_scale(layer, n);
     raise_blend_term(n, &t);
     // The SEAM blends this node's symmetry copies enter the chain through.
-    // Exactly the nodes emit_item copies: items participating in the mirror,
-    // minus feathered replaces, which skip both symmetry blocks. A zero seam
-    // k is a HARD seam and drags nothing — its copies still lengthen the
-    // chain, which the multiplicity counts.
-    if (!n.is_group && n.mirror && !feathered) {
-        if (layer.mirror_axes != 0) t.blend_k_seam = kernel::cmax(t.blend_k_seam, layer.mirror_k);
-        if (layer.radial_count > 1) t.blend_k_seam = kernel::cmax(t.blend_k_seam, layer.radial_k);
+    // Exactly the nodes emit_item copies: items with effective mirror axes
+    // for the mirror seam and participating items for the radial one, minus
+    // feathered replaces, which skip both symmetry blocks. A zero seam k is a
+    // HARD seam and drags nothing — its copies still lengthen the chain, which
+    // the multiplicity counts.
+    if (!n.is_group && !feathered) {
+        if (effective_mirror_axes(n, layer) != 0)
+            t.blend_k_seam = kernel::cmax(t.blend_k_seam, layer.mirror_k);
+        if (n.mirror && layer.radial_count > 1)
+            t.blend_k_seam = kernel::cmax(t.blend_k_seam, layer.radial_k);
+        // The axes the item names ITSELF, which the multiplicity cannot read
+        // off the layer (#664). Raise-only, like every other term here.
+        if (n.own_mirror_axes != kMirrorAxesInherit)
+            t.own_mirror_axes = static_cast<std::uint8_t>(n.own_mirror_axes & 0x7u);
     }
     return t;
 }
@@ -1361,8 +1383,9 @@ CullPadTerms cull_pad_terms(const SdfContent& content, const Layer& layer) {
 }
 
 float cull_pad(const SdfContent& content, const Layer& layer) {
-    return cull_pad_terms(content, layer)
-        .total(content.nodes().size() * layer_symmetry_multiplicity(layer));
+    const CullPadTerms terms = cull_pad_terms(content, layer);
+    return terms.total(content.nodes().size() *
+                       layer_symmetry_multiplicity(layer, terms.own_mirror_axes));
 }
 
 bool item_influence_is_local(const Node& item) {

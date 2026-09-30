@@ -21,6 +21,9 @@ namespace scene {
 using NodeId = std::uint32_t;
 using LayerId = std::uint32_t;
 inline constexpr NodeId kNoNode = 0;
+// Node::own_mirror_axes' "take the layer's axes" — the default (issue #664).
+// Not a combination of kMirrorX|Y|Z (document.h), which use the low 3 bits.
+inline constexpr std::uint8_t kMirrorAxesInherit = 0xFF;
 
 // 1:1 with the tape primitive opcodes (kernel/tape.h).
 enum class PrimType : std::uint8_t {
@@ -982,7 +985,23 @@ struct Node {
     // in (issue #60 — a layer mirror that mirrored nothing by default). A
     // layer with no mirror axes evaluates identically either way, and a
     // document loads with whatever each node had when it was saved.
+    //
+    // Once `own_mirror_axes` is set this flag no longer decides the MIRROR —
+    // the item's own axes do — and it keeps deciding the layer's RADIAL
+    // participation alone (effective_mirror_axes in document.h).
     bool mirror = true;
+    // The item's OWN mirror axes (kMirrorX|Y|Z), or kMirrorAxesInherit to take
+    // the layer's (issue #664). Inherit is the default and what every document
+    // saved before scene minor 20 loads as, so each of them evaluates exactly
+    // as it was saved. Set, it replaces the layer's axes for this item
+    // outright — `0` is "no mirror copies whatever the layer says", `kMirrorX`
+    // keeps an X twin after the layer's mirror is turned off or pointed
+    // elsewhere. The seam still blends with the LAYER's mirror_k.
+    //
+    // Named apart from Layer::mirror_axes on purpose: the two mean different
+    // things (a default for every item, and this item's override), and one
+    // name for both is how a caller reads the wrong one.
+    std::uint8_t own_mirror_axes = kMirrorAxesInherit;
     // Control points, for a Stroke and for a Swept guide alike — a guide is an
     // ordinary curve, so it uses the same list rather than one of its own.
     std::vector<StrokePoint> stroke;
