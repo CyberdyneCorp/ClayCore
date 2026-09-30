@@ -37,7 +37,7 @@ CullIndex::CullIndex(const Document& doc) : doc_(&doc) {
 // An item's OWN mirror axes (#664) keep that true by riding the terms rather
 // than the layer: an appended item carrying them raises `own_mirror_axes`
 // with the rest of its terms, and a later change to a placed item's axes is a
-// SetItemMirrorCmd — not an AddNodeCmd, so it takes the general invalidation
+// SetNodeMirrorCmd — not an AddNodeCmd, so it takes the general invalidation
 // the layer-symmetry setters take.
 //
 // PLUS THE FOLDS ABOVE EACH LAYER, which is the term no per-layer walk can

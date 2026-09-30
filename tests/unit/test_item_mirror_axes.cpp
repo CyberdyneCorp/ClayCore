@@ -399,3 +399,49 @@ TEST_CASE("the chain pad counts an item's own copies") {
     CHECK(scene::layer_symmetry_multiplicity(l, terms.own_mirror_axes) == 3);
     CHECK(scene::layer_symmetry_multiplicity(l) == 1);
 }
+
+TEST_CASE("a drag states the region of an item's own twin, not only the layer's images") {
+    // The reach a host invalidates is one box per image. On a layer with no
+    // mirror an item that kept X moves on both sides, so a drag on +x must
+    // also name the -x ball, both through the one-shot call's regions and
+    // through a live drag's dirty bounds; a host holding the +x box alone
+    // serves the moved twin stale.
+    CDoc doc;
+    add_lump(doc, CLAY_MIRROR_X);
+    const float on_item[3] = {kLump[0], kLump[1] + kR, 0.0f};
+    const float pull[3] = {0.0f, 0.05f, 0.0f};
+    clay_move_params params;
+    std::memset(&params, 0, sizeof params);
+    params.struct_size = static_cast<uint32_t>(sizeof params);
+    params.radius = 0.2f;
+
+    // A box reaches the twin when it holds the twin's grab point.
+    const auto holds_twin = [&](const float* box) {
+        return box[0] <= -on_item[0] && box[3] >= -on_item[0] && box[1] <= on_item[1] &&
+               box[4] >= on_item[1];
+    };
+
+    SUBCASE("clay_layer_move_surface_regions") {
+        std::vector<float> boxes(6 * 8);
+        size_t applied = 0, count = 0;
+        REQUIRE(clay_layer_move_surface_regions(doc.d, doc.layer, on_item, pull, &params, &applied,
+                                                boxes.data(), 8, &count) == CLAY_OK);
+        CHECK(applied == 1);
+        bool twin = false;
+        for (size_t i = 0; i < count; ++i) twin = twin || holds_twin(&boxes[6 * i]);
+        CHECK(twin);
+    }
+    SUBCASE("a live drag's dirty bounds") {
+        clay_sdf_move_tx* tx = clay_sdf_move_begin(doc.d, doc.layer, on_item, &params, nullptr);
+        REQUIRE(tx != nullptr);
+        clay_sculpt_dirty dirty;
+        std::memset(&dirty, 0, sizeof dirty);
+        dirty.struct_size = static_cast<uint32_t>(sizeof dirty);
+        REQUIRE(clay_sdf_move_update(tx, pull, &dirty) == CLAY_OK);
+        REQUIRE(dirty.has_bounds == 1);
+        const float box[6] = {dirty.bounds_min[0], dirty.bounds_min[1], dirty.bounds_min[2],
+                              dirty.bounds_max[0], dirty.bounds_max[1], dirty.bounds_max[2]};
+        CHECK(holds_twin(box));
+        clay_sdf_move_destroy(tx);
+    }
+}

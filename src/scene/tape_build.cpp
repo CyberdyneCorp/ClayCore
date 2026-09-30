@@ -971,7 +971,7 @@ struct Compiler {
         //
         // This gate -- `effective_mirror_axes(item, layer)` minus a feathered
         // replace -- is the one the move brush repeats to decide which images
-        // of a drag an item can see (brush/move.cpp, images_for). Change one
+        // of a drag an item can see (brush/move.cpp, DragImageSets::for_item). Change one
         // and change the other, or the brush warps an item where no copy was
         // emitted. The axes are the ITEM's own when it carries them (#664),
         // and the layer's otherwise; the seam is the layer's either way.
