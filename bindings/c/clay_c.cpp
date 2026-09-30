@@ -1121,6 +1121,50 @@ clay_result from_io(const io::IoStatus& s) {
     }
 }
 
+// The append log's reaches as a binary tree of unions over index ranges: "does
+// any append from index `from` on reach this box?" in about log(n) box tests
+// instead of n (#665). A region invalidation asks it once per lagging seed, and
+// a straight scan made that seeds x appends: 43 ms at 3,000 dabs against 0.3 ms
+// before the check existed, growing with the length of the stroke. Consecutive
+// dabs lie close together, so a range's union stays tight and prunes well.
+//
+// Built once per region invalidation, from a log that invalidation then
+// forgets, so nothing keeps it in step with later appends.
+class ReachTree {
+  public:
+    explicit ReachTree(std::span<const math::Aabb> reaches) : count_(reaches.size()) {
+        while (width_ < count_) width_ *= 2;
+        nodes_.resize(2 * width_);  // the padding leaves stay empty: they reach nothing
+        std::copy(reaches.begin(), reaches.end(),
+                  nodes_.begin() + static_cast<std::ptrdiff_t>(width_));
+        for (std::size_t k = width_ - 1; k >= 1; --k) {
+            nodes_[k] = nodes_[2 * k];
+            nodes_[k].expand(nodes_[2 * k + 1]);
+        }
+    }
+
+    // Whether any reach at index `from` or later intersects `box`.
+    bool any_from(std::size_t from, const math::Aabb& box) const {
+        return from < count_ && any_in(1, 0, width_, from, box);
+    }
+
+  private:
+    // A node's union also holds entries before `from`, so it can only PRUNE;
+    // the answer is decided at a leaf, and every leaf reached here is at or
+    // after `from`.
+    bool any_in(std::size_t node, std::size_t lo, std::size_t hi, std::size_t from,
+                const math::Aabb& box) const {
+        if (hi <= from || !nodes_[node].intersects(box)) return false;
+        if (node >= width_) return true;
+        const std::size_t mid = lo + (hi - lo) / 2;
+        return any_in(2 * node, lo, mid, from, box) || any_in(2 * node + 1, mid, hi, from, box);
+    }
+
+    std::size_t count_ = 0;
+    std::size_t width_ = 1;
+    std::vector<math::Aabb> nodes_;
+};
+
 }  // namespace
 
 struct clay_document;
@@ -1398,11 +1442,12 @@ struct clay_document {
             append_base_ = now;
             append_log_.clear();
             append_reach_.clear();
-            append_reach_union_ = math::Aabb{};
         }
         append_log_.push_back(node);
-        append_reach_.push_back(reach);
-        append_reach_union_.expand(reach.is_infinite() ? math::Aabb::infinite() : reach);
+        // Widened to the whole of space when infinite at all, so the union
+        // tree a region edit builds over these (ReachTree) can never prune an
+        // entry the per-entry test would have counted as reaching.
+        append_reach_.push_back(reach.is_infinite() ? math::Aabb::infinite() : reach);
         // An append IS an order change: it grows the root list, so every
         // ordinal taken before it counts a different tail. This does not gate
         // the append fast path -- plan_resume never reads structure_revision_
@@ -2787,7 +2832,6 @@ struct clay_document {
         append_valid_ = false;
         append_log_.clear();
         append_reach_.clear();
-        append_reach_union_ = math::Aabb{};
     }
 
     // May a seed at `rev` that THIS region edit does not reach be carried
@@ -2810,19 +2854,17 @@ struct clay_document {
     // advanced past an append that had changed it -- after which `rev == now`
     // handed the pre-append field back on every refill, however often the host
     // dirtied the brick.
-    bool carried_across_appends(std::uint64_t rev, const math::Aabb& cull,
-                                std::uint64_t next) const {
+    //
+    // `reaches` is append_reach_ as a union tree, built once by the caller:
+    // one scan of the log per lagging seed was seeds x appends (see ReachTree).
+    bool carried_across_appends(std::uint64_t rev, const math::Aabb& cull, std::uint64_t next,
+                                const std::optional<ReachTree>& reaches) const {
         if (rev + 1 == next) return true;
-        if (!append_valid_ || append_at_ + 1 != next || rev < append_base_) return false;
+        if (!reaches || !append_valid_ || append_at_ + 1 != next || rev < append_base_)
+            return false;
         const std::size_t from = static_cast<std::size_t>(rev - append_base_);
         if (from > append_reach_.size()) return false;
-        // The whole log's union first: a brick no dab came near -- most of
-        // them, after a stroke -- is decided without a scan.
-        if (!append_reach_union_.intersects(cull)) return true;
-        return std::none_of(append_reach_.begin() + static_cast<std::ptrdiff_t>(from),
-                            append_reach_.end(), [&](const math::Aabb& b) {
-                                return b.is_infinite() || b.intersects(cull);
-                            });
+        return !reaches->any_from(from, cull);
     }
 
     // The one loop behind the three touch_region fronts; caller holds
@@ -2845,6 +2887,8 @@ struct clay_document {
             forget_resume();
             return;
         }
+        std::optional<ReachTree> reaches;
+        if (append_valid_) reaches.emplace(append_reach_);
         for (auto it = resume_.begin(); it != resume_.end();) {
             const ResumeKey& k = it->first;
             ResumeEntry& e = it->second;
@@ -2899,7 +2943,7 @@ struct clay_document {
             //
             // And only while nothing ELSE since the seed was taken reached the
             // brick: see carried_across_appends (#665).
-            if (e.dirty_from == kFrontierClean && carried_across_appends(e.revision, cull, next))
+            if (e.dirty_from == kFrontierClean && carried_across_appends(e.revision, cull, next, reaches))
                 e.revision = next;
             ++it;
         }
@@ -2927,11 +2971,10 @@ struct clay_document {
     // brings the document to append_at_.
     mutable scene::TapeCheckpoint tape_checkpoint_;
     mutable std::vector<scene::NodeId> append_log_;
-    // What each logged append could change, index for index with append_log_,
-    // and the union of all of them: what a region invalidation reads to decide
-    // which lagging seeds it may carry forward (carried_across_appends).
+    // What each logged append could change, index for index with append_log_:
+    // what a region invalidation reads to decide which lagging seeds it may
+    // carry forward (carried_across_appends).
     mutable std::vector<math::Aabb> append_reach_;
-    mutable math::Aabb append_reach_union_;
     mutable scene::LayerId append_layer_ = 0;
     mutable std::uint64_t append_base_ = 0;
     mutable std::uint64_t append_at_ = 0;

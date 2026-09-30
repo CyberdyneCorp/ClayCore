@@ -438,3 +438,114 @@ TEST_CASE("#665: a seed no append reached is still carried across the next regio
     const bool same_bits = snapshot(cache.c) == snapshot(ref_cache.c);
     CHECK(same_bits);
 }
+
+// -- several appends: the carry reads the log from the seed's own revision -----
+//
+// A seed refilled partway through a run of appends has absorbed the ones before
+// it, and only the ones after may keep it back. Both directions are pinned:
+// a later append that reaches the brick must hold it back even though an
+// earlier one did not, and an earlier append that reached it must not once the
+// brick was refilled after it.
+
+namespace {
+
+const float kUnderLo[3] = {-0.3f, -1.1f, -0.3f};
+const float kUnderHi[3] = {0.3f, -0.8f, 0.3f};
+
+// The same final document as the history under test, built in one pass.
+Snapshot reference_of(const float far_to[3], const float first_at[3], const float second_at[3]) {
+    Doc ref;
+    add_sphere(ref);
+    add_sphere_at(ref, 0.2f, far_to);
+    add_sphere_at(ref, 0.2f, first_at);
+    add_sphere_at(ref, 0.2f, second_at);
+    Cache ref_cache;
+    REQUIRE(clay_brick_cache_mark_dirty_layer(ref_cache.c, ref.d, ref.layer) == CLAY_OK);
+    drain(ref_cache.c, ref.d);
+    return snapshot(ref_cache.c);
+}
+
+}  // namespace
+
+TEST_CASE("#665: a LATER append that reaches a brick holds its seed back") {
+    Doc doc;
+    add_sphere(doc);
+    const float far_at[3] = {3.0f, 0.0f, 0.0f};
+    const clay_node_id far_node = add_sphere_at(doc, 0.2f, far_at);
+    Cache cache;
+    REQUIRE(clay_brick_cache_mark_dirty_layer(cache.c, doc.d, doc.layer) == CLAY_OK);
+    drain(cache.c, doc.d);
+
+    // First append on top (misses the underside), second on the underside,
+    // then a move far from both: nothing refilled in between.
+    const float top[3] = {0.0f, 1.0f, 0.0f};
+    const float under[3] = {0.0f, -1.0f, 0.0f};
+    add_sphere_at(doc, 0.2f, top);
+    add_sphere_at(doc, 0.2f, under);
+    const float axis[3] = {0.0f, 1.0f, 0.0f};
+    const float far_to[3] = {3.0f, 0.05f, 0.0f};
+    REQUIRE(clay_layer_set_transform(doc.d, doc.layer, far_node, far_to, axis, 0.0f, 1.0f) ==
+            CLAY_OK);
+
+    // The host dirties only the underside; the second append must show there.
+    REQUIRE(clay_brick_cache_mark_dirty(cache.c, kUnderLo, kUnderHi) == CLAY_OK);
+    drain(cache.c, doc.d);
+    const Snapshot want = reference_of(far_to, top, under);
+    const Snapshot got = snapshot(cache.c);
+    std::size_t compared = 0, differ = 0;
+    const float width = kDim * kVoxel;
+    const auto in_mark = [&](int b, int dim) {
+        const float lo = static_cast<float>(b) * width;
+        return lo < kUnderHi[dim] && lo + width > kUnderLo[dim];
+    };
+    for (const auto& [key, halves] : want) {
+        // Only the bricks the mark overlaps: the host dirtied nothing else.
+        if (!in_mark(std::get<0>(key), 0) || !in_mark(std::get<1>(key), 1) ||
+            !in_mark(std::get<2>(key), 2))
+            continue;
+        ++compared;
+        const auto it = got.find(key);
+        if (it == got.end() || it->second != halves) ++differ;
+    }
+    REQUIRE(compared > 0);
+    CHECK(differ == 0);
+}
+
+TEST_CASE("#665: an append the brick was refilled after does not hold its seed back") {
+    Doc doc;
+    add_sphere(doc);
+    const float far_at[3] = {3.0f, 0.0f, 0.0f};
+    const clay_node_id far_node = add_sphere_at(doc, 0.2f, far_at);
+    Cache cache;
+    REQUIRE(clay_brick_cache_mark_dirty_layer(cache.c, doc.d, doc.layer) == CLAY_OK);
+    drain(cache.c, doc.d);
+
+    // An append on the underside, refilled there: those seeds have absorbed it.
+    const float under[3] = {0.0f, -1.0f, 0.0f};
+    add_sphere_at(doc, 0.2f, under);
+    REQUIRE(clay_brick_cache_mark_dirty(cache.c, kUnderLo, kUnderHi) == CLAY_OK);
+    drain(cache.c, doc.d);
+    // Then one on top and a far move, with no refill between.
+    const float top[3] = {0.0f, 1.0f, 0.0f};
+    add_sphere_at(doc, 0.2f, top);
+    const float axis[3] = {0.0f, 1.0f, 0.0f};
+    const float far_to[3] = {3.0f, 0.05f, 0.0f};
+    REQUIRE(clay_layer_set_transform(doc.d, doc.layer, far_node, far_to, axis, 0.0f, 1.0f) ==
+            CLAY_OK);
+
+    const clay_resume_stats before = resume_stats(doc.d);
+    REQUIRE(clay_brick_cache_mark_dirty(cache.c, kUnderLo, kUnderHi) == CLAY_OK);
+    drain(cache.c, doc.d);
+    const clay_resume_stats after = resume_stats(doc.d);
+    // Reading the log from its start instead of from the seed's revision would
+    // count the underside append against these seeds and drop every one.
+    const std::uint64_t resumed = after.resumed_bricks - before.resumed_bricks;
+    const std::uint64_t refilled = after.refilled_bricks - before.refilled_bricks;
+    CHECK(resumed > 0);
+    CHECK(resumed > refilled);
+
+    REQUIRE(clay_brick_cache_mark_dirty_layer(cache.c, doc.d, doc.layer) == CLAY_OK);
+    drain(cache.c, doc.d);
+    const bool same_bits = snapshot(cache.c) == reference_of(far_to, under, top);
+    CHECK(same_bits);
+}
