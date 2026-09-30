@@ -1134,6 +1134,30 @@ TEST_CASE("move: a drag on a radial axis, along it, is one brush and not one per
     CHECK(b->deformers.size() == 1);
 }
 
+TEST_CASE("move: a radial count in the hundreds merges exactly the coincident pair") {
+    // Mirror X with 256 radial copies about Y, the drag on the plane but off
+    // the axis: its reflection is itself, and no two radial copies coincide.
+    // So 257 images are 256 balls. Grouping went through a projection-keyed
+    // index rather than an images^2 scan, and this is the case where every
+    // image but one leads its own group; the axis case below it is the other
+    // extreme, one leader and everything else following it.
+    Document doc = symmetric_layer(true);
+    doc.layers[0].radial_count = 256;
+    doc.layers[0].radial_axis = 1;
+    const NodeId base = add_ball(doc, cf3(0, 0, 0), 3.0f);
+    const std::vector<MoveWarp> off_axis =
+        brush::move_brush(doc.layers[0], cf3(0, 0.5f, 2.9f), cf3(0, 0.1f, 0), {0.3f, 0, false});
+    const MoveWarp* a = warp_on(off_axis, base);
+    REQUIRE(a != nullptr);
+    CHECK(a->deformers.size() + a->gesture.size() == 256);
+
+    const std::vector<MoveWarp> on_axis =
+        brush::move_brush(doc.layers[0], cf3(0, 3.0f, 0), cf3(0, 0.1f, 0), {0.3f, 0, false});
+    const MoveWarp* b = warp_on(on_axis, base);
+    REQUIRE(b != nullptr);
+    CHECK(b->deformers.size() + b->gesture.size() == 1);
+}
+
 TEST_CASE("move: images a hair apart are still two brushes") {
     // The merge is for images that ARE one another, not for images that are
     // close: off the plane by 1e-3 the two balls are distinct and each keeps

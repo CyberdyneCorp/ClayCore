@@ -404,3 +404,52 @@ TEST_CASE("magnify: a straddler's deformers are ordered by their values") {
         CHECK(right[0].deformers[i].ext[0] == left[0].deformers[i].ext[0]);
     }
 }
+
+TEST_CASE("magnify: a gesture ON the mirror plane is one magnify, not two (#663)") {
+    // Centred on the plane, the reflection of a magnify IS the magnify — same
+    // centre, same strength — and composing it with itself scales twice: on a
+    // unit sphere at radius .35 the surface a little off the centre rose .006
+    // under mirror X against .003 without. The seam is hard so the lift is the
+    // brush's alone, not the seam blend's.
+    const auto lift = [](bool mirrored, std::size_t* out_deformers) {
+        Document doc;
+        Layer layer;
+        layer.id = 1;
+        layer.kind = LayerKind::Sdf;
+        layer.sdf = std::make_shared<SdfContent>();
+        if (mirrored) layer.mirror_axes = 1u;  // about x, k 0
+        Node ball;
+        ball.prim = Prim::sphere(1.0f);
+        ball.op = Op::Add;
+        ball.blend = Blend{BlendProfile::Hard, 0.0f};
+        layer.sdf->insert(ball);
+        doc.layers.push_back(layer);
+        const auto surface = [&doc] {
+            Tape t = compile_document(doc);
+            float last = 1.0f;
+            for (float y = 1.6f; y > 0.0f; y -= 0.0005f) {
+                const float d = t.eval(cf3(0, y, 0.15f)).d;
+                if (d <= 0.0f && last > 0.0f) return y;
+                last = d;
+            }
+            return 0.0f;
+        };
+        const float before = surface();
+        MagnifySettings s;
+        s.radius = 0.35f;
+        const std::vector<MoveWarp> warps =
+            brush::magnify_brush(doc.layers[0], cf3(0, 1, 0), 0.5f, s);
+        REQUIRE(warps.size() == 1);
+        *out_deformers = warps[0].deformers.size();
+        REQUIRE(apply_warps(doc, 1, warps) == 1);
+        return surface() - before;
+    };
+    std::size_t plain_count = 0;
+    std::size_t mirrored_count = 0;
+    const float plain = lift(false, &plain_count);
+    const float mirrored = lift(true, &mirrored_count);
+    REQUIRE(plain > 0.002f);  // the gesture moved the probe at all
+    CHECK(plain_count == 1);
+    CHECK(mirrored_count == 1);
+    CHECK(mirrored == doctest::Approx(plain).epsilon(1e-3));
+}

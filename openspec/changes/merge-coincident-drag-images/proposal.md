@@ -12,6 +12,8 @@ Identical through the live transaction (`clay_sdf_move_*`) and the held call (`c
 ## What Changes
 - Images of a drag whose centres coincide (within a ten-thousandth of the radius plus a millionth of the coordinates' magnitude, which absorbs a placed layer's rounding) are grouped when the drag is prepared. `PreparedImage::leader` names the first image of the group.
 - A group resolves to the mean of its displacements as one grab, plus one grab per image for what it adds beyond that mean; components below a relative tolerance are dropped. A pull along the plane is exactly the unmirrored grab. A pull across it has a zero mean and keeps its two opposite grabs bit for bit, so the documented pinch is unchanged. An oblique pull applies the along-plane part once and pinches the rest (three grabs where there were two).
+- Magnify resolves through the same prepared images and had the same defect: on the plane its reflection has the same centre and strength, so a straddler took the same magnify twice (a hard-seam mirror X lifted a unit sphere 0.006 a little off the centre, against 0.003 without). A group now resolves to one magnify, reaching when any member does.
+- Grouping stays O(images) per frame: each group is a list threaded through `PreparedImage::next`, and the leaders are found through a projection-keyed index when the drag is prepared. A scan of every earlier image made a radial count of 4096 cost 19.5 ms to prepare and 5.1 ms per item per frame to resolve, against 0.2 ms and 0.52 ms before the merge; with the index they are 0.78 ms and 0.52 ms.
 - `clay_sdf_move_preview_grab_count`'s header note, `docs/05`, `docs/07` and `include/clay/brush/move.h` state the rule, the measurement, and the discontinuity it leaves.
 
 ## What building it found

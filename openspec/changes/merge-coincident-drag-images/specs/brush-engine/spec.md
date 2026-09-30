@@ -91,3 +91,43 @@ Where the drag is resolved in two halves, the half that does not depend on the d
 #### Scenario: Radial symmetry rotates the brush the same way
 - **WHEN** a layer carries a radial count and an item's rotated copy sits under the ball
 - **THEN** that item takes a grab at the ball rotated by the copy's inverse angle, the copy under the ball moves, and the rotated-image drag on a fresh document matches the original to floating-point tolerance
+
+### Requirement: A world magnify resolves into a field-level radial scale
+A magnify stated in WORLD space — a centre, a radius and a SIGNED strength — SHALL resolve into one `magnify` deformer per item the region reaches, each already in that item's own frame, so that the layer's ASSEMBLED surface swells or gathers rather than one item's share of it.
+
+`magnify` is per item and applied to that item's local point, exactly as `grab` is, so a magnify put on one item of a smooth-unioned form scales that item's field and leaves the others where they were. This is the hazard `move_brush` exists for, and it applies to the radial scale verbatim.
+
+A POSITIVE strength SHALL swell the surface away from the centre and a NEGATIVE one gather it toward. One signed parameter covers Magnify and Pinch, which are one deformation.
+
+The strength SHALL cross the layer's symmetry images unchanged: a reflection or a rotation of a radial scale is a radial scale of equal strength, unlike a drag's displacement, which has to be mapped per image.
+
+Images whose balls COINCIDE — a gesture centred on a mirror plane or on a radial axis — SHALL resolve to ONE magnify, reaching the item when any image of the group does: with the same centre and the same strength they are the same deformation, and composing it with itself would scale twice (#663).
+
+This SHALL follow the resolver pattern the Move brush established: the layer is READ and never written so a host can preview the gesture, the warps are RETURNED rather than applied so one command per node inside an undo group makes the gesture one undo step, and each warp SHALL belong at the FRONT of its node's chain.
+
+Items the region cannot reach SHALL take no deformer, a strength of zero SHALL produce nothing, and a non-positive radius SHALL produce nothing.
+
+#### Scenario: A blended form swells as one surface
+- **WHEN** a magnify is resolved over a form smooth-unioned from two items and the warps are applied
+- **THEN** both items take a share and the surface swells symmetrically about the gesture's centre
+
+#### Scenario: Magnifying one item is not the same thing
+- **WHEN** the same deformation is expressed as a magnify on a single item instead
+- **THEN** that item's side moves and the other is left behind
+
+#### Scenario: The sign chooses Magnify or Pinch
+- **WHEN** the same region is resolved at a positive and then a negative strength
+- **THEN** the surface swells away from the centre in the first case and gathers toward it in the second
+
+#### Scenario: A transformed layer maps correctly
+- **WHEN** the layer carries a transform and a magnify is resolved in world space
+- **THEN** the surface changes where the gesture was aimed, and the radius each item sees is the world radius through that layer's scale
+
+#### Scenario: Nothing is written
+- **WHEN** a magnify is resolved
+- **THEN** the document is unchanged until the caller applies the result
+
+#### Scenario: A magnify on the mirror plane is one magnify
+- **GIVEN** a unit sphere on a layer mirrored about x with a hard seam
+- **WHEN** a magnify centred at (0, 1, 0) at radius 0.35 is resolved and applied
+- **THEN** the straddling item takes one magnify and the surface off the centre moves as far as with no mirror, where one magnify per image moved it twice as far

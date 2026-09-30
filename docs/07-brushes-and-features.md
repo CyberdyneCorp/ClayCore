@@ -382,6 +382,11 @@ dimensionless factor and a reflection of a radial scale is a radial scale of
 equal strength, so the strength crosses every image untouched. And the region a
 host must invalidate is the ball itself with no dilation — outside the radius
 the weight is zero and the point is returned unchanged, for either sign.
+Images that are one ball (#663) are one magnify: centred on the plane, the
+reflection has the same centre and the same strength, and composing it with
+itself scaled twice (a unit sphere at radius .35 rose 0.006 a little off the
+centre under a hard mirror X, against 0.003 without). So the straddler takes one
+magnify, reaching when any image of the group does.
 
 `pose` is in this section's title and does **not** have a resolver. It does not
 fit the shape: radial pose carries an axis, a direction that would have to be

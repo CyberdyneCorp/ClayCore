@@ -185,6 +185,11 @@ struct PreparedImage {
     // alone, so it holds for every frame of the gesture.
     static constexpr std::size_t kOwnBall = static_cast<std::size_t>(-1);
     std::size_t leader = kOwnBall;
+    // The next image, in `drag_images` order, that shares this one's ball —
+    // `kOwnBall` for the last of a group and for an image alone in its ball.
+    // The group as a list from its leader, so resolving a drag stays
+    // O(images) however many groups a radial count makes.
+    std::size_t next = kOwnBall;
 };
 
 // One affected item's share of a drag, resolved as far as it can be BEFORE the
