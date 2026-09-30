@@ -44,6 +44,15 @@ void resolve_prepared_magnify(const PreparedMove& prepared, float strength, Move
     warp.deformers.clear();
     warp.gesture.clear();
     for (const PreparedImage& image : prepared.images) {
+        // Images that share one ball are ONE magnify (#663): with the same
+        // centre and the same strength they are the same deformation, and
+        // composing it with itself would scale twice. The leader carries the
+        // group, and reaches the item when any member does.
+        if (image.leader != PreparedImage::kOwnBall) continue;
+        bool reaches = image.reaches;
+        for (std::size_t j = image.next; j != PreparedImage::kOwnBall;
+             j = prepared.images[j].next)
+            reaches = reaches || prepared.images[j].reaches;
         // The strength is the SAME for every image. A reflection or a rotation
         // of a radial scale is a radial scale of equal strength, so unlike a
         // drag's displacement there is nothing per-image to map — and nothing
@@ -55,7 +64,7 @@ void resolve_prepared_magnify(const PreparedMove& prepared, float strength, Move
         // Each one lands in exactly one of the two: the reaching images are the
         // warp, the others only its identity, so `moved_chain` recognises a
         // frame in which an image stopped reaching this item.
-        if (image.reaches) {
+        if (reaches) {
             warp.deformers.push_back(std::move(magnify));
         } else {
             warp.gesture.push_back(std::move(magnify));

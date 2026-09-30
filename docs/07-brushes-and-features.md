@@ -326,11 +326,32 @@ ball grabs the items whose reflections sit under the ball. Items that opted out
 of the mirror (`mirror=False`, `-1` in C) and feathered volume replaces see the
 ball alone, because the compiler emits no copy of them. An item both images
 reach — one straddling the plane — takes both grabs in one warp, **composing
-the two pulls as two brushes would**: a drag centred on the plane pulling along
-it lifts a ball of radius .4 by 0.1645 against 0.0950 under one grab (1.73x),
-continuously as the centre leaves the plane (0.1650 at x .01, 0.1600 at .05,
-0.1460 at .1); pulling across the plane the two cancel to a pinch. This is the
-mesh-sculpt default; an overlap reducer would be a kernel-level opt-in. With
+the two pulls as two brushes would** when the two balls are distinct; pulling
+across the plane from on it, the two cancel to a pinch.
+
+**Except where two images are one ball** (#663). On the plane, the reflection
+of a pull *along* the plane is the drag itself, and a grab composed with itself
+is a second brush: a unit sphere dragged from (0,1,0) by (0,.25,0) at radius
+.35 rose 0.2309 under mirror X against 0.1458 without (1.58x), through both
+`clay_sdf_move_*` and `clay_layer_move_surface_regions`. Images whose centres
+coincide — within a ten-thousandth of the radius plus a millionth of the
+coordinates, which absorbs a placed layer's rounding — are resolved as one
+group: the mean of their displacements is one grab, and each image keeps a grab
+only for what it adds beyond the mean. A pull along the plane is then exactly
+the unmirrored grab (0.1458); a pull across it has a zero mean and keeps its two
+opposite grabs bit for bit; an oblique pull applies its along-plane part once
+and pinches the rest. A radial drag on its axis, pulling along it, is the same
+case with N images.
+
+This is **not continuous**, and it is chosen knowingly. Just off the plane the
+images are two balls and the along-plane pull still composes where they
+overlap — the same sphere lifts 0.2309 with the centre at x 1e-4, 0.2307 at
+.01, 0.2266 at .05, 0.2135 at .1, 0.1597 at .2 — so there is a step at the
+plane. The continuous rule (weight overlapping images by the max of their
+falloffs instead of composing them) is not a composition of grabs at all: two
+half-grabs composed lift that sphere 0.1600, not 0.1458. It needs a
+multi-centre deformer in the kernel, on every backend, in the format and in the
+Lipschitz and bound code, which is a feature rather than this fix. With
 an identity layer transform a drag and its mirror image produce the same field
 **bit for bit**, and a mirrored drag on late-history items states its own
 frontier and resumes where it used to take the base's ordinal 0 and drop.
@@ -361,6 +382,11 @@ dimensionless factor and a reflection of a radial scale is a radial scale of
 equal strength, so the strength crosses every image untouched. And the region a
 host must invalidate is the ball itself with no dilation — outside the radius
 the weight is zero and the point is returned unchanged, for either sign.
+Images that are one ball (#663) are one magnify: centred on the plane, the
+reflection has the same centre and the same strength, and composing it with
+itself scaled twice (a unit sphere at radius .35 rose 0.006 a little off the
+centre under a hard mirror X, against 0.003 without). So the straddler takes one
+magnify, reaching when any image of the group does.
 
 `pose` is in this section's title and does **not** have a resolver. It does not
 fit the shape: radial pose carries an axis, a direction that would have to be

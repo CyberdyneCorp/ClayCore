@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <map>
 #include <tuple>
 #include <utility>
 
@@ -73,18 +74,104 @@ struct ImageBall {
     cfloat3 centre;
     math::Aabb box;
     const math::cfloat4x4* linear;  // null for the drag itself
+    std::size_t leader;             // its group's leader; itself for a leader
+    std::size_t next;               // see PreparedImage::next
+    std::size_t tail;               // a leader's last member, where the next links
 };
+
+constexpr std::size_t kNoImage = PreparedImage::kOwnBall;
+
+float max_abs(cfloat3 v) { return std::max({std::fabs(v.x), std::fabs(v.y), std::fabs(v.z)}); }
+
+// Are two images the SAME ball (#663)? A centre on the plane reflects onto
+// itself exactly on an identity layer (0 and -0 compare equal), but through a
+// placed layer it goes out and back through the layer transform and misses by
+// a few ulps of the coordinates involved. So the tolerance has two terms: a
+// ten-thousandth of the radius, which no artist can place a drag inside of on
+// purpose, and a millionth of the coordinates' magnitude, which covers that
+// rounding however far from the origin the layer sits. Anything further apart
+// is two balls, and keeps two grabs, exactly as before.
+bool coincident(cfloat3 a, cfloat3 b, float radius, const math::Transform& xf) {
+    const float magnitude = std::max({max_abs(a), max_abs(b), max_abs(xf.position)});
+    const float tolerance = 1e-4f * radius + 1e-6f * magnitude;
+    return max_abs(a - b) <= tolerance;
+}
+
+// The earlier images that lead a group, keyed by where their centres fall
+// along one fixed direction, so the leader a new image coincides with is a
+// range query rather than a test against every earlier image. The scan was
+// images^2 before the first frame: 19.5 ms at a radial count of 4096, against
+// 0.2 ms with no merge at all. Centres within `tolerance` of each other on
+// every axis project within 1.61 `tolerance` plus the projection's own
+// rounding, which the doubled window covers; the direction is generic, so
+// distinct images rarely share a window. A non-finite centre is never indexed
+// (NaN has no place in an ordered map) and so leads its own group.
+class LeaderIndex {
+public:
+    explicit LeaderIndex(float tolerance) : window_(2.0f * tolerance) {}
+
+    // The earliest leader whose ball `c` coincides with, or kNoImage.
+    std::size_t find(const std::vector<ImageBall>& balls, cfloat3 c, float radius,
+                     const math::Transform& xf) const {
+        const float key = project(c);
+        std::size_t found = kNoImage;
+        if (!std::isfinite(key)) return found;
+        for (auto it = leaders_.lower_bound(key - window_);
+             it != leaders_.end() && it->first <= key + window_; ++it) {
+            if (it->second < found && coincident(balls[it->second].centre, c, radius, xf))
+                found = it->second;
+        }
+        return found;
+    }
+
+    void add(cfloat3 c, std::size_t k) {
+        const float key = project(c);
+        if (std::isfinite(key)) leaders_.emplace(key, k);
+    }
+
+private:
+    static float project(cfloat3 c) {
+        return 0.26726124f * c.x + 0.53452248f * c.y + 0.80178373f * c.z;
+    }
+
+    float window_;
+    std::multimap<float, std::size_t> leaders_;
+};
+
+// Links each image to the earliest earlier LEADER whose ball it coincides
+// with, and appends it to that leader's list; an image that coincides with no
+// leader leads its own group.
+void group_coincident(const math::Transform& xf, float radius, std::vector<ImageBall>* balls) {
+    float magnitude = max_abs(xf.position);
+    for (const ImageBall& ball : *balls) magnitude = std::max(magnitude, max_abs(ball.centre));
+    // Every pair `coincident` accepts is within this, on every axis.
+    LeaderIndex leaders(1e-4f * radius + 2e-6f * magnitude);
+    for (std::size_t k = 0; k < balls->size(); ++k) {
+        const std::size_t lead = leaders.find(*balls, (*balls)[k].centre, radius, xf);
+        if (lead == kNoImage) {
+            leaders.add((*balls)[k].centre, k);
+            continue;
+        }
+        ImageBall& head = (*balls)[lead];
+        (*balls)[k].leader = lead;
+        (*balls)[head.tail].next = k;
+        head.tail = k;
+    }
+}
 
 std::vector<ImageBall> image_balls(const math::Transform& xf, cfloat3 world_centre,
                                    const std::vector<math::cfloat4x4>& linears, float radius) {
     const cfloat3 r = cf3(radius, radius, radius);
     std::vector<ImageBall> balls;
     balls.reserve(linears.size() + 1);
-    balls.push_back({world_centre, math::Aabb{world_centre - r, world_centre + r}, nullptr});
+    balls.push_back({world_centre, math::Aabb{world_centre - r, world_centre + r}, nullptr, 0u,
+                     kNoImage, 0u});
     for (const math::cfloat4x4& linear : linears) {
         const cfloat3 c = image_centre(xf, linear, world_centre);
-        balls.push_back({c, math::Aabb{c - r, c + r}, &linear});
+        const std::size_t k = balls.size();
+        balls.push_back({c, math::Aabb{c - r, c + r}, &linear, k, kNoImage, k});
     }
+    if (balls.size() > 1) group_coincident(xf, radius, &balls);
     return balls;
 }
 
@@ -176,6 +263,12 @@ PreparedMove prepare_item(const scene::Layer& layer, const scene::Node& n, scene
             image.copy = true;
         }
         image.reaches = reaches(own, balls[k].box);
+        // A leader always precedes its followers, so it is inside `seen`
+        // whenever they are.
+        image.leader = balls[k].leader == k ? PreparedImage::kOwnBall : balls[k].leader;
+        // ...and a follower is always after its leader, so an item that sees
+        // only the drag itself ends its list there.
+        image.next = balls[k].next < seen ? balls[k].next : PreparedImage::kOwnBall;
         prepared.images.push_back(image);
     }
     prepared.inverse_rotation = world.rotation.conjugate();
@@ -342,50 +435,128 @@ MoveWarp resolve_prepared_move(const PreparedMove& prepared, cfloat3 total_world
     return warp;
 }
 
+namespace {
+
+// The world displacement one image pulls with: the drag's own, or its
+// reflection or rotation for a copy.
+cfloat3 image_world_displacement(const PreparedMove& prepared, const PreparedImage& image,
+                                 cfloat3 total_world_displacement) {
+    return image.copy
+               ? image_displacement(prepared.layer_xform, image.linear, total_world_displacement)
+               : total_world_displacement;
+}
+
+// A displacement is a vector: the same map as a point, without the
+// translation. Held to the same order and the same operations as
+// `prepare_item`'s centre, on both branches, or a grab's centre and its
+// displacement would describe different spaces.
+cfloat3 local_displacement(const PreparedMove& prepared, cfloat3 world_displacement) {
+    if (prepared.layer_squashed) {
+        return scene::into_scaled_local(
+            prepared.node_rotation.conjugate().rotate(scene::into_scaled_local(
+                prepared.layer_rotation.conjugate().rotate(world_displacement) /
+                    prepared.layer_uniform_scale,
+                prepared.layer_scale_axes)) /
+                prepared.node_uniform_scale,
+            prepared.scale_axes);
+    }
+    return scene::into_scaled_local(
+        prepared.inverse_rotation.rotate(world_displacement) / prepared.world_scale,
+        prepared.scale_axes);
+}
+
+void emit_grab(const PreparedMove& prepared, const PreparedImage& image, bool reaching,
+               cfloat3 world_displacement, MoveWarp* warp) {
+    scene::Deformer grab = scene::Deformer::grab(
+        image.local_centre, prepared.local_radius, local_displacement(prepared, world_displacement),
+        prepared.ease, prepared.front_only);
+    // Stamped on every image, so a mirrored drag's copies belong to the
+    // same gesture as the one that produced them (#533).
+    grab.gesture_id = prepared.gesture_id;
+    // Each grab lands in exactly one of the two: the reaching ones are the
+    // warp, the others only its identity. With one image nothing lands in
+    // `gesture`, and a fresh warp costs one allocation; a reused one, none.
+    if (reaching) {
+        warp->deformers.push_back(std::move(grab));
+    } else {
+        warp->gesture.push_back(std::move(grab));
+    }
+}
+
+// The images that share leader `lead`'s ball: how many, whether any reaches
+// the item, and the mean of their displacements.
+struct CoincidentGroup {
+    std::size_t count = 0;
+    bool reaches = false;
+    cfloat3 mean = cf3(0, 0, 0);
+};
+
+CoincidentGroup coincident_group(const PreparedMove& prepared, std::size_t lead,
+                                 cfloat3 total_world_displacement) {
+    CoincidentGroup group;
+    cfloat3 sum = cf3(0, 0, 0);
+    for (std::size_t j = lead; j != PreparedImage::kOwnBall; j = prepared.images[j].next) {
+        const PreparedImage& image = prepared.images[j];
+        ++group.count;
+        group.reaches = group.reaches || image.reaches;
+        sum = sum + image_world_displacement(prepared, image, total_world_displacement);
+    }
+    group.mean = sum / static_cast<float>(group.count);
+    return group;
+}
+
+// Images sharing one ball are ONE brush for what they agree on and separate
+// brushes only for what they do not (#663, and brush/move.h). `tolerance`
+// absorbs the rounding a reflection picks up through a placed layer, so a
+// pull along the plane on any layer resolves to the drag's own grab.
+void emit_coincident(const PreparedMove& prepared, std::size_t lead,
+                     cfloat3 total_world_displacement, MoveWarp* warp) {
+    const CoincidentGroup group = coincident_group(prepared, lead, total_world_displacement);
+    const PreparedImage& leader = prepared.images[lead];
+    const float tolerance = 1e-5f * kernel::clength(total_world_displacement);
+    const auto residual = [&](const PreparedImage& image) {
+        return image_world_displacement(prepared, image, total_world_displacement) - group.mean;
+    };
+    bool agree = true;
+    for (std::size_t j = lead; j != PreparedImage::kOwnBall && agree; j = prepared.images[j].next)
+        agree = kernel::clength(residual(prepared.images[j])) <= tolerance;
+    // All the same pull: the leader's own grab, exactly as without symmetry.
+    if (agree) {
+        emit_grab(prepared, leader, group.reaches,
+                  image_world_displacement(prepared, leader, total_world_displacement), warp);
+        return;
+    }
+    // The shared part once — zero, and so absent, for a pull straight across a
+    // plane, which keeps that drag's two opposite grabs bit for bit — then
+    // what each image adds beyond it.
+    if (kernel::clength(group.mean) > tolerance)
+        emit_grab(prepared, leader, group.reaches, group.mean, warp);
+    for (std::size_t j = lead; j != PreparedImage::kOwnBall; j = prepared.images[j].next) {
+        const cfloat3 own = residual(prepared.images[j]);
+        if (kernel::clength(own) > tolerance) emit_grab(prepared, leader, group.reaches, own, warp);
+    }
+}
+
+}  // namespace
+
 void resolve_prepared_move(const PreparedMove& prepared, cfloat3 total_world_displacement,
                            MoveWarp* out) {
     MoveWarp& warp = *out;
     warp.node = prepared.node;
     warp.deformers.clear();
     warp.gesture.clear();
-    for (const PreparedImage& image : prepared.images) {
-        const cfloat3 world_displacement =
-            image.copy ? image_displacement(prepared.layer_xform, image.linear,
-                                            total_world_displacement)
-                       : total_world_displacement;
-        // A displacement is a vector: the same map as a point, without the
-        // translation. Held to the same order and the same operations as
-        // `prepare_item`'s centre, on both branches, or a grab's centre and its
-        // displacement would describe different spaces.
-        const cfloat3 local_displacement =
-            prepared.layer_squashed
-                ? scene::into_scaled_local(
-                      prepared.node_rotation.conjugate().rotate(scene::into_scaled_local(
-                          prepared.layer_rotation.conjugate().rotate(world_displacement) /
-                              prepared.layer_uniform_scale,
-                          prepared.layer_scale_axes)) /
-                          prepared.node_uniform_scale,
-                      prepared.scale_axes)
-                : scene::into_scaled_local(
-                      prepared.inverse_rotation.rotate(world_displacement) / prepared.world_scale,
-                      prepared.scale_axes);
-        scene::Deformer grab =
-            scene::Deformer::grab(image.local_centre, prepared.local_radius, local_displacement,
-                                  prepared.ease, prepared.front_only);
-        // Stamped on every image, so a mirrored drag's copies belong to the
-        // same gesture as the one that produced them (#533).
-        grab.gesture_id = prepared.gesture_id;
-        // Each grab lands in exactly one of the two: the reaching ones are the
-        // warp, the others only its identity. With one image nothing lands in
-        // `gesture`, and a fresh warp costs one allocation; a reused one, none.
-        if (image.reaches) {
-            warp.deformers.push_back(std::move(grab));
-        } else {
-            warp.gesture.push_back(std::move(grab));
+    for (std::size_t k = 0; k < prepared.images.size(); ++k) {
+        const PreparedImage& image = prepared.images[k];
+        if (image.leader != PreparedImage::kOwnBall) continue;  // resolved with its leader
+        if (image.next != PreparedImage::kOwnBall) {  // it leads a group
+            emit_coincident(prepared, k, total_world_displacement, &warp);
+            continue;
         }
+        emit_grab(prepared, image, image.reaches,
+                  image_world_displacement(prepared, image, total_world_displacement), &warp);
     }
-    // A non-local item (infinite own bound) takes one grab per image it sees:
-    // its field reaches everywhere, so every image's ball is on it.
+    // A non-local item (infinite own bound) takes one grab per distinct image
+    // it sees: its field reaches everywhere, so every image's ball is on it.
     order_by_value(&warp.deformers);
 }
 

@@ -1288,3 +1288,74 @@ TEST_CASE("a caller predating steady is unaffected") {
     const clay_layer_id lc = one_ball(c.doc);
     REQUIRE(clay_layer_move_surface(c.doc, lc, centre, disp, &mid, &n) == CLAY_OK);
 }
+
+// -- a drag ON a mirror plane is one brush (#663) -------------------------------
+// The reflection of a drag centred on the plane and pulling along it is the
+// drag itself, and one grab per reaching image gave the straddling item that
+// grab twice: measured on this exact fixture, 0.2307 of lift under mirror X
+// against 0.1458 without. The images are resolved inside the engine, so a host
+// has no lever; both the held call and the live transaction must agree.
+
+namespace {
+
+// The top of the surface above the origin, by bisection: a march step would
+// be as large as the error it is meant to catch.
+float top_above_origin(clay_document* doc, clay_layer_id layer) {
+    float lo = 0.5f, hi = 1.6f;  // inside the sphere, outside the pulled tip
+    for (int i = 0; i < 40; ++i) {
+        const float mid = 0.5f * (lo + hi);
+        const float point[3] = {0.0f, mid, 0.0f};
+        float d = 0.0f;
+        REQUIRE(clay_layer_eval_points(doc, layer, "cpu", point, 1, &d, nullptr) == CLAY_OK);
+        (d <= 0.0f ? lo : hi) = mid;
+    }
+    return 0.5f * (lo + hi);
+}
+
+// The issue's measurement: a unit sphere, a drag from (0, 1, 0) by
+// (0, 0.25, 0), radius 0.35, linear ease -- through the held call or the live
+// transaction -- and the lift of the surface at +y.
+float on_plane_lift(bool mirror_x, bool live) {
+    CDoc d;
+    const clay_layer_id layer = one_ball(d.doc);
+    if (mirror_x) REQUIRE(clay_set_layer_mirror(d.doc, layer, 1, 0, 0, 0.0f) == CLAY_OK);
+    const float centre[3] = {0.0f, 1.0f, 0.0f};
+    const float disp[3] = {0.0f, 0.25f, 0.0f};
+    clay_move_params p = move_params(0.35f);
+    p.ease = CLAY_EASE_LINEAR;
+    if (live) {
+        clay_sdf_move_tx* tx = clay_sdf_move_begin(d.doc, layer, centre, &p, nullptr);
+        REQUIRE(tx != nullptr);
+        REQUIRE(clay_sdf_move_update(tx, disp, nullptr) == CLAY_OK);
+        size_t grabs = 0;
+        std::vector<clay_node_id> nodes(4, 0);
+        size_t count = 0;
+        REQUIRE(clay_sdf_move_preview_nodes(tx, nodes.data(), nodes.size(), &count) == CLAY_OK);
+        REQUIRE(count == 1);
+        REQUIRE(clay_sdf_move_preview_grab_count(tx, nodes[0], &grabs) == CLAY_OK);
+        CHECK(grabs == 1);  // one brush, whatever the mirror
+        REQUIRE(clay_sdf_move_commit(tx, nullptr) == CLAY_OK);
+        clay_sdf_move_destroy(tx);
+    } else {
+        std::vector<float> boxes(6 * 8, 0.0f);
+        size_t applied = 0, count = 0;
+        REQUIRE(clay_layer_move_surface_regions(d.doc, layer, centre, disp, &p, &applied,
+                                                boxes.data(), 8, &count) == CLAY_OK);
+        REQUIRE(applied == 1);
+    }
+    return top_above_origin(d.doc, layer) - 1.0f;
+}
+
+}  // namespace
+
+TEST_CASE("a drag on the mirror plane moves the surface as far as with no mirror (#663)") {
+    for (bool live : {false, true}) {
+        CAPTURE(live);
+        const float plain = on_plane_lift(false, live);
+        const float mirrored = on_plane_lift(true, live);
+        CAPTURE(plain);
+        CAPTURE(mirrored);
+        CHECK(plain == doctest::Approx(0.1458f).epsilon(0.01));
+        CHECK(mirrored == doctest::Approx(plain).epsilon(1e-4));
+    }
+}
