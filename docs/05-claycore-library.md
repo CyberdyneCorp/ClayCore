@@ -1283,6 +1283,21 @@ as `clay_mesh_transform_nonuniform` already documents, because rotating a normal
 is right for a similarity and tilts every one of them off the surface under a
 squash.
 
+**The per-brick cull widens a squashed placement (#649).** Because the value
+can be short of the distance by up to `q = max(s) / min(s)` (the two levels'
+ratios multiplied), "the bound is more than band + pad from the brick" no longer
+means "the field is more than band + pad there". A brick in between dropped an
+item whose field was inside the band: refill samples off `clay_eval_points` by
+up to 0.068 on random documents. The cull now widens such a bound by
+`(q - 1) · (band + pad + w)` before testing it, where `w` is the rounding and
+blend support the bound already carries, and a group by its subtree's widest
+term plus `(q - 1)` times its own support (`scene::CullSquash`). The item is
+still culled wherever its field cannot reach. That needs the band, so
+`scene::CullRegion` carries it next to the region, and `CullIndex::plan` takes
+the batch's widest band. A plan made for a narrower band than a region carries is
+dropped for a squashed document, which costs the walk and never the field. A
+document with no per-axis scale culls exactly as before, whatever the band says.
+
 `kSceneMinor` and `kClaySpaceMinor` move to 16. An older stream loads with
 (1, 1, 1), which is what those files always meant; a stream written at an older
 minor does not carry the field, so that minor's reader does not desynchronise.
