@@ -417,3 +417,174 @@ TEST_CASE("c abi: a barrier tells the host to re-snapshot, and stops a replay") 
 
     clay_document_destroy(recovered);
 }
+
+// -- enabling undo on a document edited since it was loaded (#641) -----------
+//
+// clay_document_enable_undo seeds the journal with the snapshot the document
+// names. Through 0.120.1 that was whatever it was last loaded from or saved
+// to, edits since or not, so a journal begun on an EDITED document paired with
+// the stale snapshot, and a recovery onto it was accepted and silently lacked
+// every pre-enable edit. These drive the issue's repro through the ABI.
+
+namespace {
+
+// A document that was never journaled: an SDF layer and a voxel layer, no
+// undo. Its bytes are the snapshot every case below loads. `minor` zero is
+// this build's layout.
+std::vector<std::uint8_t> plain_snapshot(uint32_t minor = 0) {
+    clay_document* base = clay_document_create();
+    REQUIRE(base != nullptr);
+    clay_layer_id sdf = 0, blocks = 0;
+    clay_voxel_grid* grid = nullptr;
+    REQUIRE(clay_add_sdf_layer(base, "body", &sdf) == CLAY_OK);
+    REQUIRE(clay_document_add_voxel_layer(base, "blocks", 0.1f, &blocks, &grid) == CLAY_OK);
+    clay_blob* blob = nullptr;
+    if (minor == 0)
+        REQUIRE(clay_document_save_memory(base, &blob) == CLAY_OK);
+    else
+        REQUIRE(clay_document_save_memory_at_minor(base, minor, &blob, nullptr) == CLAY_OK);
+    clay_document_destroy(base);
+    return take(blob);
+}
+
+clay_document* load(const std::vector<std::uint8_t>& bytes) {
+    clay_document* doc = nullptr;
+    REQUIRE(clay_document_load_memory(bytes.data(), bytes.size(), &doc) == CLAY_OK);
+    return doc;
+}
+
+clay_voxel_grid* blocks_of(clay_document* doc) {
+    clay_layer_id layer = 0;
+    clay_voxel_grid* grid = nullptr;
+    REQUIRE(clay_document_voxel_layer(doc, "blocks", &layer, &grid) == CLAY_OK);
+    return grid;
+}
+
+void set_cell(clay_document* doc, int32_t x) {
+    const int32_t cell[3] = {x, 0, 0};
+    REQUIRE(clay_voxel_set(blocks_of(doc), cell, 1) == CLAY_OK);
+}
+
+int32_t cell_at(clay_document* doc, int32_t x) {
+    const int32_t cell[3] = {x, 0, 0};
+    int32_t index = -1;
+    REQUIRE(clay_voxel_get(blocks_of(doc), cell, &index) == CLAY_OK);
+    return index;
+}
+
+std::vector<std::uint8_t> journal_from(clay_document* doc, std::size_t from) {
+    clay_blob* blob = nullptr;
+    std::size_t next = 0;
+    REQUIRE(clay_document_journal_since(doc, from, &blob, &next) == CLAY_OK);
+    return take(blob);
+}
+
+std::vector<std::uint8_t> save(clay_document* doc) {
+    clay_blob* blob = nullptr;
+    REQUIRE(clay_document_save_memory(doc, &blob) == CLAY_OK);
+    return take(blob);
+}
+
+// Load `snapshot`, enable undo and replay `journal` onto it, the way a host
+// recovers. `*out` keeps the recovered document for the caller to inspect.
+clay_result recover(const std::vector<std::uint8_t>& snapshot,
+                    const std::vector<std::uint8_t>& journal, clay_document** out,
+                    std::size_t* applied) {
+    *out = load(snapshot);
+    REQUIRE(clay_document_enable_undo(*out) == CLAY_OK);
+    return clay_document_replay_journal(*out, journal.data(), journal.size(), applied, nullptr);
+}
+
+}  // namespace
+
+TEST_CASE("c abi: a journal begun on a document edited since its load is not paired with it") {
+    const std::vector<std::uint8_t> snapshot = plain_snapshot();
+    clay_document* live = load(snapshot);
+    set_cell(live, 0);  // BEFORE undo is enabled, so in no journal
+    REQUIRE(clay_document_enable_undo(live) == CLAY_OK);
+    set_cell(live, 1);
+
+    // The snapshot the document was loaded from lacks cell 0. Replaying the
+    // journal onto it would recover a document the live one never was.
+    clay_document* rec = nullptr;
+    std::size_t applied = 999;
+    CHECK(recover(snapshot, journal_from(live, 0), &rec, &applied) ==
+          CLAY_ERROR_SNAPSHOT_MISMATCH);
+    CHECK(applied == 0);
+    CHECK(cell_at(rec, 1) == 0);  // nothing applied
+    clay_document_destroy(rec);
+
+    // The documented way out still works: a save made after enabling holds the
+    // pre-enable edit, and the journal from there pairs with it.
+    const std::vector<std::uint8_t> saved = save(live);
+    std::size_t at = 0;
+    REQUIRE(clay_document_journal_range(live, nullptr, &at) == CLAY_OK);
+    set_cell(live, 2);
+    REQUIRE(recover(saved, journal_from(live, at), &rec, &applied) == CLAY_OK);
+    CHECK(applied == 1);
+    for (int32_t x = 0; x < 3; ++x) CHECK(cell_at(rec, x) == cell_at(live, x));
+    clay_document_destroy(rec);
+    clay_document_destroy(live);
+}
+
+TEST_CASE("c abi: a journal begun after a save that followed the edits pairs with that save") {
+    // Edit, save, enable: the document IS the snapshot it names.
+    clay_document* live = load(plain_snapshot());
+    set_cell(live, 0);
+    const std::vector<std::uint8_t> saved = save(live);
+    REQUIRE(clay_document_enable_undo(live) == CLAY_OK);
+    set_cell(live, 1);
+
+    clay_document* rec = nullptr;
+    std::size_t applied = 0;
+    REQUIRE(recover(saved, journal_from(live, 0), &rec, &applied) == CLAY_OK);
+    CHECK(applied == 1);
+    CHECK(cell_at(rec, 0) == 1);
+    CHECK(cell_at(rec, 1) == 1);
+    clay_document_destroy(rec);
+    clay_document_destroy(live);
+}
+
+TEST_CASE("c abi: a journal begun on an unedited load pairs with the snapshot") {
+    const std::vector<std::uint8_t> snapshot = plain_snapshot();
+    clay_document* live = load(snapshot);
+    REQUIRE(clay_document_enable_undo(live) == CLAY_OK);
+    set_cell(live, 1);
+
+    clay_document* rec = nullptr;
+    std::size_t applied = 0;
+    REQUIRE(recover(snapshot, journal_from(live, 0), &rec, &applied) == CLAY_OK);
+    CHECK(applied == 1);
+    CHECK(cell_at(rec, 1) == 1);
+    clay_document_destroy(rec);
+    clay_document_destroy(live);
+}
+
+TEST_CASE("c abi: a journal begun on an unedited load of an older minor pairs with it") {
+    // An older minor does not survive a load and a save byte for byte -- the
+    // header alone names a different minor -- so the loaded bytes cannot be
+    // what "still the snapshot" is compared against. Refusing here would
+    // refuse a recovery that is perfectly good.
+    const std::vector<std::uint8_t> snapshot = plain_snapshot(19);
+    clay_document* live = load(snapshot);
+    REQUIRE(clay_document_enable_undo(live) == CLAY_OK);
+    set_cell(live, 1);
+
+    clay_document* rec = nullptr;
+    std::size_t applied = 0;
+    REQUIRE(recover(snapshot, journal_from(live, 0), &rec, &applied) == CLAY_OK);
+    CHECK(applied == 1);
+    CHECK(cell_at(rec, 1) == 1);
+    clay_document_destroy(rec);
+
+    // Edited before the enable, an older minor is refused like any other.
+    clay_document* edited = load(snapshot);
+    set_cell(edited, 0);
+    REQUIRE(clay_document_enable_undo(edited) == CLAY_OK);
+    set_cell(edited, 1);
+    CHECK(recover(snapshot, journal_from(edited, 0), &rec, &applied) ==
+          CLAY_ERROR_SNAPSHOT_MISMATCH);
+    clay_document_destroy(rec);
+    clay_document_destroy(edited);
+    clay_document_destroy(live);
+}
