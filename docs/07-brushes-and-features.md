@@ -1486,6 +1486,24 @@ plane — so `draw` does not chase its own deposit, `smooth`'s Laplacian is a
 simultaneous average rather than a vertex-order-dependent sweep, and the
 composed verbs are single operations rather than sequences.
 
+**The averaged normal is a property of the surface, not of its mesh.** Each
+vertex's normal votes with its falloff weight *times the surface area it stands
+for* (one third of every triangle it is a corner of), so the sum approximates
+the falloff-weighted integral of the normal over the region. With one equal vote
+per vertex the average followed the triangulation, and on a ridge narrower than
+the stamp that was decisive (#631): the two faces' normals nearly cancel, and
+the mesher's tetrahedral split is chiral — on a lattice that passes through the
+faces it keeps one corner of the ridge sharp and chamfers the other — so a fin
+0.1 thick meshed at voxel 0.01 resolved a normal 11.5 deg off its axis (16.8 deg
+as #618 measured it, on its own lattice), and Draw deposited sideways onto one
+face.
+Area-weighted it reads 0.15 deg; a sphere's pole and a torus's inner equator
+read under 0.01 deg where the equal vote gave 0.9 and 4.3. Draw, Clay, Crease,
+Layer, Flatten and Scrape read this frame, on the fixed mesh, the adaptive
+surface and a multires level alike (one `compose_workset`). The centroid keeps
+the equal vote: it is a position, and the triangulation moves it by about a
+lattice step with no cancellation to amplify that.
+
 **Reach is measured along the surface.** The Move Topological rule: a brush on
 the upper lip must not drag the chin through a closed mouth. A class is in the
 region when a path over the one-ring reaches it without leaving the brush's ball

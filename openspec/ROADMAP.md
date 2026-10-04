@@ -147,7 +147,9 @@ because none has a proposal yet:
 - #630: `refit_around_moved_vertices` (#617) finds nothing on any record this
   library writes. Keep it with a test that can fail, or delete it.
 - #631: the mesh Draw brush's averaged normal tilts 16.8 deg on a symmetric fin
-  (#618). Cause not investigated.
+  (#618). Fixed by `weigh-the-stamp-normal-by-area`: one equal vote per vertex
+  let the mesher's chiral tetrahedral split outvote one face of the fin; each
+  vote now carries its vertex's area, and the fin reads 0.15 deg.
 - #632: per-dab `move_surface`, the exact draw frame, divides the safe step scale
   by 1.5 per overlapping dab: 0.6667, 0.017342 and 5.2151e-6 at 1, 10 and 30 dabs
   (#618). Relief's own bound adds rather than multiplies.
