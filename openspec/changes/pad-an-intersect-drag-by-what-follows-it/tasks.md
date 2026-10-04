@@ -1,0 +1,12 @@
+## Implementation
+- [x] `intersect_delta_chain_pad` (`src/scene/bounds.cpp`): the sum of `combine_carry` over the combines after the operand, walking later siblings at every ancestor level and into inline groups; bounded by the node count.
+- [x] `geometry_reach_in_layer` uses it in place of `cull_pad`; `dilate_by_ancestors` and `layer_reach_in_document` unchanged.
+- [x] `apply_edit` (`bindings/c/clay_c.cpp`) reports the overlap of the delta and the influence union (`clipped_to`).
+- [x] Regression: "an operand appended last carries no chain pad (#666)", the host's shape (96 smooth stamps scaled with the form, a hard cylinder appended last, plain and mirrored, reference and ten times the extent). It asserts the box is the sweep exactly, and fails on the old pad by 0.27 and 0.87.
+- [x] "the chain pad and the groups above are terms in the box" re-pinned: dab ahead (pad 0), one dab after (1.6), two after (3.2, a sum).
+- [x] Field probe: operand at the head, middle and tail of 120 smooth dabs, plain, mirror X and radial 5, in an inline group, and with the later dabs in an inline group. A width pin checks the sum per slot.
+- [x] Oracle: the same placements over 96 smooth stamps, bit-identical to a rebuild. Before the fix: head 35 and middle 17 stale bricks. The suffix envelope and the largest full support give the same counts.
+- [x] Oracle scaling gate: delta bricks equal at both extents (256 -> 256), and under a third of the influence union at the reference size.
+- [x] Mutation: dropping the inline-group walk leaves 52 stale bricks and fails the width pin.
+- [x] `bounds.h`, `clay.h`, `docs/05` state the pad and the clip.
+- ABI unchanged: 0.121.0. No entry point, descriptor or format change.

@@ -688,8 +688,8 @@ math::Aabb node_influence_bound_in_document(const Document& doc, const SdfConten
                                             NodeId id, LayerExtent* extent = nullptr);
 
 // WHERE A CHANGE CONFINED TO ONE ITEM'S OWN GEOMETRY LANDS IN THE DOCUMENT:
-// the item's geometry bound, dilated by the pad its layer's CHAIN needs, once
-// per enclosing group by that group's blend support, and carried the rest of
+// the item's geometry bound, dilated by the pad the combines AFTER it need,
+// once per enclosing group by that group's blend support, and carried the rest of
 // the way up by layer_reach_in_document -- unioned over every layer sharing
 // the content, exactly as node_influence_bound_in_document is.
 //
@@ -709,9 +709,21 @@ math::Aabb node_influence_bound_in_document(const Document& doc, const SdfConten
 //   here and is not one in a local op's bound: a local combine outside its
 //   support is the IDENTITY (`min(acc, big)` is `acc`, bit for bit), while an
 //   intersect's is not, so a smooth combine further down the chain can drag
-//   that beyond-band difference back toward the band. `cull_pad` is the
-//   measured distance over which it can, and this reuses it rather than
-//   spelling a second one.
+//   that beyond-band difference back toward the band.
+//
+// THE CHAIN PAD IS THE SUM OF THE SUPPORTS OF THE COMBINES AFTER THE ITEM
+// (#666): its later siblings at every level of the ancestor walk, through
+// inline groups, whose children continue the outer chain. Nothing AHEAD of the
+// item is a term -- those combines built the `acc` the max reads, and it did
+// not move -- so an item appended last, which is how a host adds a cutter to a
+// worked sculpt, carries no pad and the box is its sweep. It used to be
+// `cull_pad` over the whole layer, which made the box follow every blend in
+// the layer: 540 -> 1,152 bricks for one drag as the form grew, against 256 ->
+// 256 now. A SUM because the drag accumulates along the chain: neither the
+// cull's envelope nor the largest support kept the refill bit-identical to a
+// rebuild with 96 smooth dabs after the item, and the sum provably does (the
+// definition has the argument). A long smooth suffix sums past the layer;
+// clay_layer_set_transform_bound clips the region to the influence union then.
 //
 // The BAND is not a term: every consumer of a dirty region adds it
 // (BrickCache::mark_dirty dilates by the band, and the seed store dilates each

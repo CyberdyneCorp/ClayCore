@@ -1426,6 +1426,18 @@ clay_result clay_layer_set_transform_nonuniform(clay_document* doc, clay_layer_i
  * drag with a SUBTRACT operand, and 6.8-10.1 SECONDS on a fixture with ten
  * times the extent.
  *
+ * THE BOX IS THE SWEEP, DILATED BY WHAT FOLLOWS THE OPERAND (#666). A smooth
+ * combine AFTER the operand in its chain can carry the beyond-band difference
+ * back into the band, so the box is padded by the SUM of the blend supports of
+ * the combines after it -- and by nothing before it, which built the value the
+ * intersect reads and did not change. An operand appended last, which is how a
+ * cutter added to a worked sculpt sits, carries no pad: dragging it across a
+ * form whose 96 stamps' blend radii scale with it refills the same 256 bricks
+ * at the reference size and at ten times the extent (540 and 1,152 while the
+ * pad was taken over the whole layer). An operand AHEAD of a long smooth chain
+ * sums past the layer, and the box is then clipped to the conservative
+ * influence bound -- the change lies in both, so it lies in their overlap.
+ *
  * THE BOX IS THE ONE TO HAND clay_brick_cache_mark_dirty, and the three states
  * are clay_layer_node_influence_bound's:
  *   *out_has_bounds 0            nothing to dirty; out_min/out_max untouched

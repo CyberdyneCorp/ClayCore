@@ -1,5 +1,6 @@
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <memory>
 #include <string>
@@ -183,6 +184,16 @@ Verdict probe(Fixture f, float extent = 4.0f, std::uint64_t seed = 0x471u) {
     if (!v.proven) return v;
     v.box = *before_delta;
     v.box.expand(*after_delta);
+    // CLIPPED TO THE CONSERVATIVE UNION, as clay_layer_set_transform_bound
+    // reports it (#666): the change lies in both, so it lies in the overlap,
+    // and the overlap is what a host dirties. An operand ahead of a long smooth
+    // chain sums to a box past the layer; probing that box alone would find
+    // no samples outside it.
+    if (!v.conservative.empty() && !v.conservative.is_infinite()) {
+        const Aabb overlap{kernel::cmax(v.box.min, v.conservative.min),
+                           kernel::cmin(v.box.max, v.conservative.max)};
+        if (!overlap.empty()) v.box = overlap;
+    }
 
     const Aabb outside_of = v.box.dilated(kBand);
     for (const cfloat3& p : samples(v.box, extent, seed)) {
@@ -590,6 +601,126 @@ TEST_CASE("intersect delta: a long smooth chain") {
     check("200 smooth dabs and one intersect", std::move(f), 3.0f);
 }
 
+namespace {
+
+// Where in a long smooth chain the operand sits, and what holds it (#666).
+enum class Slot { Head, Middle, Tail };
+enum class Symmetry { None, Mirror, Radial };
+enum class Inline { None, Operand, LaterDabs };
+
+// 120 smooth dabs spiralling over a base sphere, with the intersect operand
+// placed at the HEAD of the dabs (right after the base), in the MIDDLE, or at
+// the TAIL. Under `Inline::Operand` the operand sits in an inline group at its
+// slot; under `Inline::LaterDabs` every dab after it is in an inline group, so
+// the combines that read its running value are a SUBTREE's -- the case a pad
+// over later siblings' own combines alone would miss.
+Fixture chain_fixture(Slot slot, Symmetry sym, Inline in) {
+    Fixture f;
+    Layer& l = f.doc.add_sdf_layer("body");
+    f.layer = l.id;
+    if (sym == Symmetry::Mirror) {
+        l.mirror_axes = scene::kMirrorX;
+        l.mirror_k = 0.08f;
+    } else if (sym == Symmetry::Radial) {
+        l.radial_count = 5;
+        l.radial_axis = 1;
+        l.radial_k = 0.1f;
+    }
+    l.sdf->insert(item(Prim::sphere(0.8f), cf3(0, 0, 0), Op::Add));
+    constexpr int kDabs = 120;
+    const int ahead = slot == Slot::Head ? 0 : slot == Slot::Middle ? kDabs / 2 : kDabs;
+    auto inline_group = [&] {
+        Node g;
+        g.is_group = true;
+        g.op = Op::None;
+        return l.sdf->insert(g);
+    };
+    NodeId later = scene::kNoNode;
+    clay_test::Lcg rng(0x666u);
+    for (int i = 0; i <= kDabs; ++i) {
+        if (i == ahead) {
+            const NodeId holder = in == Inline::Operand ? inline_group() : scene::kNoNode;
+            Node cut = item(Prim::capped_cylinder(0.3f, 0.9f), cf3(-0.7f, 0.2f, 0),
+                            Op::Intersect, smooth(0.08f));
+            cut.mirror = sym != Symmetry::None;
+            f.cutter = l.sdf->insert(cut, holder);
+            if (in == Inline::LaterDabs) later = inline_group();
+        }
+        if (i == kDabs) break;
+        const float t = static_cast<float>(i) / static_cast<float>(kDabs - 1);
+        const cfloat3 p = cf3(std::cos(t * 9.0f) * (0.35f + 0.5f * t),
+                              -0.7f + 1.4f * t + 0.1f * rng.range(-1.0f, 1.0f),
+                              std::sin(t * 9.0f) * (0.35f + 0.5f * t));
+        Node dab = item(Prim::sphere(0.22f), p, Op::Add, smooth(0.06f));
+        dab.mirror = sym != Symmetry::None;
+        l.sdf->insert(dab, i >= ahead ? later : scene::kNoNode);
+    }
+    f.after = at(cf3(0.55f, 0.2f, 0.1f));
+    return f;
+}
+
+}  // namespace
+
+TEST_CASE("intersect delta: the operand at the head, middle and tail of a long chain") {
+    // THE PAD IS THE SUFFIX'S (#666), so where the operand sits decides it: at
+    // the tail no smooth combine reads its running value and the box is its
+    // sweep; at the head every dab does, the summed pad outgrows the layer and
+    // the probe's box is the influence union it is clipped to. Each placement,
+    // under each symmetry and through an inline group either way, has to stay
+    // sound. The bit-exact half of the claim is the oracle's
+    // (test_intersect_delta_oracle.cpp), which is what found the sum.
+    const struct {
+        const char* name;
+        Slot slot;
+    } slots[] = {{"head", Slot::Head}, {"middle", Slot::Middle}, {"tail", Slot::Tail}};
+    const struct {
+        const char* name;
+        Symmetry sym;
+    } syms[] = {{"", Symmetry::None}, {", mirror X", Symmetry::Mirror},
+                {", radial 5", Symmetry::Radial}};
+    for (const auto& s : slots)
+        for (const auto& y : syms) {
+            const std::string name = std::string("operand at the ") + s.name + y.name;
+            check(name.c_str(), chain_fixture(s.slot, y.sym, Inline::None), 3.0f);
+        }
+    check("operand in an inline group at the head",
+          chain_fixture(Slot::Head, Symmetry::None, Inline::Operand), 3.0f);
+    check("operand in an inline group in the middle, mirror X",
+          chain_fixture(Slot::Middle, Symmetry::Mirror, Inline::Operand), 3.0f);
+    check("later dabs in an inline group",
+          chain_fixture(Slot::Head, Symmetry::None, Inline::LaterDabs), 3.0f);
+    check("later dabs in an inline group, radial 5",
+          chain_fixture(Slot::Middle, Symmetry::Radial, Inline::LaterDabs), 3.0f);
+}
+
+TEST_CASE("intersect delta: the pad follows the operand down the chain") {
+    // The numbers the probe above cannot state, as arithmetic: the pad is the
+    // SUM of the supports of the combines after the operand, so it grows with
+    // how many follow it -- and at the tail there are none. An inline group
+    // holding the later dabs must not shrink it: its children continue the
+    // outer chain.
+    auto width = [](Fixture f) {
+        const scene::Command cmd = move_cmd(f);
+        const std::optional<Aabb> b = scene::command_surface_delta_bound(f.doc, cmd);
+        REQUIRE(b.has_value());
+        return b->max.x - b->min.x;
+    };
+    const float head = width(chain_fixture(Slot::Head, Symmetry::None, Inline::None));
+    const float middle = width(chain_fixture(Slot::Middle, Symmetry::None, Inline::None));
+    const float tail = width(chain_fixture(Slot::Tail, Symmetry::None, Inline::None));
+    const float inlined = width(chain_fixture(Slot::Head, Symmetry::None, Inline::LaterDabs));
+    INFO("head ", head, ", middle ", middle, ", tail ", tail, ", inline ", inlined);
+    // The cylinder r 0.3 at x = -0.7 is 0.6 wide, and its geometry bound
+    // carries its own combine (a smooth intersect, max(4 * 0.08, 0.08) = 0.32)
+    // on each side. Each dab after it adds its support, 4 * 0.06 = 0.24.
+    const float own = std::max(kernel::csmin_quadratic_support(0.08f), 0.08f);
+    const float dab = kernel::csmin_quadratic_support(0.06f);
+    CHECK(tail == doctest::Approx(0.6f + 2.0f * own));
+    CHECK(middle == doctest::Approx(0.6f + 2.0f * (own + 60.0f * dab)));
+    CHECK(head == doctest::Approx(0.6f + 2.0f * (own + 120.0f * dab)));
+    CHECK(inlined == doctest::Approx(head));
+}
+
 TEST_CASE("intersect delta: a smooth combine downstream drags the difference back") {
     // WHY THE CHAIN PAD IS A TERM, as a field rather than as arithmetic.
     //
@@ -601,9 +732,10 @@ TEST_CASE("intersect delta: a smooth combine downstream drags the difference bac
     // (support 4k = 1.0) turns that difference into
     //   before: 0.03 - ((1.0 - 0.27) / 1.0)^2 * 0.25 = -0.103
     //   after:  0.03 - ((1.0 - 0.92) / 1.0)^2 * 0.25 = +0.028
-    // -- a SIGN CHANGE 0.30 from the operand's box, twice the band. `cull_pad`
-    // is min(4k, 2.80k) = 0.70 and covers it; drop that term and the reported
-    // box ends 0.15 short of the point, in a brick nothing dirtied.
+    // -- a SIGN CHANGE 0.30 from the operand's box, twice the band. The chain
+    // pad, the dab's support 4k = 1.0 since it is the one combine after the
+    // operand (#666), covers it; drop that term and the reported box ends
+    // 0.15 short of the point, in a brick nothing dirtied.
     Fixture f;
     Layer& l = f.doc.add_sdf_layer("body");
     f.layer = l.id;
@@ -614,52 +746,182 @@ TEST_CASE("intersect delta: a smooth combine downstream drags the difference bac
     check("a smooth dab reading the operand's far field", std::move(f), 5.0f);
 }
 
-TEST_CASE("intersect delta: the chain pad and the groups above are terms in the box") {
-    // The pad and the ancestor supports can only WIDEN the box, so every count
-    // and volume gate in this branch passes more comfortably without them, and
-    // a probe cannot reach the ancestor term at all: a group's blend drags a
-    // beyond-band value by less than its own support, and `cull_pad` already
-    // carries 2.80k of that support's 4k. So both are pinned here as
-    // arithmetic, against numbers derived from the formulas rather than from
-    // the walk under test.
-    //
-    // Five nodes, no symmetry, one layer folding hard:
-    //   cull_pad      = min(support(k), 2.80 * k) over the layer's blends
-    //                 = min(4 * 0.4, 2.80 * 0.4) = 1.12  -- the dab's k, the
-    //                   largest in the map; the envelope holds at its base
-    //                   below 76 nodes
-    //   group support = max(support(0.25), 0.25) = 1.0   -- the group above
-    //   fold support  = 0                                -- one layer, hard
+namespace {
+
+// The pin's document: a base sphere, a group holding the operand, and a smooth
+// dab -- AHEAD of the group when `dabs_after` is 0, otherwise that many copies
+// of it after the group.
+struct PadPin {
     Document doc;
-    Layer& l = doc.add_sdf_layer("body");
+    LayerId layer = 0;
+    NodeId group = 0;
+    NodeId cutter = 0;
+};
+
+PadPin pad_pin(int dabs_after) {
+    PadPin p;
+    Layer& l = p.doc.add_sdf_layer("body");
+    p.layer = l.id;
     l.sdf->insert(item(Prim::sphere(1.0f), cf3(0, 0, 0), Op::Add));
-    l.sdf->insert(item(Prim::sphere(0.5f), cf3(0.2f, 0.6f, 0), Op::Add, smooth(0.4f)));
+    const Node dab = item(Prim::sphere(0.5f), cf3(0.2f, 0.6f, 0), Op::Add, smooth(0.4f));
+    if (dabs_after == 0) l.sdf->insert(dab);
     Node g;
     g.is_group = true;
     g.op = Op::Add;
     g.blend = smooth(0.25f);
-    const NodeId gid = l.sdf->insert(g);
-    l.sdf->insert(item(Prim::sphere(0.35f), cf3(0.9f, 0.2f, 0), Op::Add), gid);
-    const NodeId cutter =
-        l.sdf->insert(item(Prim::sphere(0.3f), cf3(0.6f, 0, 0), Op::Intersect), gid);
+    p.group = l.sdf->insert(g);
+    l.sdf->insert(item(Prim::sphere(0.35f), cf3(0.9f, 0.2f, 0), Op::Add), p.group);
+    p.cutter = l.sdf->insert(item(Prim::sphere(0.3f), cf3(0.6f, 0, 0), Op::Intersect), p.group);
+    for (int i = 0; i < dabs_after; ++i) l.sdf->insert(dab);
+    return p;
+}
 
-    // The two numbers, asked of the helpers that own them, so a change to
-    // either formula fails HERE and says which one moved.
-    CHECK(scene::cull_pad(*l.sdf, l) == doctest::Approx(1.12f));
-    CHECK(scene::group_blend_support(*l.sdf->find(gid), l) == doctest::Approx(1.0f));
-
-    const scene::Command cmd{scene::SetTransformCmd{l.id, cutter, at(cf3(-0.4f, 0, 0))}};
-    const std::optional<Aabb> b = scene::command_surface_delta_bound(doc, cmd);
+// The box the move reports, taken on the document BEFORE it.
+Aabb pin_box(const PadPin& p) {
+    const scene::Command cmd{scene::SetTransformCmd{p.layer, p.cutter, at(cf3(-0.4f, 0, 0))}};
+    const std::optional<Aabb> b = scene::command_surface_delta_bound(p.doc, cmd);
     REQUIRE(b.has_value());
-    // A HARD intersect, so its geometry bound is the primitive's box and
-    // nothing else: sphere r = 0.3 at (0.6, 0, 0) is x in [0.3, 0.9] and y, z
-    // in [-0.3, 0.3], dilated by 1.12 + 1.0 = 2.12 on every side.
-    CHECK(b->min.x == doctest::Approx(-1.82f));
-    CHECK(b->max.x == doctest::Approx(3.02f));
-    CHECK(b->min.y == doctest::Approx(-2.42f));
-    CHECK(b->max.y == doctest::Approx(2.42f));
-    CHECK(b->min.z == doctest::Approx(-2.42f));
-    CHECK(b->max.z == doctest::Approx(2.42f));
+    return *b;
+}
+
+// A HARD intersect, so its geometry bound is the primitive's box and nothing
+// else: sphere r = 0.3 at (0.6, 0, 0) is x in [0.3, 0.9] and y, z in
+// [-0.3, 0.3], dilated by `d` on every side.
+void check_sphere_box(const Aabb& b, float d) {
+    CHECK(b.min.x == doctest::Approx(0.3f - d));
+    CHECK(b.max.x == doctest::Approx(0.9f + d));
+    CHECK(b.min.y == doctest::Approx(-0.3f - d));
+    CHECK(b.max.y == doctest::Approx(0.3f + d));
+    CHECK(b.min.z == doctest::Approx(-0.3f - d));
+    CHECK(b.max.z == doctest::Approx(0.3f + d));
+}
+
+}  // namespace
+
+TEST_CASE("intersect delta: the chain pad and the groups above are terms in the box") {
+    // The pad and the ancestor supports can only WIDEN the box, so every count
+    // and volume gate in this branch passes more comfortably without them, and
+    // a probe cannot reach the ancestor term at all: a group's blend drags a
+    // beyond-band value by less than its own support. So both are pinned here
+    // as arithmetic, against numbers derived from the formulas rather than from
+    // the walk under test.
+    //
+    // THE PAD IS THE SUM OF THE SUPPORTS OF THE COMBINES AFTER THE OPERAND, and
+    // of no others (#666). A combine ahead of it fed the `acc` its
+    // `max(acc, item)` reads, and the result of that max is beyond the band on
+    // both sides of the move outside the sweep, so nothing ahead can drag it
+    // back; each combine after it can carry the difference one support closer.
+    //
+    // One layer folding hard, no symmetry. Quadratic support is 4k, and a
+    // group's support is max(support(k), k):
+    //   dab ahead:       pad = 0    (the dab's k = 0.4 is the largest in the
+    //                                map, and it is AHEAD of the operand)
+    //   one dab after:   pad = 4 * 0.4         = 1.6
+    //   two dabs after:  pad = 4 * 0.4 + 4 * 0.4 = 3.2
+    //   group support                           = 1.0
+    //   fold support                            = 0
+    {
+        const PadPin p = pad_pin(/*dabs_after=*/0);
+        const Layer& l = *p.doc.find_layer(p.layer);
+        // The numbers, asked of the helpers that own them, so a change to a
+        // formula fails HERE and says which one moved. The LAYER's cull pad is
+        // still the dab's: the cull answers a different question.
+        CHECK(scene::cull_pad(*l.sdf, l) == doctest::Approx(1.12f));
+        CHECK(scene::group_blend_support(*l.sdf->find(p.group), l) == doctest::Approx(1.0f));
+        CHECK(kernel::csmin_quadratic_support(0.4f) == doctest::Approx(1.6f));
+        INFO("the dab ahead of the operand");
+        check_sphere_box(pin_box(p), 1.0f);
+    }
+    {
+        // ... and with a dab AFTER the operand the pad has to come back: it
+        // reads the running value the move changed.
+        INFO("one dab after the operand");
+        check_sphere_box(pin_box(pad_pin(1)), 1.6f + 1.0f);
+    }
+    {
+        // A SUM, not the largest: the first dab can leave the difference one
+        // support closer to the band, and the second can carry it the rest of
+        // the way.
+        INFO("two dabs after the operand");
+        check_sphere_box(pin_box(pad_pin(2)), 3.2f + 1.0f);
+    }
+}
+
+namespace {
+
+// THE HOST'S SCENE (#666): a sphere carrying 96 smooth stroke stamps whose
+// size and blend radius scale with the form, and an intersect cylinder
+// (r 0.25, half-height 1.6) APPENDED LAST -- the order a host that adds a
+// cutter to a worked sculpt produces -- dragged 1.4 across it at y 0.9.
+Fixture host_scene(float r, bool mirror_x) {
+    Fixture f;
+    Layer& l = f.doc.add_sdf_layer("body");
+    f.layer = l.id;
+    if (mirror_x) {
+        l.mirror_axes = scene::kMirrorX;
+        l.mirror_k = 0.08f;
+    }
+    l.sdf->insert(item(Prim::sphere(r), cf3(0, 0, 0), Op::Add));
+    for (int i = 0; i < 96; ++i) {
+        const float t = static_cast<float>(i) / 95.0f;
+        const float y = -0.8f + 1.6f * t;
+        const float ring = std::sqrt(std::max(0.05f, 1.0f - y * y));
+        const cfloat3 p =
+            cf3(std::cos(t * 7.0f) * ring * r, y * r, std::sin(t * 7.0f) * ring * r);
+        l.sdf->insert(item(Prim::sphere(0.22f * r), p, Op::Add, smooth(0.09f * r)));
+    }
+    Node cut = item(Prim::capped_cylinder(0.25f, 1.6f), cf3(-0.7f, 0.9f, 0), Op::Intersect);
+    cut.mirror = mirror_x;
+    f.cutter = l.sdf->insert(cut);
+    f.after = at(cf3(0.7f, 0.9f, 0));
+    return f;
+}
+
+// Both sides of the move, unioned, as a caller takes them.
+Aabb swept_delta(Fixture f) {
+    const scene::Command cmd = move_cmd(f);
+    const std::optional<Aabb> before = scene::command_surface_delta_bound(f.doc, cmd);
+    REQUIRE(before.has_value());
+    REQUIRE(scene::apply(f.doc, cmd).has_value());
+    const std::optional<Aabb> after = scene::command_surface_delta_bound(f.doc, cmd);
+    REQUIRE(after.has_value());
+    Aabb b = *before;
+    b.expand(*after);
+    return b;
+}
+
+}  // namespace
+
+TEST_CASE("intersect delta: an operand appended last carries no chain pad (#666)") {
+    // The box used to be the sweep dilated by `cull_pad` over the WHOLE layer,
+    // which on this scene is the stamps' blend: min(support, 2.80k) at
+    // k = 0.09 r -- the pad the host measured as the whole remaining cost of
+    // an intersect drag on a worked form. Every stamp is AHEAD of the operand,
+    // so none of them reads the running value the move changed, and the box is
+    // the sweep alone.
+    //
+    // The hard cylinder's geometry is x in [-0.95, -0.45] before and
+    // [0.45, 0.95] after, y in [0.9 - 1.6, 0.9 + 1.6] and z in [-0.25, 0.25].
+    // Under a mirror in X its twin lands exactly on the other end of the same
+    // sweep, so the union is the same box, dilated by the seam's support --
+    // which the operand's own geometry bound carries, and nothing else does.
+    for (const bool mirror : {false, true}) {
+        for (const float r : {1.0f, std::sqrt(10.0f)}) {
+            INFO("mirror ", mirror, ", form radius ", r);
+            const float seam = mirror ? kernel::csmin_quadratic_support(0.08f) : 0.0f;
+            const Aabb b = swept_delta(host_scene(r, mirror));
+            CHECK(b.min.x == doctest::Approx(-0.95f - seam));
+            CHECK(b.max.x == doctest::Approx(0.95f + seam));
+            CHECK(b.min.y == doctest::Approx(-0.7f - seam));
+            CHECK(b.max.y == doctest::Approx(2.5f + seam));
+            CHECK(b.min.z == doctest::Approx(-0.25f - seam));
+            CHECK(b.max.z == doctest::Approx(0.25f + seam));
+        }
+    }
+    // ... and the narrower box is still a sound one, at both sizes.
+    check("the host's scene", host_scene(1.0f, false));
+    check("the host's scene, mirrored", host_scene(1.0f, true));
+    check("the host's scene at ten times the extent", host_scene(std::sqrt(10.0f), false), 5.0f);
 }
 
 TEST_CASE("intersect delta: the probe has teeth") {

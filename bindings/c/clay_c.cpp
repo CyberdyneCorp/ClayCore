@@ -4467,6 +4467,18 @@ struct GestureRegion {
     GestureRegion& operator=(const GestureRegion&) = delete;
 };
 
+// The overlap of two regions that each hold an edit's whole change. `region`
+// itself where `bound` says nothing narrower (empty or unbounded), and where
+// the overlap is empty -- two sound regions cannot both be right about that
+// unless nothing changed, and reporting `region` then costs a refill rather
+// than a missed one.
+math::Aabb clipped_to(const math::Aabb& region, const math::Aabb& bound) {
+    if (bound.empty() || bound.is_infinite()) return region;
+    const math::Aabb overlap{kernel::cmax(region.min, bound.min),
+                             kernel::cmin(region.max, bound.max)};
+    return overlap.empty() ? region : overlap;
+}
+
 clay_result apply_edit(clay_document* doc, const scene::Command& cmd, const char* what,
                        math::Aabb* out_reach) {
     // What this edit can reach, taken on BOTH sides of the apply and unioned.
@@ -4532,11 +4544,18 @@ clay_result apply_edit(clay_document* doc, const scene::Command& cmd, const char
     // the proof is about. Either side refusing keeps the conservative union
     // above -- which is why the influence bound is still taken on both sides
     // rather than skipped, and why a fallback can never come out too tight.
+    //
+    // CLIPPED to that union (#666): the change lies inside both regions, so it
+    // lies inside their overlap. The delta's chain pad SUMS the supports of the
+    // combines after the operand, so an operand ahead of a long smooth chain
+    // gets a box past the layer -- exact, and wider than the influence union.
+    // The overlap is never wider than either.
     if (const std::optional<math::Aabb> delta_after =
             scene::command_surface_delta_bound(doc->doc.document, cmd);
         delta_before && delta_after) {
-        reach = *delta_before;
-        reach.expand(*delta_after);
+        math::Aabb delta = *delta_before;
+        delta.expand(*delta_after);
+        reach = clipped_to(delta, reach);
     }
     if (out_reach) *out_reach = reach;
     // The funnel every command-based edit passes through, so the tape cache is
