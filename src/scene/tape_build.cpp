@@ -176,11 +176,24 @@ struct Compiler {
     // `squash` widens the bound of a placement whose field is not a distance
     // (issue #649, bounds.h). Widening only ever keeps more, so a caller may
     // test the plain bound first and pay for the squash only when it drops.
+    //
+    // The plain test runs first and decides every bound it does not drop, so
+    // a document with no squash pays two comparisons per dropped bound.
     bool culled(const math::Aabb& bound, const CullSquash& squash = CullSquash{}) const {
         if (!cull) return false;
         if (bound.is_infinite()) return false;
-        if (squash.none()) return !bound.intersects(cull_test);
-        return !bound.dilated(squash.dilation(cull_band_pad_)).intersects(cull_test);
+        if (bound.intersects(cull_test)) return false;
+        return squash.none() ||
+               !bound.dilated(squash.dilation(cull_band_pad_)).intersects(cull_test);
+    }
+
+    // The item test of `compile_list` off the plan. A similarity -- nearly
+    // every item -- is decided inline, without the call that would only return
+    // a zero squash.
+    bool culled_item(const math::Aabb& geometry, const Node& item, const Layer& layer) const {
+        if (!culled(geometry)) return false;
+        return placed_is_similarity(layer, item) ||
+               culled(geometry, item_cull_squash(item, layer));
     }
 
     // -- emission ------------------------------------------------------------
@@ -1165,8 +1178,8 @@ struct Compiler {
                 // A non-local item has an infinite influence bound and so can
                 // never be culled; item_influence_is_local is the single
                 // definition of that test, shared with item_influence_bound.
-                if (!pruned && cull && item_influence_is_local(*n) && culled(geometry) &&
-                    culled(geometry, item_cull_squash(*n, layer))) {
+                if (!pruned && cull && item_influence_is_local(*n) &&
+                    culled_item(geometry, *n, layer)) {
                     cull_dropped = true;
                     continue;
                 }
