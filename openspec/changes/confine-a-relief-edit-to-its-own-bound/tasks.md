@@ -19,4 +19,4 @@
 ## 4. Document
 
 - [x] 4.1 `clay.h` note on `clay_layer_node_influence_bound`, `bounds.h`, `docs/05`, the scene-model requirement
-- ABI unchanged: 0.122.0. No entry point, descriptor or format change.
+- ABI unchanged: 0.123.0. No entry point, descriptor or format change.
