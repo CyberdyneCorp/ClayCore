@@ -1,8 +1,9 @@
 #include <doctest/doctest.h>
 
 #include <cstddef>
-
+#include <cstdint>
 #include <cstring>
+#include <string>
 
 #include "clay.h"
 
@@ -703,5 +704,135 @@ TEST_CASE("a NULL cost is not a fast path — the verdict is the projection") {
     REQUIRE(clay_layer_consolidation_advice(doc, layer, 0.5f, &without, nullptr, &b) == CLAY_OK);
     CHECK(a == b);
     CHECK(with.cell_size == doctest::Approx(without.cell_size));
+    clay_document_destroy(doc);
+}
+
+// -- a layer consolidation does not apply to (#659) --------------------------
+
+namespace {
+
+clay_layer_id add_voxel_layer(clay_document* doc) {
+    clay_layer_id layer = 0;
+    clay_voxel_grid* grid = nullptr;
+    REQUIRE(clay_document_add_voxel_layer(doc, "grid", 0.05f, &layer, &grid) == CLAY_OK);
+    return layer;
+}
+
+// A tetrahedron, the smallest thing clay_document_add_mesh_layer accepts.
+clay_layer_id add_mesh_layer(clay_document* doc) {
+    const float positions[12] = {0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+                                 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f};
+    const std::uint32_t indices[12] = {0, 1, 2, 0, 1, 3, 0, 2, 3, 1, 2, 3};
+    clay_mesh* tetra = nullptr;
+    REQUIRE(clay_mesh_from_triangles(positions, 4, indices, 12, &tetra) == CLAY_OK);
+    clay_mesh_layer_desc desc;
+    std::memset(&desc, 0, sizeof desc);
+    desc.struct_size = sizeof desc;
+    desc.name = "mesh";
+    clay_layer_id layer = 0;
+    REQUIRE(clay_document_add_mesh_layer(doc, tetra, &desc, &layer, nullptr) == CLAY_OK);
+    clay_mesh_destroy(tetra);
+    return layer;
+}
+
+size_t undo_depth(const clay_document* doc) {
+    size_t depth = 0;
+    REQUIRE(clay_document_undo_state(doc, nullptr, &depth, nullptr) == CLAY_OK);
+    return depth;
+}
+
+bool last_error_names(const char* word) {
+    const char* e = clay_last_error();
+    return e && std::string(e).find(word) != std::string::npos;
+}
+
+// Every consolidating entry point on `layer`, each expected to refuse it as
+// unsupported and to name the representation it found.
+void check_refused_as(clay_document* doc, clay_layer_id layer, const char* kind) {
+    const clay_consolidation_params p = params_at(0.02f, 0.08f);
+    const float lo[3] = {-1.0f, -1.0f, -1.0f};
+    const float hi[3] = {1.0f, 1.0f, 1.0f};
+    clay_consolidation_cost cost{};
+    cost.struct_size = sizeof(cost);
+    clay_region_merge merge{};
+    merge.struct_size = sizeof(merge);
+    clay_cancel_token* token = clay_cancel_token_create();
+    REQUIRE(token != nullptr);
+    const size_t depth = undo_depth(doc);
+
+    CHECK(clay_layer_consolidation_cost(doc, layer, &p, nullptr, nullptr, &cost) ==
+          CLAY_ERROR_UNSUPPORTED);
+    CHECK(last_error_names(kind));
+    CHECK(clay_layer_consolidate(doc, layer, &p, nullptr, nullptr, nullptr) ==
+          CLAY_ERROR_UNSUPPORTED);
+    CHECK(last_error_names(kind));
+    CHECK(clay_layer_consolidate_cancellable(doc, layer, &p, nullptr, nullptr, &cost, token) ==
+          CLAY_ERROR_UNSUPPORTED);
+    CHECK(last_error_names(kind));
+    CHECK(clay_layer_plan_region_merge(doc, layer, lo, hi, &merge) == CLAY_ERROR_UNSUPPORTED);
+    CHECK(last_error_names(kind));
+    CHECK(clay_layer_consolidate_region(doc, layer, lo, hi, &p, &cost, &merge) ==
+          CLAY_ERROR_UNSUPPORTED);
+    CHECK(last_error_names(kind));
+    CHECK(undo_depth(doc) == depth);
+
+    // The representation is checked before protection: a locked grid is still
+    // a grid, and "locked" would send the artist to unlock something that
+    // could never be consolidated anyway.
+    REQUIRE(clay_document_set_layer_protection(doc, layer, 0, 1) == CLAY_OK);
+    CHECK(clay_layer_consolidate(doc, layer, &p, nullptr, nullptr, nullptr) ==
+          CLAY_ERROR_UNSUPPORTED);
+    CHECK(last_error_names(kind));
+    REQUIRE(clay_document_set_layer_protection(doc, layer, 0, 0) == CLAY_OK);
+
+    // The advice stays an answer, not an error (its own documented rule): a
+    // host walking a stack of mixed kinds is told "not advised", zeroed.
+    clay_consolidation_params advised = params_at(1.0f, 1.0f);
+    int32_t advises = -1;
+    CHECK(clay_layer_consolidation_advice(doc, layer, 0.5f, &advised, nullptr, &advises) ==
+          CLAY_OK);
+    CHECK(advises == 0);
+    CHECK(advised.cell_size == 0.0f);
+    int32_t baked = -1;
+    CHECK(clay_layer_consolidation_state(doc, layer, &baked, nullptr) == CLAY_OK);
+    CHECK(baked == 0);
+    clay_cancel_token_destroy(token);
+}
+
+}  // namespace
+
+TEST_CASE("consolidating a voxel or mesh layer is refused as unsupported, by name") {
+    clay_layer_id sdf = 0;
+    clay_document* doc = fresh_document(&sdf);
+    add_sphere(doc, sdf, 0.5f, 0.0f);
+    REQUIRE(clay_document_enable_undo(doc) == CLAY_OK);
+
+    SUBCASE("a voxel layer") { check_refused_as(doc, add_voxel_layer(doc), "voxel"); }
+    SUBCASE("a mesh layer") { check_refused_as(doc, add_mesh_layer(doc), "mesh"); }
+    clay_document_destroy(doc);
+}
+
+TEST_CASE("an empty SDF layer still answers nothing to consolidate, not unsupported") {
+    clay_layer_id layer = 0;
+    clay_document* doc = fresh_document(&layer);
+    const clay_consolidation_params p = params_at(0.02f, 0.08f);
+    const float lo[3] = {-1.0f, -1.0f, -1.0f};
+    const float hi[3] = {1.0f, 1.0f, 1.0f};
+    clay_consolidation_cost cost{};
+    cost.struct_size = sizeof(cost);
+
+    CHECK(clay_layer_consolidation_cost(doc, layer, &p, nullptr, nullptr, &cost) ==
+          CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(last_error_names("nothing to consolidate"));
+    CHECK(clay_layer_consolidate(doc, layer, &p, nullptr, nullptr, nullptr) ==
+          CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(last_error_names("nothing to consolidate"));
+    CHECK(clay_layer_consolidate_region(doc, layer, lo, hi, &p, nullptr, nullptr) ==
+          CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(last_error_names("nothing to merge"));
+    clay_region_merge merge{};
+    merge.struct_size = sizeof(merge);
+    CHECK(clay_layer_plan_region_merge(doc, layer, lo, hi, &merge) == CLAY_OK);
+    CHECK(merge.absorbed == 0);
     clay_document_destroy(doc);
 }
