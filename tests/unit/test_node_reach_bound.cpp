@@ -484,3 +484,57 @@ TEST_CASE("the chain-drag memo answers exactly what the walk does") {
         CHECK(walked.max.z == memoized.max.z);
     }
 }
+
+// -- an edit that cannot leave its own bound (#672) ----------------------------
+
+TEST_CASE("a relief or incise ITEM reaches its own bound and no further") {
+    // Its combine is `a -/+ k * w(b)` with w zero outside its own bound, so an
+    // edit to it leaves the running value bit-identical there and nothing
+    // after it has a difference to carry. Pinned at the worst place for it: in
+    // a smooth group with a left operand, followed by a second relief stamp
+    // and, after the group, a smooth sphere. Before #672 the first stamp read
+    // the second's amplitude as a quadratic support and widened by 4k.
+    for (scene::Op op : {scene::Op::Relief, scene::Op::Incise}) {
+        CAPTURE(static_cast<int>(op));
+        scene::Document doc;
+        scene::Layer& l = doc.add_sdf_layer("l");
+        const scene::NodeId g = l.sdf->insert(group_node(scene::Op::Add, 0.3f));
+        l.sdf->insert(clay_test::item(scene::Prim::sphere(1.0f), cf3(0, 0, 0)), g);
+        scene::Node stamp = clay_test::item(scene::Prim::sphere(0.12f), cf3(0, 0, 1.0f), op,
+                                            scene::Blend{scene::BlendProfile::Quadratic, 0.5f});
+        stamp.rounding = 0.12f;
+        const scene::NodeId first = l.sdf->insert(stamp, g);
+        stamp.xform.position = cf3(0.06f, 0, 1.0f);
+        l.sdf->insert(stamp, g);
+        l.sdf->insert(
+            smooth(clay_test::item(scene::Prim::sphere(0.2f), cf3(0.3f, 0, 1.1f)), 0.3f));
+
+        const math::Aabb own = scene::node_influence_bound(*l.sdf, first, l);
+        const math::Aabb reach = scene::node_reach_bound(*l.sdf, first, l);
+        REQUIRE_FALSE(own.empty());
+        CHECK(reach.min.x == own.min.x);
+        CHECK(reach.max.x == own.max.x);
+        CHECK(reach.min.z == own.min.z);
+        CHECK(reach.max.z == own.max.z);
+    }
+}
+
+TEST_CASE("a relief GROUP still takes the walk") {
+    // A relief group offsets by the weight of its CHILDREN's combined value,
+    // and an edit to the group changes that value beyond any one box: it is
+    // not confined, and a smooth sibling after it still drags it.
+    scene::Document doc;
+    scene::Layer& l = doc.add_sdf_layer("l");
+    l.sdf->insert(clay_test::item(scene::Prim::sphere(1.0f), cf3(0, 0, 0)));
+    scene::Node relief_group = group_node(scene::Op::Relief, 0.0f);
+    relief_group.blend = scene::Blend{scene::BlendProfile::Quadratic, 0.2f};
+    relief_group.rounding = 0.1f;
+    const scene::NodeId g = l.sdf->insert(relief_group);
+    l.sdf->insert(clay_test::item(scene::Prim::sphere(0.1f), cf3(0, 0, 1.0f)), g);
+    l.sdf->insert(smooth(clay_test::item(scene::Prim::sphere(0.2f), cf3(0.3f, 0, 1.1f)), 0.3f));
+
+    const math::Aabb own = scene::node_influence_bound(*l.sdf, g, l);
+    const math::Aabb reach = scene::node_reach_bound(*l.sdf, g, l);
+    REQUIRE_FALSE(own.empty());
+    CHECK(reach.max.x > own.max.x);
+}
