@@ -682,6 +682,11 @@ float document_cull_pad(const Document& doc);
 // downstream_chain_drag for why). Nothing for a node followed only by hard
 // ones, which is every node appended last.
 //
+// Neither dilation for a relief or incise ITEM (#672): its combine is the
+// identity outside its own bound, bit for bit, so an edit to it cannot change
+// the field anywhere else and the answer is its own bound -- what keeps every
+// stamp of a relief stroke as local as the last.
+//
 // This is the answer to "where does an edit to this node LAND", which is a
 // different question from "where is this node" and used to be answered with
 // the root ancestor's whole bound. It is conservative in the same band-clamped

@@ -1763,6 +1763,36 @@ Aabb dilated_by_downstream_drag(const SdfContent& content, NodeId parent, int in
     return drag > 0.0f ? b.dilated(drag) : b;
 }
 
+// WHETHER AN EDIT TO THIS NODE LEAVES THE RUNNING VALUE BIT-IDENTICAL OUTSIDE
+// THE NODE'S OWN BOUND (#672) -- and so needs none of the walk's dilations.
+//
+// The walk below exists because most combines change the running value
+// EVERYWHERE the node is the nearest thing: a moved sphere's distance changes
+// far from its box, and a later smooth combine or an enclosing group's blend
+// carries that beyond-band difference back into the band. A relief or incise
+// item does not have such a difference to carry. Its combine is
+// `a -/+ k * w(b)` (ctape_combine_dist), and its weight is exactly zero
+// outside its falloff, which its own bound already holds (item_bound_dilation,
+// ccombine_extended_support) -- so there it returns `a` bit for bit, before the
+// edit and after it, whatever the edit did to its position, amplitude or
+// falloff. Every combine after it, at any level, reads its operands at the same
+// point, so identical inputs give identical outputs to the layer root.
+//
+// That is what a stroke is: a relief stroke authors one node per stamp, and
+// each stamp but the last has the next one after it. Read as a quadratic blend
+// support, that next stamp's AMPLITUDE (`k`, world units) widened every earlier
+// stamp by 4k on each side: a four-sample stroke at strength 0.5 dirtied 2,548
+// bricks of a unit sphere where one stamp dirties 48.
+//
+// ITEMS ONLY. A relief GROUP offsets by the weight of its children's combined
+// value, and an edit to a child changes that value beyond the child's box, so
+// it takes the walk like any other node. The walk still runs for this node
+// too: a hidden group above it hides it, and a non-local one above it keeps
+// its own answer.
+bool edit_is_confined_to_own_bound(const Node& n) {
+    return !n.is_group && (n.op == Op::Relief || n.op == Op::Incise);
+}
+
 }  // namespace
 
 std::vector<CullPadTerms>& ChainDragMemo::from_end_of(NodeId parent, std::size_t chain_length) {
@@ -1828,8 +1858,13 @@ Aabb node_reach_bound(const SdfContent& content, NodeId id, const Layer& layer,
     // At every level, before the group's own support, the drag of the combines
     // that follow in that chain (downstream_chain_drag): they read the running
     // value the edit changed, and the node's own bound does not cover them.
+    //
+    // Neither, for a node whose edit cannot leave its own bound at all
+    // (edit_is_confined_to_own_bound): a relief or incise item.
     Aabb b = node_influence_bound(content, id, layer, extent);
     if (b.empty() || b.is_infinite()) return b;
+    const Node* self = content.find(id);
+    const bool dilate = !(self && edit_is_confined_to_own_bound(*self));
 
     // Bounded by the node count rather than trusting the tree to be acyclic:
     // SdfContent::move refuses to close a cycle, but `roots` is a public
@@ -1840,7 +1875,7 @@ Aabb node_reach_bound(const SdfContent& content, NodeId id, const Layer& layer,
         NodeId parent = kNoNode;
         int index = -1;
         if (!content.locate(cur, &parent, &index)) return Aabb{};
-        b = dilated_by_downstream_drag(content, parent, index, layer, b, extent);
+        if (dilate) b = dilated_by_downstream_drag(content, parent, index, layer, b, extent);
         if (parent == kNoNode) return b;
         const Node* g = content.find(parent);
         if (!g) return Aabb{};
@@ -1860,7 +1895,7 @@ Aabb node_reach_bound(const SdfContent& content, NodeId id, const Layer& layer,
                           : layer_influence_extent(*layer.sdf, layer);
         }
         // #515: only where the combine actually happens.
-        if (group_combine_can_move_result(content, *g))
+        if (dilate && group_combine_can_move_result(content, *g))
             b = b.dilated(group_blend_support(*g, layer));
         cur = parent;
     }

@@ -11948,6 +11948,15 @@ clay_result clay_voxel_build_plane_pick(const clay_voxel_grid* grid, const float
  * dirtied by it kept 25 stale bricks. Nothing widens for a node with only hard
  * siblings after it, which includes every node appended last -- a stroke's
  * dabs -- and every document without a smooth blend. */
+/* NOTE (issue #672): a RELIEF or INCISE item is never widened by the above, nor
+ * by an enclosing group's support. Its combine offsets the running value by
+ * k * w with w exactly zero outside its own bound, so an edit to it leaves the
+ * field bit-identical there and nothing after it has a difference to carry.
+ * Before this every stamp of a relief or incise stroke but the last read the
+ * next stamp's amplitude as a blend support and widened by 4 x k per side --
+ * 4.72 against 0.72 for a radius 0.12, strength 0.5 stroke, and 2,548 bricks
+ * against 48 from clay_brick_cache_mark_dirty_nodes. A relief GROUP, and a
+ * node a relief stroke is laid on, are widened as before. */
 clay_result clay_layer_node_influence_bound(const clay_document* doc, clay_layer_id layer,
                                             clay_node_id node, float out_min[3],
                                             float out_max[3], int32_t* out_has_bounds,
