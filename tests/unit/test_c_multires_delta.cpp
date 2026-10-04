@@ -377,6 +377,31 @@ TEST_CASE("c multires delta: the plain sculptor records the active pass, not not
     clay_multires_delta_destroy(record);
 }
 
+TEST_CASE("c multires delta: a recorded stroke records the active pass too") {
+    // The stroke path, not just the stamp: a stroke is fed through the
+    // multires stroke gesture, which has to hand the pass half to every stamp.
+    // Dropped there, the record comes back with no pass entries and a revert
+    // leaves the stroke on the surface.
+    Fixture f(6, 2);
+    const uint64_t layer = f.add_layer();
+    const Snapshot before = snapshot(f.surface);
+    const clay_stroke_preset preset = stroke_preset();
+    const clay_mesh_brush_desc brush = draw_at(0.0f, 0.0f, 0.4f, 0.3f);
+    clay_multires_delta* record = clay_multires_delta_create();
+    size_t applied = 0;
+    REQUIRE(clay_multires_sculptor_apply_stroke_recorded(f.sculptor, kStroke, 3, &preset, &brush,
+                                                         nullptr, nullptr, 0, record, &applied,
+                                                         nullptr) == CLAY_OK);
+    CHECK(applied > 3);
+    const Snapshot after = snapshot(f.surface);
+    REQUIRE_FALSE(after == before);
+    const clay_multires_delta_stats s = stats_of(record);
+    CHECK(s.sculpt_layer == layer);
+    CHECK(s.layer_detail_entries > 0);
+    check_round_trip(f.surface, record, before, after);
+    clay_multires_delta_destroy(record);
+}
+
 TEST_CASE("c multires delta: a record refuses another hierarchy and a changed structure") {
     Fixture f(6, 2), twin(6, 2);
     clay_multires_delta* record = clay_multires_delta_create();
