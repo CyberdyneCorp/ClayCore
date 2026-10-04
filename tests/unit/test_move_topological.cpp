@@ -157,3 +157,117 @@ TEST_CASE("move topological: the source volume's feather survives the rebuild") 
     still.displacement = cf3(0, 0, 0);
     CHECK(field::move_topological(before, still).feather() == doctest::Approx(before.feather()));
 }
+
+namespace {
+
+float unit_sphere(kernel::cfloat3 p) { return kernel::clength(p) - 1.0f; }
+
+// The probe from issue #657: a unit sphere's top, baked with a band wide
+// enough to cover the drag, so the volume itself is never what runs out.
+FieldVolume sphere_cap() {
+    const math::Aabb box{cf3(-0.4f, -0.4f, 0.5f), cf3(0.9f, 0.4f, 1.8f)};
+    return FieldVolume::sample(unit_sphere, box, 0.01f, 0.67f);
+}
+
+TopologicalMoveSettings long_drag() {
+    TopologicalMoveSettings s;
+    s.anchor = cf3(0, 0, 1);
+    s.radius = 0.3f;
+    s.displacement = cf3(0.5f, 0, 0.4f);  // |d| = 0.64, past twice the reach
+    s.ease = 0;
+    return s;
+}
+
+// The surface height straight down at (x, 0), scanning from the top.
+float height_at(const FieldVolume& v, float x) {
+    for (int i = 0; i <= 1300; ++i) {
+        const float z = 1.8f - 0.001f * static_cast<float>(i);
+        if (v.eval(cf3(x, 0, z)) <= 0.0f) return z;
+    }
+    return -99.0f;
+}
+
+}  // namespace
+
+TEST_CASE("move topological: a drag longer than the reach does not fold (#657)") {
+    // The single-step pull-back p - d*w(g(p)) stops being one-to-one once
+    // |d| * slope / radius passes one: two output points read the same source
+    // point, the anchor sinks below the surface it was grabbed from and the
+    // pulled material falls away before the end of the drag. Measured at
+    // v0.120.1 the anchor sat at 0.940 against an original 1.000.
+    //
+    // The reference is the host's workaround: the same drag as nine calls of
+    // d/9, each anchored where the previous one left the grip. Heights along
+    // x = 0 .. 0.35 from the issue. The engine takes five slices here rather
+    // than nine, which reads about 0.03 higher along the whole drag; the
+    // single step it replaced was 0.16 low at the anchor and 0.40 low at 0.35.
+    const float reference[] = {1.097f, 1.129f, 1.162f, 1.196f, 1.232f, 1.267f, 1.302f, 1.335f};
+    const FieldVolume after = field::move_topological(sphere_cap(), long_drag());
+
+    float previous = -1.0f;
+    for (int i = 0; i < 8; ++i) {
+        const float x = 0.05f * static_cast<float>(i);
+        const float h = height_at(after, x);
+        CAPTURE(x);
+        INFO("height " << h << " against the stepped reference " << reference[i]);
+        CHECK(h >= 1.0f);     // never below the surface it was grabbed from
+        CHECK(h > previous);  // rises along the drag: no crater, no lump
+        CHECK(std::abs(h - reference[i]) <= 0.04f);
+        previous = h;
+    }
+}
+
+TEST_CASE("move topological: the sub-steps are what n host calls would give") {
+    // The engine's slices compose their pull-backs and read the source once;
+    // a host gets the same drag by calling n times and re-sampling the volume
+    // n times. Same slices, same anchors, same geodesics -- so the same shape,
+    // up to the re-sampling the host pays for and the engine does not.
+    const TopologicalMoveSettings drag = long_drag();
+    const int n = field::topological_move_steps(drag);
+    REQUIRE(n > 1);
+
+    FieldVolume host = sphere_cap();
+    const kernel::cfloat3 slice = drag.displacement * (1.0f / static_cast<float>(n));
+    for (int i = 0; i < n; ++i) {
+        TopologicalMoveSettings step = drag;
+        step.anchor = drag.anchor + slice * static_cast<float>(i);
+        step.displacement = slice;
+        host = field::move_topological(host, step);
+    }
+    const FieldVolume engine = field::move_topological(sphere_cap(), drag);
+
+    for (int i = 0; i < 8; ++i) {
+        const float x = 0.05f * static_cast<float>(i);
+        CAPTURE(x);
+        CHECK(std::abs(height_at(engine, x) - height_at(host, x)) <= 0.01f);
+    }
+}
+
+TEST_CASE("move topological: how many slices a drag takes") {
+    TopologicalMoveSettings s = long_drag();
+    // |d| = 0.64 against half of 0.3 on a linear curve: 4.27, so five.
+    CHECK(field::topological_move_steps(s) == 5);
+
+    // A steeper curve needs more slices for the same drag: smoothstep peaks at
+    // 1.5, so 6.4 -> seven.
+    s.ease = kernel::ease_smoothstep;
+    CHECK(field::topological_move_steps(s) == 7);
+
+    // Under half the radius on a linear curve is one step -- the single
+    // pull-back unchanged, which is every drag the older tests here make.
+    s.ease = 0;
+    s.displacement = cf3(0.15f, 0, 0);
+    CHECK(field::topological_move_steps(s) == 1);
+    s.radius = 0.5f;
+    s.displacement = cf3(-0.25f, 0, 0);
+    CHECK(field::topological_move_steps(s) == 1);
+
+    // Capped, so one call cannot be asked for unbounded work.
+    s.radius = 0.01f;
+    s.displacement = cf3(100.0f, 0, 0);
+    CHECK(field::topological_move_steps(s) == 64);
+
+    // Nothing to move: one (empty) step rather than a division by zero.
+    s.radius = 0.0f;
+    CHECK(field::topological_move_steps(s) == 1);
+}

@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "clay/kernel/ease.h"
+#include "clay/math/ease_slope.h"
 
 namespace clay {
 namespace field {
@@ -238,45 +239,8 @@ Geodesic solve_over(Geodesic g, const std::vector<bool>& material,
     return g;
 }
 
-// The two ways to fill the material array, over the same grid and the same
-// walk. Sampled once per cell either way; the batched one just asks for every
-// cell at once, which is what lets an evaluator compile a tape once and spread
-// the cells across a pool.
-Geodesic solve(const std::function<float(cfloat3)>& source,
-               const TopologicalMoveSettings& settings, float cell_size) {
-    Geodesic g = make_grid(settings, cell_size);
-    std::vector<bool> material(g.distance.size(), false);
-    for (int z = 0; z < g.nz; ++z)
-        for (int y = 0; y < g.ny; ++y)
-            for (int x = 0; x < g.nx; ++x)
-                material[g.index(x, y, z)] = source(g.centre_of(x, y, z)) <= 0.0f;
-    return solve_over(std::move(g), material, settings, cell_size);
-}
-
-Geodesic solve_batched(const PointBatch& source, const TopologicalMoveSettings& settings,
-                       float cell_size) {
-    Geodesic g = make_grid(settings, cell_size);
-    const std::size_t n = g.distance.size();
-    std::vector<float> points(n * 3);
-    for (int z = 0; z < g.nz; ++z)
-        for (int y = 0; y < g.ny; ++y)
-            for (int x = 0; x < g.nx; ++x) {
-                const cfloat3 c = g.centre_of(x, y, z);
-                const std::size_t at = static_cast<std::size_t>(g.index(x, y, z)) * 3;
-                points[at] = c.x;
-                points[at + 1] = c.y;
-                points[at + 2] = c.z;
-            }
-    std::vector<float> d(n, 0.0f);
-    source(points.data(), n, d.data());
-    std::vector<bool> material(n, false);
-    for (std::size_t i = 0; i < n; ++i) material[i] = d[i] <= 0.0f;
-    return solve_over(std::move(g), material, settings, cell_size);
-}
-
-// Where one output sample takes its material from. The identity past the
-// reach, and the pulled-back point inside it -- shared by the two overloads so
-// the displacement map cannot drift between them.
+// Where one output sample takes its material from, through ONE step. The
+// identity past the reach, and the pulled-back point inside it.
 cfloat3 pull_back(const Geodesic& geo, const TopologicalMoveSettings& settings, cfloat3 p) {
     const float g = geo.at(p);
     if (g >= settings.radius) return p;  // past the reach: identity
@@ -286,6 +250,110 @@ cfloat3 pull_back(const Geodesic& geo, const TopologicalMoveSettings& settings, 
     // the straight line. Sampling the source at the pulled-back point is what
     // moves the material to p.
     return p - settings.displacement * w;
+}
+
+// HOW LONG ONE STEP MAY BE, as a fraction of the reach (#657).
+//
+// One step's map p -> p - d * w(g(p)) is one-to-one only while |d| times the
+// weight's slope stays under one, and the weight's slope is the curve's
+// steepest |E'| over the radius. Past that two output points read the same
+// source point: measured on a unit sphere, a 0.64 drag at radius 0.3 left the
+// anchor at 0.940 against an original 1.000, with a crater under the grip and
+// a lump that fell away before the end of the drag -- returned as CLAY_OK.
+//
+// Half the fold limit, not the limit itself: the geodesic is solved on a
+// 26-neighbour lattice and sampled trilinearly, so its own slope runs a little
+// over one, and a step sized exactly to the bound would sit on the edge of the
+// fold it exists to avoid. n = 1 for any drag under half the radius on a
+// linear curve, which keeps every such drag bit-identical to the single step.
+constexpr float kStepReach = 0.5f;
+
+// The most steps one call will take. Each costs a geodesic solve over a grid
+// sized to the reach plus its slice, and every output sample composes all of
+// them; past this the drag is over thirty radii long on a linear curve, and is
+// not one gesture. Beyond it the slices are longer than kStepReach allows and
+// the map may fold again -- stated in the header rather than refused.
+constexpr int kMaxSteps = 64;
+
+// The drag as the chain of steps it runs as.
+//
+// Step i drags d/n from where the grip has reached, anchor + (i-1) * d/n, and
+// its geodesic is solved over the material the steps before it left -- which
+// is exactly what a host splitting the drag into n calls gets. What it does not
+// do is re-sample the volume n times: an output point's source position is
+// pb_1(pb_2(...pb_n(p))), and the source is read ONCE, there.
+struct MoveChain {
+    std::vector<TopologicalMoveSettings> steps;
+    std::vector<Geodesic> solved;  // steps[0 .. solved.size()) are solved
+
+    explicit MoveChain(const TopologicalMoveSettings& settings) {
+        const int n = topological_move_steps(settings);
+        // d * 1.0f is d exactly, and anchor + 0 is the anchor, so a one-step
+        // chain is the single step it replaced to the bit.
+        const cfloat3 slice = settings.displacement * (1.0f / static_cast<float>(n));
+        for (int i = 0; i < n; ++i) {
+            TopologicalMoveSettings step = settings;
+            step.anchor = settings.anchor + slice * static_cast<float>(i);
+            step.displacement = slice;
+            steps.push_back(step);
+        }
+    }
+
+    // Through every step solved so far, LAST FIRST: the output point is where
+    // the final step put material, so it is undone first.
+    cfloat3 pull_back(cfloat3 p) const {
+        for (std::size_t i = solved.size(); i-- > 0;)
+            p = field::pull_back(solved[i], steps[i], p);
+        return p;
+    }
+
+    const TopologicalMoveSettings& next() const { return steps[solved.size()]; }
+    bool complete() const { return solved.size() == steps.size(); }
+};
+
+// The two ways to fill a step's material array, over the same grid and the
+// same walk. Sampled once per cell either way, at the cell's position pulled
+// back through the steps already solved -- the material as those steps left
+// it. The batched one asks for every cell at once, which is what lets an
+// evaluator compile a tape once and spread the cells across a pool.
+void solve_next(const std::function<float(cfloat3)>& source, MoveChain& chain,
+                float cell_size) {
+    Geodesic g = make_grid(chain.next(), cell_size);
+    std::vector<bool> material(g.distance.size(), false);
+    for (int z = 0; z < g.nz; ++z)
+        for (int y = 0; y < g.ny; ++y)
+            for (int x = 0; x < g.nx; ++x)
+                material[g.index(x, y, z)] =
+                    source(chain.pull_back(g.centre_of(x, y, z))) <= 0.0f;
+    chain.solved.push_back(solve_over(std::move(g), material, chain.next(), cell_size));
+}
+
+void solve_next(const PointBatch& source, MoveChain& chain, float cell_size) {
+    Geodesic g = make_grid(chain.next(), cell_size);
+    const std::size_t n = g.distance.size();
+    std::vector<float> points(n * 3);
+    for (int z = 0; z < g.nz; ++z)
+        for (int y = 0; y < g.ny; ++y)
+            for (int x = 0; x < g.nx; ++x) {
+                const cfloat3 c = chain.pull_back(g.centre_of(x, y, z));
+                const std::size_t at = static_cast<std::size_t>(g.index(x, y, z)) * 3;
+                points[at] = c.x;
+                points[at + 1] = c.y;
+                points[at + 2] = c.z;
+            }
+    std::vector<float> d(n, 0.0f);
+    source(points.data(), n, d.data());
+    std::vector<bool> material(n, false);
+    for (std::size_t i = 0; i < n; ++i) material[i] = d[i] <= 0.0f;
+    chain.solved.push_back(solve_over(std::move(g), material, chain.next(), cell_size));
+}
+
+template <typename Source>
+MoveChain solve_chain(const Source& source, const TopologicalMoveSettings& settings,
+                      float cell_size) {
+    MoveChain chain(settings);
+    while (!chain.complete()) solve_next(source, chain, cell_size);
+    return chain;
 }
 
 }  // namespace
@@ -299,11 +367,11 @@ FieldVolume move_topological(const std::function<float(cfloat3)>& source,
         kernel::clength(settings.displacement) <= 0.0f)
         return FieldVolume::sample(source, region, cell_size, band);
 
-    const Geodesic geo = solve(source, settings, cell_size);
+    const MoveChain chain = solve_chain(source, settings, cell_size);
 
     FieldVolume out = FieldVolume::sample(
-        [&source, &geo, &settings](cfloat3 p) { return source(pull_back(geo, settings, p)); },
-        region, cell_size, band);
+        [&source, &chain](cfloat3 p) { return source(chain.pull_back(p)); }, region, cell_size,
+        band);
 
     // Measured, as flatten's is. A weight that varies along the surface can
     // steepen the field, and by how much depends on the form rather than on any
@@ -336,20 +404,19 @@ FieldVolume move_topological(const PointBatch& source, const math::Aabb& region,
             },
             region, cell_size, band);
 
-    const Geodesic geo = solve_batched(source, settings, cell_size);
+    const MoveChain chain = solve_chain(source, settings, cell_size);
 
     // The query positions are the PULLED-BACK points, not the lattice, so the
     // window builds them and hands the whole window over at once.
     std::vector<float> points;
     FieldVolume out = FieldVolume::sample_blocks(
-        [&source, &geo, &settings, &points](const FieldVolume::BrickGrid& grid,
-                                            std::size_t first, std::size_t count, float* block) {
+        [&source, &chain, &points](const FieldVolume::BrickGrid& grid, std::size_t first,
+                                   std::size_t count, float* block) {
             const std::size_t n = count * kBrickSamples;
             points.resize(n * 3);
             for (std::size_t s = 0; s < count; ++s)
                 for (int i = 0; i < kBrickSamples; ++i) {
-                    const cfloat3 q =
-                        pull_back(geo, settings, grid.sample_position(first + s, i));
+                    const cfloat3 q = chain.pull_back(grid.sample_position(first + s, i));
                     const std::size_t at = (s * kBrickSamples + static_cast<std::size_t>(i)) * 3;
                     points[at] = q.x;
                     points[at + 1] = q.y;
@@ -364,6 +431,15 @@ FieldVolume move_topological(const PointBatch& source, const math::Aabb& region,
     // envelope that could be written down in advance.
     out.set_sample_lipschitz(out.measure_sample_lipschitz());
     return out;
+}
+
+int topological_move_steps(const TopologicalMoveSettings& settings) {
+    if (!(settings.radius > 0.0f)) return 1;
+    const float reach = kStepReach * settings.radius;
+    const float wanted = std::ceil(kernel::clength(settings.displacement) *
+                                   math::ease_max_slope(settings.ease) / reach);
+    if (!(wanted > 1.0f)) return 1;
+    return static_cast<int>(std::min(wanted, static_cast<float>(kMaxSteps)));
 }
 
 FieldVolume move_topological(const FieldVolume& v, const TopologicalMoveSettings& settings) {
