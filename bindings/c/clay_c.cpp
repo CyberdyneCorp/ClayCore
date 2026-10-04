@@ -23361,20 +23361,25 @@ clay_result clay_multires_sculptor_apply_stroke_tx(clay_multires_sculptor* sculp
                                                    const clay_mesh_brush_desc* brush,
                                                    const clay_mask* mask,
                                                    const clay_mesh_frame* mesh_to_world,
-                                                   int32_t defer_normals, size_t* out_applied,
+                                                   int32_t defer_normals,
+                                                   clay_multires_delta* record,
+                                                   size_t* out_applied,
                                                    clay_multires_stamp_report* out_report) {
     if (out_applied) *out_applied = 0;
     if (!sculptor || !sculptor->sculptor)
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "null multires sculptor");
+    clay_result r = probe_multires_report(out_report);
+    if (r != CLAY_OK) return r;
     mesh::MultiresSurface* sp = sculptor->owner ? sculptor->owner->target() : nullptr;
     if (!sp) return fail(CLAY_ERROR_NOT_FOUND, "hierarchy is no longer in its document");
     SculptBind b;
-    clay_result r = read_sculpt_bind(*sculptor, brush, mask, mesh_to_world, defer_normals, &b);
+    r = read_sculpt_bind(*sculptor, brush, mask, mesh_to_world, defer_normals, &b);
     if (r != CLAY_OK) return r;
 
     MultiresStrokeSink* sink = nullptr;
     r = bind_stroke_sink<MultiresStrokeSink>(
-        tx, StrokeSinkKind::Multires, sculptor, {bind_key(mask), bind_key(defer_normals)},
+        tx, StrokeSinkKind::Multires, sculptor,
+        {bind_key(mask), bind_key(defer_normals), bind_key(record)},
         [&](std::unique_ptr<MultiresStrokeSink>* made) {
             *made = std::make_unique<MultiresStrokeSink>(*sculptor, tx->tx.preset(),
                                                          *sculptor->sculptor, b);
@@ -23382,10 +23387,25 @@ clay_result clay_multires_sculptor_apply_stroke_tx(clay_multires_sculptor* sculp
         },
         same_descriptors(b), &sink);
     if (r != CLAY_OK) return r;
+    // THE RECORD BEFORE THE STAMPS ARE TAKEN, as on the adaptive consumer: a
+    // refused call loses none of them, and the next accepted call applies them.
+    if (!sink->closed) {
+        r = accept_multires_record(record, *sp);
+        if (r != CLAY_OK) return r;
+    }
 
     const std::uint32_t level = sp->sculpt_level();
     StrokeBatch batch = next_batch(*sink, sink->source(tx->tx));
-    const std::size_t applied = sink->gesture.apply(batch.stamps, nullptr);
+    const std::size_t applied =
+        sink->gesture.apply(batch.stamps, base_half(record), layer_half(record));
+    // ONLY A CALL THAT TOOK STAMPS BINDS, and it took them after the check
+    // above accepted the record. A call with nothing to apply -- above all
+    // one after the close, which skips the check -- must leave the binding
+    // alone: re-binding there would stamp a record from before a level change
+    // with the hierarchy's current structure and let it replay onto a
+    // hierarchy it does not describe. An empty record needs no bind, and a
+    // non-empty one was bound by the call that captured into it.
+    if (record && !batch.stamps.empty()) record->gesture.bind(*sp);
     if (out_applied) *out_applied = applied;
     if (batch.closes) {
         sink->closed = true;

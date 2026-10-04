@@ -17,6 +17,7 @@
 
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -633,4 +634,346 @@ TEST_CASE("c multires delta: commit_into refuses a record that already holds a g
     clay_multires_sculpt_layer_stroke_destroy(stroke);
     clay_multires_delta_destroy(held);
     clay_multires_delta_destroy(fresh);
+}
+
+// -- a gesture fed by a stroke session (add-stroke-session, #670) -------------
+//
+// clay_multires_sculptor_apply_stroke_tx is the whole-path stroke delivered in
+// pieces, so its record has to be the whole-path call's record: one gesture,
+// both halves, continued across every call, and refused BEFORE the session's
+// stamps are taken so that a refusal loses none of them.
+
+namespace {
+
+// A drag across the cage in more samples than one batch, so the gesture is
+// applied over several calls.
+std::vector<clay_stroke_sample_full> session_path() {
+    std::vector<clay_stroke_sample_full> out;
+    const int n = 24;
+    for (int i = 0; i < n; ++i) {
+        const float t = static_cast<float>(i) / static_cast<float>(n - 1);
+        clay_stroke_sample_full s{};
+        s.position[0] = -0.6f + 1.2f * t;
+        s.position[2] = 0.15f * t * t;
+        s.pressure = 0.6f + 0.4f * t;
+        out.push_back(s);
+    }
+    return out;
+}
+
+std::vector<float> packed(const std::vector<clay_stroke_sample_full>& samples) {
+    std::vector<float> out;
+    for (const clay_stroke_sample_full& s : samples)
+        out.insert(out.end(), {s.position[0], s.position[1], s.position[2], s.pressure, s.tilt});
+    return out;
+}
+
+// Feed `samples` in batches of `batch`, applying after every append and once
+// after the end. Returns the stamps applied; `*writing_calls` counts the calls
+// that applied any.
+size_t feed_session(clay_multires_sculptor* sculptor, clay_stroke_tx* tx,
+                    const std::vector<clay_stroke_sample_full>& samples, size_t batch,
+                    const clay_mesh_brush_desc& brush, clay_multires_delta* record,
+                    size_t* writing_calls) {
+    size_t applied = 0;
+    *writing_calls = 0;
+    auto apply = [&] {
+        size_t n = 0;
+        clay_multires_stamp_report report{};
+        report.struct_size = sizeof(report);
+        REQUIRE(clay_multires_sculptor_apply_stroke_tx(sculptor, tx, &brush, nullptr, nullptr, 1,
+                                                       record, &n, &report) == CLAY_OK);
+        applied += n;
+        if (n > 0) ++*writing_calls;
+    };
+    for (size_t done = 0; done < samples.size(); done += batch) {
+        const size_t n = std::min(batch, samples.size() - done);
+        REQUIRE(clay_stroke_tx_append(tx, samples.data() + done, n, nullptr, nullptr) == CLAY_OK);
+        apply();
+    }
+    REQUIRE(clay_stroke_tx_end(tx) == CLAY_OK);
+    apply();
+    return applied;
+}
+
+clay_stroke_tx* session(const clay_stroke_preset& preset) {
+    clay_stroke_tx* tx = nullptr;
+    REQUIRE(clay_stroke_tx_begin(&preset, &tx) == CLAY_OK);
+    return tx;
+}
+
+void check_same_record(const clay_multires_delta* a, const clay_multires_delta* b) {
+    const clay_multires_delta_stats sa = stats_of(a), sb = stats_of(b);
+    CHECK(sa.detail_entries == sb.detail_entries);
+    CHECK(sa.cage_entries == sb.cage_entries);
+    CHECK(sa.layer_detail_entries == sb.layer_detail_entries);
+    CHECK(sa.layer_mask_entries == sb.layer_mask_entries);
+    CHECK(sa.encoded_bytes == sb.encoded_bytes);
+    CHECK(levels_of(a) == levels_of(b));
+}
+
+}  // namespace
+
+TEST_CASE(
+    "c multires delta: a session-fed stroke records the whole-path "
+    "stroke's record") {
+    const clay_stroke_preset preset = stroke_preset();
+    const clay_mesh_brush_desc brush = draw_at(0.0f, 0.0f, 0.4f, 0.3f);
+    const std::vector<clay_stroke_sample_full> samples = session_path();
+    const std::vector<float> flat = packed(samples);
+    for (bool with_pass : {true, false}) {
+        CAPTURE(with_pass);
+        Fixture whole(6, 2), pieces(6, 2);
+        const uint64_t layer = with_pass ? whole.add_layer() : CLAY_NO_SCULPT_LAYER;
+        if (with_pass) REQUIRE(pieces.add_layer() == layer);
+        const Snapshot before = snapshot(pieces.surface);
+
+        clay_multires_delta* expected = clay_multires_delta_create();
+        size_t whole_applied = 0;
+        REQUIRE(clay_multires_sculptor_apply_stroke_recorded(
+                    whole.sculptor, flat.data(), samples.size(), &preset, &brush, nullptr, nullptr,
+                    1, expected, &whole_applied, nullptr) == CLAY_OK);
+        REQUIRE(whole_applied > 4);
+
+        clay_multires_delta* record = clay_multires_delta_create();
+        clay_stroke_tx* tx = session(preset);
+        size_t writing_calls = 0;
+        const size_t applied =
+            feed_session(pieces.sculptor, tx, samples, 4, brush, record, &writing_calls);
+        clay_stroke_tx_destroy(tx);
+        CHECK(applied == whole_applied);
+        // The record is CONTINUED: several calls wrote into it, and it is one
+        // gesture rather than the last call's.
+        CHECK(writing_calls > 2);
+        const Snapshot after = snapshot(pieces.surface);
+        CHECK(after == snapshot(whole.surface));
+
+        const clay_multires_delta_stats s = stats_of(record);
+        CHECK(s.sculpt_layer == layer);
+        if (with_pass)
+            CHECK(s.layer_detail_entries > 0);
+        else
+            CHECK(s.detail_entries > 0);
+        check_same_record(record, expected);
+
+        // ONE revert takes the whole gesture back, on every level, bit for bit.
+        check_round_trip(pieces.surface, record, before, after);
+        clay_multires_delta_destroy(record);
+        clay_multires_delta_destroy(expected);
+    }
+}
+
+TEST_CASE(
+    "c multires delta: a session with a NULL record records nothing and "
+    "stamps the same") {
+    const clay_stroke_preset preset = stroke_preset();
+    const clay_mesh_brush_desc brush = draw_at(0.0f, 0.0f, 0.4f, 0.3f);
+    const std::vector<clay_stroke_sample_full> samples = session_path();
+    const std::vector<float> flat = packed(samples);
+    Fixture plain(6, 2), unrecorded(6, 2), recorded(6, 2);
+    plain.add_layer();
+    unrecorded.add_layer();
+    recorded.add_layer();
+    REQUIRE(clay_multires_sculptor_apply_stroke(plain.sculptor, flat.data(), samples.size(),
+                                                &preset, &brush, nullptr, nullptr, 1, nullptr,
+                                                nullptr) == CLAY_OK);
+    size_t calls = 0;
+    clay_stroke_tx* tx = session(preset);
+    feed_session(unrecorded.sculptor, tx, samples, 4, brush, nullptr, &calls);
+    clay_stroke_tx_destroy(tx);
+    clay_multires_delta* record = clay_multires_delta_create();
+    tx = session(preset);
+    feed_session(recorded.sculptor, tx, samples, 4, brush, record, &calls);
+    clay_stroke_tx_destroy(tx);
+    CHECK(snapshot(unrecorded.surface) == snapshot(plain.surface));
+    CHECK(snapshot(recorded.surface) == snapshot(plain.surface));
+    clay_multires_delta_destroy(record);
+}
+
+TEST_CASE("c multires delta: a session's record is part of its binding") {
+    // Recorded or not, and into which record, is fixed by the first call, as
+    // it is for the adaptive consumer: half a gesture in one record and half
+    // in another would be two undo steps that each restore a torn stroke.
+    const clay_stroke_preset preset = stroke_preset();
+    const clay_mesh_brush_desc brush = draw_at(0.0f, 0.0f, 0.4f, 0.3f);
+    const std::vector<clay_stroke_sample_full> samples = session_path();
+    Fixture f(6, 2);
+    f.add_layer();
+    clay_multires_delta* record = clay_multires_delta_create();
+    clay_multires_delta* other = clay_multires_delta_create();
+    clay_stroke_tx* tx = session(preset);
+    REQUIRE(clay_stroke_tx_append(tx, samples.data(), 12, nullptr, nullptr) == CLAY_OK);
+    size_t n = 0;
+    REQUIRE(clay_multires_sculptor_apply_stroke_tx(f.sculptor, tx, &brush, nullptr, nullptr, 1,
+                                                   record, &n, nullptr) == CLAY_OK);
+    REQUIRE(n > 0);
+    REQUIRE(clay_stroke_tx_append(tx, samples.data() + 12, 12, nullptr, nullptr) == CLAY_OK);
+    const Snapshot held = snapshot(f.surface);
+    for (clay_multires_delta* wrong : {other, static_cast<clay_multires_delta*>(nullptr)}) {
+        n = 7;
+        CHECK(clay_multires_sculptor_apply_stroke_tx(f.sculptor, tx, &brush, nullptr, nullptr, 1,
+                                                     wrong, &n,
+                                                     nullptr) == CLAY_ERROR_INVALID_ARGUMENT);
+        CHECK(n == 0);
+    }
+    CHECK(snapshot(f.surface) == held);
+    CHECK(stats_of(other).encoded_bytes == 40);
+    REQUIRE(clay_multires_sculptor_apply_stroke_tx(f.sculptor, tx, &brush, nullptr, nullptr, 1,
+                                                   record, &n, nullptr) == CLAY_OK);
+    CHECK(n > 0);
+    clay_stroke_tx_destroy(tx);
+    clay_multires_delta_destroy(other);
+    clay_multires_delta_destroy(record);
+}
+
+TEST_CASE(
+    "c multires delta: a refused session call loses none of the "
+    "session's stamps") {
+    // The record is checked BEFORE the stamps are taken. Mid-gesture the host
+    // makes another pass active: continuing the record would put that pass's
+    // coefficients under the first pass's id, so the call is refused with
+    // CLAY_ERROR_SNAPSHOT_MISMATCH and stamps nothing. Once the first pass is
+    // active again the held stamps apply, and the gesture ends exactly where
+    // the whole-path stroke does, as one record. A malformed report is refused
+    // before the stamps too.
+    const clay_stroke_preset preset = stroke_preset();
+    const clay_mesh_brush_desc brush = draw_at(0.0f, 0.0f, 0.4f, 0.3f);
+    const std::vector<clay_stroke_sample_full> samples = session_path();
+    const std::vector<float> flat = packed(samples);
+
+    Fixture whole(6, 2), f(6, 2);
+    int32_t err = -1;
+    const uint64_t first = f.add_layer();
+    const uint64_t second = f.add_layer();
+    REQUIRE(whole.add_layer() == first);
+    REQUIRE(whole.add_layer() == second);
+    REQUIRE(clay_multires_set_active_sculpt_layer(f.surface, first, &err) == CLAY_OK);
+    REQUIRE(clay_multires_set_active_sculpt_layer(whole.surface, first, &err) == CLAY_OK);
+    const Snapshot before = snapshot(f.surface);
+    clay_multires_delta* expected = clay_multires_delta_create();
+    REQUIRE(clay_multires_sculptor_apply_stroke_recorded(
+                whole.sculptor, flat.data(), samples.size(), &preset, &brush, nullptr, nullptr, 1,
+                expected, nullptr, nullptr) == CLAY_OK);
+
+    clay_multires_delta* record = clay_multires_delta_create();
+    clay_stroke_tx* tx = session(preset);
+    REQUIRE(clay_stroke_tx_append(tx, samples.data(), 12, nullptr, nullptr) == CLAY_OK);
+    size_t n = 0;
+    REQUIRE(clay_multires_sculptor_apply_stroke_tx(f.sculptor, tx, &brush, nullptr, nullptr, 1,
+                                                   record, &n, nullptr) == CLAY_OK);
+    REQUIRE(n > 0);
+    REQUIRE(stats_of(record).sculpt_layer == first);
+    REQUIRE(clay_stroke_tx_append(tx, samples.data() + 12, 12, nullptr, nullptr) == CLAY_OK);
+    REQUIRE(clay_stroke_tx_end(tx) == CLAY_OK);
+
+    REQUIRE(clay_multires_set_active_sculpt_layer(f.surface, second, &err) == CLAY_OK);
+    const Snapshot held = snapshot(f.surface);
+    n = 7;
+    CHECK(clay_multires_sculptor_apply_stroke_tx(f.sculptor, tx, &brush, nullptr, nullptr, 1,
+                                                 record, &n,
+                                                 nullptr) == CLAY_ERROR_SNAPSHOT_MISMATCH);
+    CHECK(n == 0);
+    CHECK(snapshot(f.surface) == held);
+    CHECK(stats_of(record).sculpt_layer == first);
+
+    REQUIRE(clay_multires_set_active_sculpt_layer(f.surface, first, &err) == CLAY_OK);
+    clay_multires_stamp_report broken{};
+    broken.struct_size = 3;
+    n = 7;
+    CHECK(clay_multires_sculptor_apply_stroke_tx(f.sculptor, tx, &brush, nullptr, nullptr, 1,
+                                                 record, &n,
+                                                 &broken) == CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(n == 0);
+    CHECK(snapshot(f.surface) == held);
+
+    REQUIRE(clay_multires_sculptor_apply_stroke_tx(f.sculptor, tx, &brush, nullptr, nullptr, 1,
+                                                   record, &n, nullptr) == CLAY_OK);
+    CHECK(n > 0);
+    clay_stroke_tx_destroy(tx);
+    const Snapshot after = snapshot(f.surface);
+    CHECK(after == snapshot(whole.surface));
+    check_same_record(record, expected);
+    check_round_trip(f.surface, record, before, after);
+    clay_multires_delta_destroy(record);
+    clay_multires_delta_destroy(expected);
+}
+
+TEST_CASE("c multires delta: a pass made active mid-session joins a base-only record") {
+    // The record holds only base entries when the host activates a pass; the
+    // rest of the gesture writes that pass. The two halves are separate
+    // storage, so the call is accepted and one revert takes back both.
+    const clay_stroke_preset preset = stroke_preset();
+    const clay_mesh_brush_desc brush = draw_at(0.0f, 0.0f, 0.4f, 0.3f);
+    const std::vector<clay_stroke_sample_full> samples = session_path();
+    Fixture f(6, 2);
+    const Snapshot before = snapshot(f.surface);
+    clay_multires_delta* record = clay_multires_delta_create();
+    clay_stroke_tx* tx = session(preset);
+    REQUIRE(clay_stroke_tx_append(tx, samples.data(), 12, nullptr, nullptr) == CLAY_OK);
+    size_t n = 0;
+    REQUIRE(clay_multires_sculptor_apply_stroke_tx(f.sculptor, tx, &brush, nullptr, nullptr, 1,
+                                                   record, &n, nullptr) == CLAY_OK);
+    REQUIRE(n > 0);
+    REQUIRE(stats_of(record).detail_entries > 0);
+    REQUIRE(stats_of(record).layer_detail_entries == 0);
+
+    const uint64_t layer = f.add_layer();
+    REQUIRE(clay_stroke_tx_append(tx, samples.data() + 12, 12, nullptr, nullptr) == CLAY_OK);
+    REQUIRE(clay_stroke_tx_end(tx) == CLAY_OK);
+    REQUIRE(clay_multires_sculptor_apply_stroke_tx(f.sculptor, tx, &brush, nullptr, nullptr, 1,
+                                                   record, &n, nullptr) == CLAY_OK);
+    CHECK(n > 0);
+    clay_stroke_tx_destroy(tx);
+    const clay_multires_delta_stats s = stats_of(record);
+    CHECK(s.detail_entries > 0);
+    CHECK(s.layer_detail_entries > 0);
+    CHECK(s.sculpt_layer == layer);
+    // The added pass is empty in `before` and still exists, so a revert puts
+    // its coefficients back to zero and the base back as it was.
+    const Snapshot after = snapshot(f.surface);
+    REQUIRE(clay_multires_delta_revert(record, f.surface) == CLAY_OK);
+    const Snapshot reverted = snapshot(f.surface);
+    CHECK(reverted.detail == before.detail);
+    CHECK(reverted.positions == before.positions);
+    REQUIRE(clay_multires_delta_apply(record, f.surface) == CLAY_OK);
+    CHECK(snapshot(f.surface) == after);
+    clay_multires_delta_destroy(record);
+}
+
+TEST_CASE("c multires delta: a call after a session closes does not re-bind its record") {
+    // Calling after every append is the intended rhythm, so a host can make a
+    // call after the gesture closed: it applies nothing and returns CLAY_OK.
+    // It must not touch the record either. Re-binding there would stamp the
+    // record with the hierarchy's CURRENT structure, and a record from before
+    // a level was removed and added back would then be replayed onto a
+    // hierarchy it does not describe.
+    const clay_stroke_preset preset = stroke_preset();
+    const clay_mesh_brush_desc brush = draw_at(0.0f, 0.0f, 0.4f, 0.3f);
+    const std::vector<clay_stroke_sample_full> samples = session_path();
+    for (bool lagging_call : {false, true}) {
+        CAPTURE(lagging_call);
+        Fixture f(6, 2);
+        clay_multires_delta* record = clay_multires_delta_create();
+        clay_stroke_tx* tx = session(preset);
+        size_t calls = 0;
+        REQUIRE(feed_session(f.sculptor, tx, samples, 4, brush, record, &calls) > 0);
+        REQUIRE(clay_multires_delta_revert(record, f.surface) == CLAY_OK);
+
+        int32_t err = -1;
+        REQUIRE(clay_multires_remove_highest_level(f.surface, &err) == CLAY_OK);
+        REQUIRE(clay_multires_add_level(f.surface, nullptr, &err) == CLAY_OK);
+        if (lagging_call) {
+            size_t n = 7;
+            REQUIRE(clay_multires_sculptor_apply_stroke_tx(f.sculptor, tx, &brush, nullptr,
+                                                           nullptr, 1, record, &n,
+                                                           nullptr) == CLAY_OK);
+            CHECK(n == 0);
+        }
+        const Snapshot relevelled = snapshot(f.surface);
+        CHECK(clay_multires_delta_apply(record, f.surface) == CLAY_ERROR_SNAPSHOT_MISMATCH);
+        CHECK(clay_multires_delta_revert(record, f.surface) == CLAY_ERROR_SNAPSHOT_MISMATCH);
+        CHECK(snapshot(f.surface) == relevelled);
+        clay_stroke_tx_destroy(tx);
+        clay_multires_delta_destroy(record);
+    }
 }
