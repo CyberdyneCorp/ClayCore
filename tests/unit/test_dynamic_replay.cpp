@@ -25,6 +25,7 @@
 #include "clay/mesh/dynamic_sculpt.h"
 #include "clay/mesh/dynamic_validate.h"
 #include "clay/mesh/topology_delta.h"
+#include "dynamic_index_audit.h"
 
 using namespace clay;
 using namespace clay::kernel;
@@ -36,6 +37,8 @@ using mesh::RecordedGesture;
 using mesh::ReplayDirection;
 using mesh::ReplayResult;
 using mesh::TopologyDelta;
+using clay_test::index_coverage;
+using clay_test::IndexCoverage;
 
 namespace {
 
@@ -169,28 +172,6 @@ bool same_export(const Mesh& a, const Mesh& b) {
         if (!same_bits(a.positions[i], b.positions[i])) return false;
     if (a.indices != b.indices) return false;
     return normal_differences(a, b) == 0;
-}
-
-// Every live face is in exactly one chunk, and the index holds nothing else.
-struct IndexCoverage {
-    std::size_t live_missing = 0;
-    std::size_t dead_indexed = 0;
-};
-
-[[maybe_unused]] IndexCoverage index_coverage(const DynamicSculptor& sculptor) {
-    IndexCoverage out;
-    const DynamicSurface& s = sculptor.surface();
-    const mesh::DynamicBvh& bvh = sculptor.bvh();
-    s.faces().for_each_live([&](mesh::FaceId f, const mesh::DynamicFace&) {
-        if (bvh.leaf_of(f) == mesh::DynamicBvh::kNoLeaf) ++out.live_missing;
-    });
-    for (std::size_t i = 0; i < bvh.leaf_count(); ++i) {
-        const mesh::SurfaceLeaf* leaf = bvh.leaf(static_cast<std::uint32_t>(i));
-        if (!leaf) continue;
-        for (mesh::FaceId f : leaf->faces)
-            if (!s.live(f)) ++out.dead_indexed;
-    }
-    return out;
 }
 
 std::size_t run_recorded(DynamicSculptor& sculptor, const StrokeShape& shape,

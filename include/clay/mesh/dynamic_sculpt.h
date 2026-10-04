@@ -134,6 +134,20 @@ class DynamicSculptor {
     // compacts, because compacting renumbers the handles records are keyed on).
     ReplayResult replay(const RecordedGesture& record, ReplayDirection direction);
 
+    // The RESTORE and the REINDEX of `replay`, on a bare delta, with NO GUARD.
+    // Returns what the delta's own `revert` / `apply` returns.
+    //
+    // For a caller that keeps its own ordering and holds no marks --
+    // `session::History`, whose undo stack is the LIFO a record's guard would
+    // otherwise check. Replaying a delta onto a state it does not describe
+    // corrupts the surface exactly as `TopologyDelta::revert` would; this adds
+    // no protection against that, only the index and dirty-chunk upkeep.
+    //
+    // The surface mark is NOT set (there is no record to take it from); the
+    // delta's revision bumps give the surface a fresh epoch, so a
+    // `RecordedGesture` captured before this call is refused afterwards.
+    bool replay_delta(const TopologyDelta& delta, ReplayDirection direction);
+
     // Where this sculptor publishes the peaks only it can see — the topology
     // operations one stamp ran, and the adaptive surface's workset. Borrowed
     // and never owned; null is the default.
