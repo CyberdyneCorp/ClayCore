@@ -10081,16 +10081,13 @@ clay_result clay_layer_selection_bounds(const clay_document* doc, clay_layer_id 
                         out_max, out_has_bounds);
 }
 
-// The mesher, over whatever tape the caller has. Shared by the whole-document
-// form and the one-layer form so the two cannot drift on the resolution
-// ceiling, the hidden-group drop or the decimation.
-clay_result mesh_tape(const clay_document* doc, const scene::Tape& tape,
-                      const clay_mesh_params& p, const char* empty_what, clay_mesh** out_mesh) {
-    clay_result r = CLAY_OK;
-    if (tape.empty()) return fail(CLAY_ERROR_INVALID_ARGUMENT, empty_what);
-    math::Aabb region = tape.bounds;
-    if (region.empty() || region.is_infinite())
-        return fail(CLAY_ERROR_INVALID_ARGUMENT, "unbounded scene");
+namespace {
+
+// The voxel size a meshing call will sample at: the caller's, or the region's
+// longest side over the resolution. Refused when it is not a size or would
+// price a grid past the mesher's ceiling.
+clay_result price_mesh_voxel(const math::Aabb& region, const clay_mesh_params& p,
+                             float* out_voxel) {
     float voxel = p.voxel_size;
     if (voxel <= 0) {
         int res = p.resolution > 0 ? p.resolution : 128;
@@ -10115,6 +10112,37 @@ clay_result mesh_tape(const clay_document* doc, const scene::Tape& tape,
                         "the requested resolution needs more than " +
                             std::to_string(mesh::kMaxGridSamples) + " grid samples");
     }
+    *out_voxel = voxel;
+    return CLAY_OK;
+}
+
+}  // namespace
+
+// What an empty field means to the caller. The standalone meshing calls refuse
+// it: they were asked for a surface and there is none. The combined export
+// does not, when there are mesh layers beside the field: there an empty field
+// contributes nothing, and *out_mesh comes back null with CLAY_OK.
+enum class EmptyField { Refuse, ContributesNothing };
+
+// The mesher, over whatever tape the caller has. Shared by the whole-document
+// form, the one-layer form and the combined export so they cannot drift on the
+// resolution ceiling, the hidden-group drop or the decimation.
+clay_result mesh_tape(const clay_document* doc, const scene::Tape& tape,
+                      const clay_mesh_params& p, const char* empty_what, clay_mesh** out_mesh,
+                      EmptyField empty = EmptyField::Refuse) {
+    clay_result r = CLAY_OK;
+    const bool empty_ok = empty == EmptyField::ContributesNothing;
+    if (tape.empty() && empty_ok) {
+        *out_mesh = nullptr;
+        return CLAY_OK;
+    }
+    if (tape.empty()) return fail(CLAY_ERROR_INVALID_ARGUMENT, empty_what);
+    math::Aabb region = tape.bounds;
+    if (region.empty() || region.is_infinite())
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "unbounded scene");
+    float voxel = 0.0f;
+    r = price_mesh_voxel(region, p, &voxel);
+    if (r != CLAY_OK) return r;
     mesh::Mesh m;
     r = mesh_with(p.mesher, p.experimental != 0, tape, region, voxel, &m);
     if (r != CLAY_OK) return r;
@@ -10122,6 +10150,11 @@ clay_result mesh_tape(const clay_document* doc, const scene::Tape& tape,
     // nothing is hidden, so a document that never named a region meshes to the
     // bytes it always did.
     if (doc->doc.groups) voxel::drop_hidden(m, *doc->doc.groups);
+    // Every surface group hidden is the same "nothing" as an empty tape.
+    if (m.empty() && empty_ok) {
+        *out_mesh = nullptr;
+        return CLAY_OK;
+    }
     if (m.empty()) return fail(CLAY_ERROR_BACKEND, "meshing produced no triangles");
     // The report is taken on EVERY decimated call rather than on request: a
     // caller cannot ask for it in advance -- clay_mesh_params predates it and
@@ -11740,6 +11773,45 @@ mesh::Mesh concat_meshes(const std::vector<const mesh::Mesh*>& parts) {
     return out;
 }
 
+// A mesh layer's triangles under its own layer transform, scale axes included.
+mesh::Mesh place_mesh_layer(const scene::Layer& layer, mesh::Mesh m) {
+    const kernel::cfloat3 axes = layer.scale_axes;
+    for (kernel::cfloat3& v : m.positions)
+        v = layer.xform.apply(kernel::cf3(v.x * axes.x, v.y * axes.y, v.z * axes.z));
+    // Normals through the INVERSE TRANSPOSE of the linear part, which for
+    // rotation-times-diagonal is the rotation times the reciprocal scale —
+    // the same rule and the same code shape clay_mesh_transform_nonuniform
+    // states. Rotating a normal is right for a similarity and wrong for a
+    // squash: it tilts every normal off the surface and takes the shading
+    // with it.
+    const bool squashed = scene::layer_is_squashed(layer);
+    for (kernel::cfloat3& n : m.normals) {
+        if (!squashed) {
+            n = layer.xform.rotation.rotate(n);
+            continue;
+        }
+        kernel::cfloat3 t = layer.xform.rotation.rotate(
+            kernel::cf3(n.x / axes.x, n.y / axes.y, n.z / axes.z));
+        const float len2 = kernel::cdot2(t);
+        n = len2 > 0.0f ? t / kernel::csqrt(len2) : n;
+    }
+    return m;
+}
+
+// Every VISIBLE mesh layer, placed, in stack order. Hidden means contributes
+// nothing. Ghost and lock deliberately do NOT filter here: neither changes what
+// a document evaluates to, so neither may change what it exports.
+std::vector<mesh::Mesh> place_visible_mesh_layers(const clay_document& doc) {
+    std::vector<mesh::Mesh> placed;
+    for (const scene::Layer& layer : doc.doc.document.layers) {
+        if (layer.kind != scene::LayerKind::Mesh || !layer.visible) continue;
+        auto it = doc.doc.mesh_layers.find(layer.id);
+        if (it == doc.doc.mesh_layers.end()) continue;
+        placed.push_back(place_mesh_layer(layer, it->second));
+    }
+    return placed;
+}
+
 }  // namespace
 
 extern "C" {
@@ -11844,54 +11916,27 @@ clay_result clay_document_mesh_combined(const clay_document* doc,
     if (!doc || !params || !out_mesh) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
     *out_mesh = nullptr;
 
-    // The field first, through the untouched call, so a document with no
-    // visible mesh layer gets exactly what clay_document_mesh gives.
-    clay_mesh* field = nullptr;
-    clay_result r = clay_document_mesh(doc, params, &field);
+    // The mesh layers first, because whether there are any decides what an
+    // empty field means. With none visible this is exactly clay_document_mesh,
+    // its refusals included.
+    std::vector<mesh::Mesh> placed = place_visible_mesh_layers(*doc);
+    if (placed.empty()) return clay_document_mesh(doc, params, out_mesh);
+
+    // With some, an empty field -- every SDF layer hidden, none at all, or
+    // every surface group hidden -- contributes nothing rather than vetoing the
+    // export of the layers beside it (#662).
+    clay_mesh_params p;
+    clay_result r = read_desc(params, kMeshParamsOriginal, &p);
     if (r != CLAY_OK) return r;
-
-    std::vector<mesh::Mesh> placed;
-    for (const scene::Layer& layer : doc->doc.document.layers) {
-        if (layer.kind != scene::LayerKind::Mesh) continue;
-        // Hidden means contributes nothing. Ghost and lock deliberately do
-        // NOT filter here: neither changes what a document evaluates to, so
-        // neither may change what it exports.
-        if (!layer.visible) continue;
-        auto it = doc->doc.mesh_layers.find(layer.id);
-        if (it == doc->doc.mesh_layers.end()) continue;
-
-        mesh::Mesh m = it->second;
-        const kernel::cfloat3 axes = layer.scale_axes;
-        for (kernel::cfloat3& v : m.positions)
-            v = layer.xform.apply(kernel::cf3(v.x * axes.x, v.y * axes.y, v.z * axes.z));
-        // Normals through the INVERSE TRANSPOSE of the linear part, which for
-        // rotation-times-diagonal is the rotation times the reciprocal scale —
-        // the same rule and the same code shape clay_mesh_transform_nonuniform
-        // states. Rotating a normal is right for a similarity and wrong for a
-        // squash: it tilts every normal off the surface and takes the shading
-        // with it.
-        const bool squashed = scene::layer_is_squashed(layer);
-        for (kernel::cfloat3& n : m.normals) {
-            if (!squashed) {
-                n = layer.xform.rotation.rotate(n);
-                continue;
-            }
-            kernel::cfloat3 t = layer.xform.rotation.rotate(
-                kernel::cf3(n.x / axes.x, n.y / axes.y, n.z / axes.z));
-            const float len2 = kernel::cdot2(t);
-            n = len2 > 0.0f ? t / kernel::csqrt(len2) : n;
-        }
-        placed.push_back(std::move(m));
-    }
-
-    if (placed.empty()) {
-        *out_mesh = field;
-        return CLAY_OK;
-    }
+    std::shared_ptr<const scene::Tape> tape_ref = doc->tape();
+    clay_mesh* field = nullptr;
+    r = mesh_tape(doc, *tape_ref, p, "empty document", &field,
+                  EmptyField::ContributesNothing);
+    if (r != CLAY_OK) return r;
 
     std::vector<const mesh::Mesh*> parts;
     parts.reserve(placed.size() + 1);
-    parts.push_back(&field->data);
+    if (field) parts.push_back(&field->data);
     for (const mesh::Mesh& m : placed) parts.push_back(&m);
 
     auto* handle = new clay_mesh();

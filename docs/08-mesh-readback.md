@@ -122,7 +122,7 @@ form at three target counts, with requested against actual printed for each.
 | | Python | C | C++ |
 |---|---|---|---|
 | mesh the field | `doc.mesh(...)` | `clay_document_mesh` | `mesh::mesh_tape(compile_document(doc), …)` |
-| field + visible mesh layers | — | `clay_document_mesh_combined` | compose by hand |
+| field + visible mesh layers (an empty field contributes nothing) | — | `clay_document_mesh_combined` | compose by hand |
 | load a file (.obj/.ply/.fbx) | `clay.load_mesh(path)` | `clay_mesh_load` | `io::load_obj_file` / `load_ply_file` / `load_fbx_file` |
 | a mesh layer's triangles | `doc.mesh_layer(name)` | `clay_document_mesh_layer`, `clay_document_mesh_layer_by_id` | `io::ClaySpaceDoc::mesh_layers` |
 | a voxel grid | `grid.mesh()` | `clay_voxel_mesh` | `VoxelGrid::mesh_greedy()` |

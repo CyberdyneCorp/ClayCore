@@ -59,7 +59,7 @@ std::string temp_path(const char* name) {
 
 // A document with something to evaluate, so "the tape is unchanged" is a
 // claim about a document that has a tape.
-void add_sphere(clay_document* doc) {
+clay_layer_id add_sphere(clay_document* doc) {
     clay_layer_id layer = 0;
     REQUIRE(clay_add_sdf_layer(doc, "body", &layer) == CLAY_OK);
     clay_item_desc item;
@@ -70,6 +70,7 @@ void add_sphere(clay_document* doc) {
     item.scale = 1.0f;
     item.rotation[3] = 1.0f;
     REQUIRE(clay_add_item(doc, layer, &item, nullptr) == CLAY_OK);
+    return layer;
 }
 
 }  // namespace
@@ -478,6 +479,110 @@ TEST_CASE("c mesh combine: a sculpt exports beside its reference model") {
 
     clay_mesh_destroy(field_only);
     clay_mesh_destroy(combined);
+}
+
+// #662: the combined export meshed the field first and returned its refusal,
+// so a document whose only visible geometry is mesh layers could not be
+// exported at all. An empty field contributes nothing; it does not veto the
+// layers beside it.
+namespace {
+
+clay_layer_id add_tetrahedron_at_x5(clay_document* doc) {
+    clay_mesh* tet = tetrahedron();
+    clay_mesh_layer_desc desc = layer_desc("reference");
+    clay_layer_id layer = 0;
+    REQUIRE(clay_document_add_mesh_layer(doc, tet, &desc, &layer, nullptr) == CLAY_OK);
+    clay_mesh_destroy(tet);
+    const float position[3] = {5.0f, 0.0f, 0.0f};
+    const float axis[3] = {0.0f, 1.0f, 0.0f};
+    REQUIRE(clay_document_set_layer_transform(doc, layer, position, axis, 0.0f, 1.0f) ==
+            CLAY_OK);
+    return layer;
+}
+
+clay_mesh_params combined_params() {
+    clay_mesh_params params;
+    std::memset(&params, 0, sizeof params);
+    params.struct_size = static_cast<std::uint32_t>(sizeof params);
+    params.resolution = 24;
+    return params;
+}
+
+// The combined result is the tetrahedron alone, under its layer transform.
+void check_is_placed_tetrahedron(const clay_document* doc) {
+    const clay_mesh_params params = combined_params();
+    clay_mesh* combined = nullptr;
+    REQUIRE(clay_document_mesh_combined(doc, &params, &combined) == CLAY_OK);
+    REQUIRE(combined != nullptr);
+    CHECK(clay_mesh_vertex_count(combined) == 4);
+    CHECK(clay_mesh_index_count(combined) == 12);
+    float lo[3], hi[3];
+    REQUIRE(clay_mesh_bounds(combined, lo, hi) == CLAY_OK);
+    CHECK(lo[0] > 4.0f);
+    CHECK(hi[0] > 4.0f);
+    clay_mesh_destroy(combined);
+}
+
+}  // namespace
+
+TEST_CASE("c mesh combine: a hidden SDF layer leaves the mesh layers to export") {
+    Doc d;
+    const clay_layer_id sdf = add_sphere(d.doc);
+    add_tetrahedron_at_x5(d.doc);
+    REQUIRE(clay_document_set_layer_visible(d.doc, sdf, 0) == CLAY_OK);
+
+    // the field alone is still refused, exactly as before
+    const clay_mesh_params params = combined_params();
+    clay_mesh* field = nullptr;
+    CHECK(clay_document_mesh(d.doc, &params, &field) == CLAY_ERROR_INVALID_ARGUMENT);
+
+    check_is_placed_tetrahedron(d.doc);
+}
+
+TEST_CASE("c mesh combine: a document with no SDF item exports its mesh layer") {
+    Doc d;
+    add_tetrahedron_at_x5(d.doc);
+    check_is_placed_tetrahedron(d.doc);
+}
+
+TEST_CASE("c mesh combine: a field that meshes to nothing contributes nothing") {
+    // Every surface group hidden: the tape is not empty, but the mesher's
+    // output is filtered to no triangles, which clay_document_mesh refuses.
+    Doc d;
+    add_sphere(d.doc);
+    add_tetrahedron_at_x5(d.doc);
+    clay_groups* groups = nullptr;
+    REQUIRE(clay_document_groups(d.doc, 0.05f, &groups) == CLAY_OK);
+    const float lo[3] = {-1.0f, -1.0f, -1.0f}, hi[3] = {1.0f, 1.0f, 1.0f};
+    REQUIRE(clay_groups_fill(groups, lo, hi, 1) == CLAY_OK);
+    REQUIRE(clay_groups_set_visible(groups, 1, 0) == CLAY_OK);
+    clay_groups_destroy(groups);
+
+    const clay_mesh_params params = combined_params();
+    clay_mesh* field = nullptr;
+    CHECK(clay_document_mesh(d.doc, &params, &field) == CLAY_ERROR_BACKEND);
+
+    check_is_placed_tetrahedron(d.doc);
+}
+
+TEST_CASE("c mesh combine: nothing visible at all is still refused like the field call") {
+    Doc d;
+    const clay_layer_id mesh_layer = add_tetrahedron_at_x5(d.doc);
+    REQUIRE(clay_document_set_layer_visible(d.doc, mesh_layer, 0) == CLAY_OK);
+
+    const clay_mesh_params params = combined_params();
+    clay_mesh* field = nullptr;
+    CHECK(clay_document_mesh(d.doc, &params, &field) == CLAY_ERROR_INVALID_ARGUMENT);
+    clay_mesh* out = reinterpret_cast<clay_mesh*>(0x1);
+    CHECK(clay_document_mesh_combined(d.doc, &params, &out) == CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(out == nullptr);
+
+    // and a malformed parameter block is refused even when a mesh layer shows
+    REQUIRE(clay_document_set_layer_visible(d.doc, mesh_layer, 1) == CLAY_OK);
+    clay_mesh_params bad = params;
+    bad.struct_size = 0;
+    CHECK(clay_document_mesh_combined(d.doc, &bad, &out) == CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(out == nullptr);
 }
 
 // #365: the id-addressed route back to a mesh layer's geometry. A reopened
