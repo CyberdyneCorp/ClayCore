@@ -2028,6 +2028,98 @@ bool dilate_by_ancestors(const SdfContent& content, NodeId id, const Layer& laye
     return false;
 }
 
+// How far ONE combine can carry a changed running value toward the band: its
+// full blend support (a hard profile carries nothing, `min()` being exact), a
+// feathered replace's band, an extended mode's own support, and the seam its
+// symmetry copies are pre-combined through -- the terms `cull_pad_terms`
+// counts, taken at full support, plus what `chain_blend_support` says an
+// extended mode reaches (relief and groove reach their rounding, not k).
+float combine_carry(const Node& n, const Layer& layer) {
+    if (!n.visible) return 0.0f;
+    float carry = cull_pad_terms(n, layer).support_total();
+    if (n.is_group) return kernel::cmax(carry, group_blend_support(n, layer));
+    if (!op_is_extended(n.op)) return carry;
+    const float round_world = n.rounding * placed_distance_scale(layer, n);
+    return kernel::cmax(carry, chain_blend_support(n.op, n.blend, round_world));
+}
+
+// The carry of every combine that reads a running value left by what precedes
+// `node` in its chain: the node's own combine and, for an INLINE group, its
+// children's, which continue the outer chain (tape_build.cpp, compile_group).
+// Any other group's children start a chain of their own and read nothing of
+// ours -- only the group's own combine does. False on a tree that does not
+// terminate within the node count, as every walk here is bounded.
+bool add_chain_carry(const SdfContent& content, const Node& node, const Layer& layer,
+                     float* sum) {
+    *sum += combine_carry(node, layer);
+    if (!node.is_group || node.op != Op::None || !node.visible) return true;
+    std::vector<NodeId> open(node.children.begin(), node.children.end());
+    for (std::size_t step = 0; !open.empty(); ++step) {
+        if (step > content.nodes().size()) return false;
+        const Node* n = content.find(open.back());
+        open.pop_back();
+        if (!n) continue;
+        *sum += combine_carry(*n, layer);
+        if (n->is_group && n->op == Op::None && n->visible)
+            open.insert(open.end(), n->children.begin(), n->children.end());
+    }
+    return true;
+}
+
+// THE CHAIN PAD AN INTERSECT'S SURFACE DELTA NEEDS (#666): the SUM of the
+// carries of the combines that follow the operand -- its later siblings at
+// every level of the ancestor walk, through inline groups. The enclosing
+// groups' own combines are the rest of that sequence, and dilate_by_ancestors
+// adds their supports.
+//
+// NOTHING AHEAD OF THE OPERAND IS A TERM. Those combines built the `acc` its
+// `max(acc, item)` reads, and `acc` did not change; outside the swept geometry
+// the operand is beyond the band on both sides, so the max is too. Nor is the
+// operand's own combine or seam: its geometry bound already carries both
+// supports, and a smooth max only raises. An operand appended last -- what a
+// host adding a cutter to a worked sculpt produces -- carries no pad at all.
+//
+// A SUM, NOT THE CHAIN ENVELOPE, and not the largest support either. Let a
+// changed running value `a` sit above `band + s + R` going into a combine of
+// support `s`, with `R` the supports of the combines after it. That combine
+// returns its other operand bit for bit where `|a - b| >= s`, and otherwise a
+// value above `band + R`: a smooth union only reads `a` where `b > a - s`, and
+// lowers the smaller operand by less than `s`; a smooth subtract or intersect
+// only raises; a feathered replace moves `a` by at most its band. So the
+// remaining supports' sum keeps every changed value beyond the band to the
+// end of the chain, and the band-clamped result is bit for bit what it was.
+// The envelope the cull uses is a fit to what a CULL may drop against an fp16
+// tolerance, and a refill region is held to bit-identical bricks: 96 smooth
+// dabs after the operand left 35 bricks one fp16 step off a full rebuild under
+// the layer-wide envelope this replaced, and the same 35 under the largest
+// support (test_intersect_delta_oracle.cpp) -- the drag accumulates along the
+// chain, which no single term can bound.
+//
+// A long smooth suffix therefore sums to a box past the layer, which is right
+// and useless; the C ABI clips the reported region to the conservative
+// influence bound, which holds the change as well (clay_c.cpp).
+//
+// nullopt where the walk does not terminate within the node count.
+std::optional<float> intersect_delta_chain_pad(const SdfContent& content, NodeId id,
+                                               const Layer& layer) {
+    float pad = 0.0f;
+    NodeId cur = id;
+    for (std::size_t step = 0; step <= content.nodes().size(); ++step) {
+        NodeId parent = kNoNode;
+        int index = -1;
+        if (!content.locate(cur, &parent, &index)) return std::nullopt;
+        const std::vector<NodeId>* chain = chain_of(content, parent);
+        if (!chain || index < 0) return std::nullopt;
+        for (std::size_t i = static_cast<std::size_t>(index) + 1; i < chain->size(); ++i) {
+            const Node* n = content.find((*chain)[i]);
+            if (n && !add_chain_carry(content, *n, layer, &pad)) return std::nullopt;
+        }
+        if (parent == kNoNode) return pad;
+        cur = parent;
+    }
+    return std::nullopt;
+}
+
 // One layer's contribution: the item's geometry as THAT layer places it,
 // dilated by the pad its chain needs and by the groups above, then carried up
 // to the document.
@@ -2048,12 +2140,10 @@ std::optional<Aabb> geometry_reach_in_layer(const Document& doc, const SdfConten
     Aabb b = item_geometry_bound(item, layer);
     if (b.empty() || b.is_infinite()) return std::nullopt;
     // THE CHAIN PAD, which a local op's bound does not carry and this one must
-    // -- see the header. `cull_pad` is the one expression for it, and it is the
-    // same number the compiler pads a per-brick cull region by, resolved
-    // against the same effective contributor count.
-    const float pad = cull_pad(content, layer);
-    if (!std::isfinite(pad)) return std::nullopt;
-    b = b.dilated(pad);
+    // -- see the header -- over the combines that follow the operand.
+    const std::optional<float> pad = intersect_delta_chain_pad(content, id, layer);
+    if (!pad || !std::isfinite(*pad)) return std::nullopt;
+    b = b.dilated(*pad);
     if (!dilate_by_ancestors(content, id, layer, &b) || b.is_infinite()) return std::nullopt;
     const Aabb up = layer_reach_in_document(doc, layer.id, b);
     if (up.empty() || up.is_infinite()) return std::nullopt;

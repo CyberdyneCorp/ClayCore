@@ -197,6 +197,11 @@ struct Shape {
     bool start_outside = false;
     float body = 1.0f;         // the form's radius
     int dabs = 24;
+    // Where the operand sits in the chain (#666): how many dabs come AHEAD of
+    // it, -1 for all of them -- appended last, the shape every case above has.
+    int ahead = -1;
+    bool inline_operand = false;  // the operand in an inline group at its slot
+    bool inline_later = false;    // every dab after it in an inline group
 };
 
 struct Built {
@@ -205,6 +210,31 @@ struct Built {
     float to[3] = {0, 0, 0};
     float span = 0.0f;  // half-width of a world box holding both states
 };
+
+// An inline group at the layer root, when `wanted`: its children continue the
+// outer chain rather than starting one of their own. 0 otherwise.
+clay_node_id inline_group(Doc& doc, bool wanted) {
+    clay_node_id g = 0;
+    if (wanted)
+        REQUIRE(clay_layer_add_group(doc.d, doc.layer, 0, -1, CLAY_OP_INLINE, CLAY_BLEND_HARD,
+                                     0.0f, 0.0f, &g) == CLAY_OK);
+    return g;
+}
+
+// The issue's cutter and the issue's drag: a cylinder r 0.25 h 1.6 at
+// [0, 0.9, 0], moved around a circle of radius 0.7 at constant height.
+Built add_cutter(Doc& doc, const Shape& s, float k, clay_node_id group) {
+    Built b;
+    b.from[0] = s.start_outside ? -2.2f : -0.7f;
+    b.from[1] = 0.9f;
+    b.to[0] = 0.7f;
+    b.to[1] = 0.9f;
+    const float cut[7] = {0.25f, 0.8f, 0, 0, 0, 0, 0};
+    const int32_t blend = k > 0 ? CLAY_BLEND_QUADRATIC : CLAY_BLEND_HARD;
+    b.cutter = add_item(doc, CLAY_PRIM_CAPPED_CYLINDER, cut, b.from, CLAY_OP_INTERSECT, blend,
+                        k, group);
+    return b;
+}
 
 Built build(Doc& doc, const Shape& s) {
     const float k = s.blend_k;
@@ -216,15 +246,23 @@ Built build(Doc& doc, const Shape& s) {
         add_item(doc, CLAY_PRIM_SPHERE, params, pos, CLAY_OP_ADD, blend, k * r);
     }
     // Stamps along a spiral ON the sphere, so the surface is a worked one and
-    // the chain is a real chain rather than a single primitive.
+    // the chain is a real chain rather than a single primitive. The operand
+    // goes in among them when the shape names a slot.
+    const int ahead = s.ahead < 0 ? s.dabs : s.ahead;
+    Built b;
+    clay_node_id later = 0;
     for (int i = 0; i < s.dabs; ++i) {
+        if (i == ahead) {
+            b = add_cutter(doc, s, k, inline_group(doc, s.inline_operand));
+            later = inline_group(doc, s.inline_later);
+        }
         const float t = static_cast<float>(i) / static_cast<float>(s.dabs - 1);
         const float phi = t * 7.0f;
         const float y = -0.8f + 1.6f * t;
         const float ring = std::sqrt(std::max(0.05f, 1.0f - y * y));
         const float params[7] = {0.22f * r, 0, 0, 0, 0, 0, 0};
         const float pos[3] = {std::cos(phi) * ring * r, y * r, std::sin(phi) * ring * r};
-        add_item(doc, CLAY_PRIM_SPHERE, params, pos, CLAY_OP_ADD, blend, k * r);
+        add_item(doc, CLAY_PRIM_SPHERE, params, pos, CLAY_OP_ADD, blend, k * r, later);
     }
     if (s.mirror) REQUIRE(clay_set_layer_mirror(doc.d, doc.layer, 1, 0, 0, 0.08f) == CLAY_OK);
     if (s.radial) REQUIRE(clay_set_layer_radial(doc.d, doc.layer, 1, 5, 0.1f) == CLAY_OK);
@@ -252,21 +290,13 @@ Built build(Doc& doc, const Shape& s) {
         REQUIRE(clay_document_set_layer_composition(doc.d, top, CLAY_OP_ADD,
                                                     CLAY_BLEND_QUADRATIC, 0.25f, 0.0f) == CLAY_OK);
     }
-    clay_node_id group = 0;
-    if (s.in_group)
-        REQUIRE(clay_layer_add_group(doc.d, doc.layer, 0, -1, CLAY_OP_ADD, CLAY_BLEND_QUADRATIC,
-                                     0.2f, 0.0f, &group) == CLAY_OK);
-
-    Built b;
-    // The issue's cutter and the issue's drag: a cylinder r 0.25 h 1.6 at
-    // [0, 0.9, 0], moved around a circle of radius 0.7 at constant height.
-    b.from[0] = s.start_outside ? -2.2f : -0.7f;
-    b.from[1] = 0.9f;
-    b.to[0] = 0.7f;
-    b.to[1] = 0.9f;
-    const float cut[7] = {0.25f, 0.8f, 0, 0, 0, 0, 0};
-    b.cutter = add_item(doc, CLAY_PRIM_CAPPED_CYLINDER, cut, b.from, CLAY_OP_INTERSECT, blend,
-                        k, group);
+    if (ahead >= s.dabs) {
+        clay_node_id group = 0;
+        if (s.in_group)
+            REQUIRE(clay_layer_add_group(doc.d, doc.layer, 0, -1, CLAY_OP_ADD,
+                                         CLAY_BLEND_QUADRATIC, 0.2f, 0.0f, &group) == CLAY_OK);
+        b = add_cutter(doc, s, k, group);
+    }
     b.span = r + 1.0f + std::fabs(b.from[0]);
     return b;
 }
@@ -421,6 +451,63 @@ TEST_CASE("intersect oracle: an incremental refill equals a full rebuild") {
     }
 }
 
+TEST_CASE("intersect oracle: the operand anywhere in a long smooth chain (#666)") {
+    // The box's chain pad is over the combines AFTER the operand, so where it
+    // sits is now what sizes the box -- and every placement has to leave the
+    // incremental refill equal to the rebuild. 96 smooth dabs, the host's
+    // count, with the operand at the head, the middle and the tail of them,
+    // under each symmetry, and inside an inline group either way round: the
+    // operand in one, or the dabs after it in one (whose children continue
+    // the outer chain and so DO read the running value it changed).
+    //
+    // Every case above appends the operand last, so none of them could see
+    // what this one found: with smooth dabs AFTER the operand, the layer-wide
+    // envelope pad left 35 bricks (head) and 17 (middle) one fp16 step off the
+    // rebuild -- and so did the largest full support. The drag accumulates
+    // along the chain; the pad is a SUM of the later supports now, and the
+    // reported region is clipped to the influence union it then outgrows.
+    // Dropping the walk into inline groups leaves 52 stale bricks in "dabs
+    // after it in an inline group, head".
+    auto shape = [](const char* name, int ahead) {
+        Shape s{name, 0.09f};
+        s.dabs = 96;
+        s.ahead = ahead;
+        return s;
+    };
+    std::vector<Shape> shapes;
+    const struct {
+        const char* name;
+        int ahead;
+    } slots[] = {{"head", 0}, {"middle", 48}, {"tail", -1}};
+    for (const auto& slot : slots) {
+        Shape plain = shape(slot.name, slot.ahead);
+        shapes.push_back(plain);
+        Shape mirrored = plain;
+        mirrored.mirror = true;
+        shapes.push_back(mirrored);
+        Shape radial = plain;
+        radial.radial = true;
+        shapes.push_back(radial);
+    }
+    Shape in_inline = shape("operand in an inline group, middle", 48);
+    in_inline.inline_operand = true;
+    shapes.push_back(in_inline);
+    Shape later_inline = shape("dabs after it in an inline group, head", 0);
+    later_inline.inline_later = true;
+    shapes.push_back(later_inline);
+    Shape later_mirrored = shape("dabs after it in an inline group, middle, mirror", 48);
+    later_mirrored.inline_later = true;
+    later_mirrored.mirror = true;
+    shapes.push_back(later_mirrored);
+
+    for (const Shape& s : shapes) {
+        INFO(s.name, " mirror ", s.mirror, " radial ", s.radial);
+        const Run r = oracle(s);
+        CHECK(r.surface_bricks > 20);
+        CHECK(r.incremental_bricks < r.full_bricks);
+    }
+}
+
 namespace {
 
 // How many bricks a REGION marks, with nothing evaluated: mark it on a fresh
@@ -507,17 +594,21 @@ TEST_CASE("intersect oracle: the refill does not scale with the layer's extent")
     // reports and it is not in dispute -- it is what the fallback still costs.
     // Measured on this fixture: 900 -> 15,600 bricks, x17.3.
     CHECK(conservative_growth > 12.0);
-    // The proved one does not. The cutter and the drag are unchanged, so what
-    // is left growing is the CHAIN PAD -- the fixture's blend radii scale with
-    // the form, as a real sculpt's do, and the pad follows them. Measured:
-    // 540 -> 1,152 bricks, x2.13, against the x17.3 beside it and nothing like
-    // the 165-229x the issue reports for the region it dirtied.
-    CHECK(delta_growth < 4.0);
-    // And at the large size the difference is the whole point: 13.5x fewer
-    // bricks to evaluate per drag frame.
+    // The proved one does not. The cutter and the drag are unchanged, and the
+    // fixture's blend radii -- which scale with the form, as a real sculpt's
+    // do -- all belong to stamps AHEAD of the operand, so none of them is in
+    // the chain pad (#666). While the pad was taken over the whole layer it
+    // followed them: 540 -> 1,152 bricks, x2.13. Over the combines after the
+    // operand, of which there are none, it is 256 -> 256: the box is the
+    // sweep and nothing the form does reaches it.
+    CHECK(b.delta_bricks == a.delta_bricks);
+    CHECK(delta_growth < 1.1);
+    // And at the large size the difference is the whole point: 61x fewer
+    // bricks to evaluate per drag frame (13.5x with the layer-wide pad).
     CHECK(b.delta_bricks * 8 < b.conservative_bricks);
-    // At the REFERENCE size the win is real and modest -- the form is barely
-    // bigger than the cutter's sweep, which is why the issue measures 11x in
-    // time there and seconds a frame at ten times the extent.
+    // At the REFERENCE size the form is barely bigger than the cutter's sweep,
+    // and the win was modest -- 540 of 900 bricks. Without the stamps' pad it
+    // is 256 of 900.
+    CHECK(a.delta_bricks * 3 < a.conservative_bricks);
     CHECK(a.delta_bricks < a.conservative_bricks);
 }

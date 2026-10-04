@@ -1072,8 +1072,8 @@ sides and the band-clamped value a brick stores cannot have moved.
 `scene::command_surface_delta_bound` is that second answer, for exactly one edit
 kind: a `SetTransformCmd` on an existing, visible Intersect item with finite
 support. It is `node_influence_bound_in_document` with the intersect arm taken
-out — the operand's geometry bound, dilated by its layer's chain pad, by each
-enclosing group's blend support and by the folds above, unioned over every
+out — the operand's geometry bound, dilated by the chain pad of the combines
+AFTER it, by each enclosing group's blend support and by the folds above, unioned over every
 instancing layer — taken on BOTH sides of the apply and unioned, because one
 side is not an answer. Everything else reports nothing and keeps the
 conservative union, which is what makes the change narrow: no other edit's
@@ -1093,8 +1093,23 @@ one place the two bounds are not the same expression. A local combine outside
 its support is the identity bit for bit, so nothing downstream can see the edit;
 an intersect's is not — the raw value out there is the moved operand's own
 distance — so a smooth combine further down the chain can drag the difference
-back toward the band. `cull_pad` is the measured distance over which it can and
-is reused rather than re-derived.
+back toward the band.
+
+The pad is the SUM of the blend supports of the combines that FOLLOW the operand
+(#666) — its later siblings at every level of the ancestor walk, through inline
+groups, whose children continue the outer chain — and nothing ahead of it: those
+combines built the value `max(acc, item)` reads, and it did not move. An operand
+appended last, which is how a host adds a cutter to a worked sculpt, carries no
+pad and the box is its sweep. A sum and not the largest term because the drag
+accumulates: a changed value above `band + s + R` going into a combine of support
+`s` comes out either untouched or above `band + R`, so the sum keeps every
+changed value beyond the band to the end of the chain. Until #666 the pad was
+`cull_pad` over the whole layer — the cull's envelope, a fit to what a CULL may
+drop against an fp16 tolerance — and with 96 smooth dabs after the operand it
+left 35 bricks one fp16 step off a full rebuild; so did the largest full
+support. A long smooth suffix sums past the layer, so
+`clay_layer_set_transform_bound` reports the overlap of the delta and the
+conservative influence union: the change lies in both.
 
 `clay_layer_set_transform_bound` (ABI 0.90.0) is the host's half: the edit
 `clay_layer_set_transform` applies plus the box it changed, in
@@ -1117,9 +1132,13 @@ deterministic, the milliseconds are what that machine did):
 
 The claim held is the COUNT, not the clock: going from the reference fixture to
 one with ten times the cross-section, the same cutter making the same drag
-dirties **540 → 1,152 bricks** where the layer bound dirties **900 → 15,600**.
-The residual growth is the chain pad following the fixture's blend radii, which
-scale with the form; it is not the extent.
+dirties **256 → 256 bricks** where the layer bound dirties **900 → 15,600**.
+Before #666 it was 540 → 1,152: the layer-wide chain pad followed the fixture's
+blend radii, which scale with the form, though every one of those stamps sits
+ahead of the operand and cannot read what it changed. With the operand AHEAD of
+the 96 smooth stamps instead, the summed pad outgrows the layer and the region
+is the influence union, 1,452 and 28,830 bricks — where the layer-wide pad
+reported 540 and 1,440, and left 35 stale bricks at the reference size.
 
 ### Drawing a preview beside the rest of the document
 
