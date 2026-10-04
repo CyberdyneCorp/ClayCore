@@ -940,6 +940,30 @@ is one slice and unchanged.
 The sub-stepped call is cheaper than the single step it replaces: each slice's
 geodesic grid is sized to the radius plus `|d|/n` rather than plus `|d|`.
 
+**The slope is the one the lattice can see.** The cost grows about
+quadratically with the slice count — slice i's geodesic grid is read through
+the i − 1 slices before it, and every output sample composes all n — so the
+count is sized from the curve's steepest *secant over one cell* of the reach
+(`cell / radius` in t), not from `ease_max_slope`. Two samples one cell apart
+can only read one source point if their weights differ by that much; a fold
+narrower than a cell is never sampled. The analytic peak is badly wrong for the
+circ curves: 71.7, reached only within 1e-4 of t of `CLAY_CIRC_GUARD` (about
+3e-5 of distance at radius 0.3). Measured on a unit-sphere cap at cell 0.01,
+band 0.2, anchor (0,0,1), r 0.3, drag along +x, Release on Apple silicon:
+
+| drag | sized off the peak | sized off one cell |
+|---|---:|---:|
+| linear, \|d\| 0.15 | 1 slice, 96 ms | 1 slice, 93 ms |
+| in_circ, \|d\| 0.15 | 64 slices, 13,024 ms | 8 slices, 432 ms |
+| in_circ, \|d\| 0.05 | 24 slices, 2,053 ms | 3 slices, 151 ms |
+| in_circ, \|d\| 0.01 | 5 slices, 233 ms | 1 slice, 67 ms |
+| in_elastic, \|d\| 0.10 | 13 slices, 833 ms | 11 slices, 659 ms |
+| in_bounce, \|d\| 0.10 | 5 slices, 250 ms | 4 slices, 204 ms |
+
+Against the same drag of 0.15 made as 32 host calls of d/32, the one-cell count
+stays within 0.006 of surface height for every circ curve, elastic and bounce:
+under a cell, which is the resolution the count is chosen for.
+
 **Putting a bake back: feather the replace.** Every one of these verbs returns
 a volume that a host then places with `CLAY_OP_REPLACE`, and the hard replace
 corrugates the *shading* even when no verb was applied at all (issue #67). The

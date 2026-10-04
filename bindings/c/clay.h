@@ -5225,8 +5225,15 @@ typedef struct clay_topological_move_params {
  * what a host splitting the drag into that many calls would get, so a host
  * that did so can stop: one call is cheaper (361 ms against 690 ms for nine
  * calls on that probe). A drag under half the radius on a linear curve is one
- * slice and unchanged. NOT promised past 64 slices — a drag over thirty radii
- * on a linear curve — where the slices are longer than that and can fold.
+ * slice and unchanged. The slope that sizes the slices is the curve's steepest
+ * change over ONE CELL of the reach, not its analytic peak: a circ curve peaks
+ * at 71.7 in a band far narrower than a cell, and sized off that a drag of half
+ * the radius took 64 slices and 13 s where one took 95 ms; over a cell at
+ * 0.01 / radius 0.3 it is about 7.7, and the same drag is 8 slices, 0.43 s.
+ * The cost grows about quadratically with the slice count, so a steep curve
+ * (circ, elastic, expo) dragged far is the expensive case. NOT promised past
+ * 64 slices — a drag over thirty radii on a linear curve — where the slices
+ * are longer than that and can fold.
  *
  * Re-sampling a VOLUME reads a bound rather than a distance outside its band,
  * so the band must cover the drag; where a document exists, use

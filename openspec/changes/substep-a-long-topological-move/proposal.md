@@ -17,7 +17,7 @@ The 9-call row matches the issue's own table to the third decimal. Timings are a
 The C ABI also had no document-sourced move. `field::move_topological` has the callable and `PointBatch` forms, and pyclay reaches them. A C host had to bake a volume first, with its band sized by hand to cover the drag. There was no counterpart to `clay_item_volume_flatten_from`.
 
 ## What Changes
-- `field::move_topological` (all three overloads) runs a drag as `n = topological_move_steps(settings)` slices. `n` is the fewest that keep `|d/n| · ease_max_slope(ease) / radius ≤ 0.5`, capped at 64. Slice `i` drags `d/n` from `anchor + (i-1)·d/n`, and its geodesic is solved over the material that slices `1..i-1` left. Its material array is the source read through their composed pull-backs. The output is sampled once per point, at `pb_1(pb_2(…pb_n(p)))`. `n = 1` is bit-identical to the previous single step, and every drag in the existing tests and benchmarks is one slice.
+- `field::move_topological` (all three overloads) runs a drag as `n = topological_move_steps(settings, cell_size)` slices. `n` is the fewest that keep `|d/n| · S / radius ≤ 0.5`, capped at 64, where `S` is the curve's steepest secant over one cell of the reach (a window of `cell_size / radius` in t), never above `ease_max_slope(ease)`. Slice `i` drags `d/n` from `anchor + (i-1)·d/n`, and its geodesic is solved over the material that slices `1..i-1` left. Its material array is the source read through their composed pull-backs. The output is sampled once per point, at `pb_1(pb_2(…pb_n(p)))`. `n = 1` is bit-identical to the previous single step. Every drag in the existing tests and benchmarks is one slice; those all use linear or smooth curves.
 - `field::topological_move_steps` is public, so a caller or a test can ask how a drag will be split.
 - `ease_max_slope` moves from `scene/bounds.cpp` to `include/clay/math/ease_slope.h`, header-only, because `field` may not include `scene`. `scene::ease_max_slope` is now a using-declaration of it, so there is still one definition and no caller changes.
 - C ABI 0.121.0 -> 0.122.0: `clay_item_volume_move_topological_from(doc, move, volume, region_min, region_max, out_item)`, modelled on `clay_item_volume_flatten_from`. It shares `read_volume_sampling` and samples through `eval::tape_point_batch`. When no region is passed, it samples the document's padded bounds grown by `|displacement|`.
@@ -28,7 +28,19 @@ The C ABI also had no document-sourced move. `field::move_topological` has the c
 - The 9-call reference in the issue is not the limit. 5, 9 and 17 host calls give 1.119, 1.096 and 1.086 at the anchor. Stepping converges as `n` grows rather than landing on one exact answer, so the regression test checks the property (never below 1.0, rising along the drag) and stays within 0.04 of the issue's table. It does not check one `n`'s numbers exactly.
 - The sub-stepped call is cheaper than the single step it replaces. Each slice's geodesic grid is sized to `radius + |d|/n` rather than `radius + |d|`: 5 grids of about 94³ cells against one of about 196³. The output sampling, which dominates, is paid once either way.
 - From a document at cell 0.02, the single step did not crater the crown. It left a lump over the anchor and clipped the far end of the pull. The C-level test therefore asserts that the pull arrives (`(0.35,0,1.25)` inside) and is a pull rather than a slab (`(0,0,1.25)` outside). Under a forced single step both assertions fail. Without the defaulted-region growth the first one fails.
+- Sizing `n` off `ease_max_slope` made short drags on the circ curves 10x to 136x slower. That supremum is 71.7 for in/out/in_out_circ, reached only within 1e-4 of t of the guard, about 3e-5 of distance at radius 0.3, far below a cell. A drag of half the radius went to the 64-slice cap. Cost is about quadratic in `n`, because slice `i` reads its grid through `i-1` composed pull-backs and every output sample composes all `n`. The secant over one cell is what decides whether two samples a cell apart read one source point; it is about 7.7 for in_circ at cell 0.01 / radius 0.3. Measured on a unit-sphere cap (cell 0.01, band 0.2, anchor (0,0,1), r 0.3, drag along +x):
+
+| drag | sized off the supremum | sized off one cell |
+|---|---:|---:|
+| linear, \|d\| 0.15 | 1 slice, 96 ms | 1 slice, 93 ms |
+| in_circ, \|d\| 0.15 | 64, 13,024 ms | 8, 432 ms |
+| in_circ, \|d\| 0.05 | 24, 2,053 ms | 3, 151 ms |
+| in_circ, \|d\| 0.01 | 5, 233 ms | 1, 67 ms |
+| in_elastic, \|d\| 0.10 | 13, 833 ms | 11, 659 ms |
+| in_bounce, \|d\| 0.10 | 5, 250 ms | 4, 204 ms |
+
+  The one-cell count stays within 0.006 of surface height of the same 0.15 drag made as 32 host calls, for every circ curve, elastic and bounce. That is under the cell the count is chosen for.
 - The step cap is not refused. A drag over 64 slices — over thirty radii on a linear curve — can fold again. The header says so rather than rejecting a gesture a host can produce.
 
 ## Impact
-Drags within half the radius on a linear curve, and the equivalent for other curves, are bit-identical to before. Longer drags change shape: that change is the fix. One additive C entry point and no descriptor change, so `check_c_abi.py`'s struct mirror is untouched. No format change.
+Drags within half the radius on a linear curve, and the equivalent for other curves, are bit-identical to before. A drag that does need slicing costs about quadratically in the slice count; the steep curves (circ, elastic, expo) dragged far are the expensive case, and the docs say so. Longer drags change shape: that change is the fix. One additive C entry point and no descriptor change, so `check_c_abi.py`'s struct mirror is untouched. No format change.

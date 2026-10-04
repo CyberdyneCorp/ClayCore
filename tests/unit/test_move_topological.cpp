@@ -4,7 +4,9 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <vector>
 
 #include "clay/field/move_topological.h"
@@ -223,7 +225,7 @@ TEST_CASE("move topological: the sub-steps are what n host calls would give") {
     // n times. Same slices, same anchors, same geodesics -- so the same shape,
     // up to the re-sampling the host pays for and the engine does not.
     const TopologicalMoveSettings drag = long_drag();
-    const int n = field::topological_move_steps(drag);
+    const int n = field::topological_move_steps(drag, 0.01f);
     REQUIRE(n > 1);
 
     FieldVolume host = sphere_cap();
@@ -244,30 +246,100 @@ TEST_CASE("move topological: the sub-steps are what n host calls would give") {
 }
 
 TEST_CASE("move topological: how many slices a drag takes") {
+    // Every count below is at the probe's cell size, 0.01: the slope that
+    // decides it is the curve's steepest secant over one cell of the reach.
     TopologicalMoveSettings s = long_drag();
     // |d| = 0.64 against half of 0.3 on a linear curve: 4.27, so five.
-    CHECK(field::topological_move_steps(s) == 5);
+    CHECK(field::topological_move_steps(s, 0.01f) == 5);
 
     // A steeper curve needs more slices for the same drag: smoothstep peaks at
-    // 1.5, so 6.4 -> seven.
+    // 1.5, and over one cell its secant is within 0.001 of that, so 6.4 ->
+    // seven. A smooth curve loses nothing to the secant; a cusped one does.
     s.ease = kernel::ease_smoothstep;
-    CHECK(field::topological_move_steps(s) == 7);
+    CHECK(field::topological_move_steps(s, 0.01f) == 7);
 
     // Under half the radius on a linear curve is one step -- the single
     // pull-back unchanged, which is every drag the older tests here make.
     s.ease = 0;
     s.displacement = cf3(0.15f, 0, 0);
-    CHECK(field::topological_move_steps(s) == 1);
+    CHECK(field::topological_move_steps(s, 0.01f) == 1);
     s.radius = 0.5f;
     s.displacement = cf3(-0.25f, 0, 0);
-    CHECK(field::topological_move_steps(s) == 1);
+    CHECK(field::topological_move_steps(s, 0.01f) == 1);
 
     // Capped, so one call cannot be asked for unbounded work.
     s.radius = 0.01f;
     s.displacement = cf3(100.0f, 0, 0);
-    CHECK(field::topological_move_steps(s) == 64);
+    CHECK(field::topological_move_steps(s, 0.01f) == 64);
 
     // Nothing to move: one (empty) step rather than a division by zero.
     s.radius = 0.0f;
-    CHECK(field::topological_move_steps(s) == 1);
+    CHECK(field::topological_move_steps(s, 0.01f) == 1);
+}
+
+TEST_CASE("move topological: a short drag on a circ curve is a few slices, not the cap") {
+    // The circ family's analytic slope is 71.7, reached only in a band of t
+    // 1e-4 wide at CLAY_CIRC_GUARD -- about 3e-5 of distance at radius 0.3, far
+    // under one cell. Sized off that supremum, a drag of half the radius went
+    // to the 64-slice cap, and since each slice reads its grid through every
+    // slice before it, the call went from about 95 ms to 13 s. The slope the
+    // lattice can see is the steepest secant over one cell: about 7.7 here.
+    TopologicalMoveSettings s;
+    s.anchor = cf3(0, 0, 1);
+    s.radius = 0.3f;
+    const std::uint8_t circs[] = {kernel::ease_in_circ, kernel::ease_out_circ,
+                                  kernel::ease_in_out_circ};
+    for (const std::uint8_t ease : circs) {
+        CAPTURE(int(ease));
+        s.ease = ease;
+        s.displacement = cf3(0.15f, 0, 0);  // half the radius: was 64
+        CHECK(field::topological_move_steps(s, 0.01f) == 8);
+        s.displacement = cf3(0.05f, 0, 0);  // was 24
+        CHECK(field::topological_move_steps(s, 0.01f) == 3);
+        s.displacement = cf3(0.01f, 0, 0);  // was 5
+        CHECK(field::topological_move_steps(s, 0.01f) == 1);
+        // With no cell to resolve against, the supremum is all there is.
+        s.displacement = cf3(0.15f, 0, 0);
+        CHECK(field::topological_move_steps(s, 0.0f) == 64);
+    }
+
+    // The secant never exceeds the supremum, so a linear drag sitting exactly
+    // on the bound is not pushed over a ceil() by rounding.
+    s.ease = kernel::ease_linear;
+    s.displacement = cf3(0.15f, 0, 0);
+    CHECK(field::topological_move_steps(s, 0.01f) == 1);
+    CHECK(field::topological_move_steps(s, 0.001f) == 1);
+}
+
+TEST_CASE("move topological: a short circ drag costs about what a linear one does") {
+    // The runtime half of the case above, as a RATIO against the same drag on
+    // a linear curve in the same build, so it holds under a sanitizer or a
+    // debug build as well as in release. Measured in release on the volume
+    // below: linear 93 ms; in_circ 151 ms at 3 slices, against 2,053 ms at
+    // the 24 the supremum asked for -- 1.6x where it was 22x.
+    const math::Aabb box{cf3(-0.4f, -0.4f, 0.5f), cf3(0.9f, 0.4f, 1.8f)};
+    const FieldVolume cap = FieldVolume::sample(unit_sphere, box, 0.01f, 0.2f);
+    TopologicalMoveSettings s;
+    s.anchor = cf3(0, 0, 1);
+    s.radius = 0.3f;
+    s.displacement = cf3(0.05f, 0, 0);
+
+    auto fastest_ms = [&cap](const TopologicalMoveSettings& drag) {
+        double best = 1e30;
+        for (int run = 0; run < 2; ++run) {
+            const auto t0 = std::chrono::steady_clock::now();
+            const FieldVolume out = field::move_topological(cap, drag);
+            const auto t1 = std::chrono::steady_clock::now();
+            CHECK(!out.empty());
+            best = std::min(best, std::chrono::duration<double, std::milli>(t1 - t0).count());
+        }
+        return best;
+    };
+    s.ease = kernel::ease_linear;
+    const double linear = fastest_ms(s);
+    s.ease = kernel::ease_in_circ;
+    REQUIRE(field::topological_move_steps(s, 0.01f) == 3);
+    const double circ = fastest_ms(s);
+    INFO("linear " << linear << " ms, in_circ " << circ << " ms");
+    CHECK(circ < 6.0 * linear);
 }

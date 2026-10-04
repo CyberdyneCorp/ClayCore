@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <queue>
 #include <vector>
 
@@ -268,12 +269,52 @@ cfloat3 pull_back(const Geodesic& geo, const TopologicalMoveSettings& settings, 
 // linear curve, which keeps every such drag bit-identical to the single step.
 constexpr float kStepReach = 0.5f;
 
-// The most steps one call will take. Each costs a geodesic solve over a grid
-// sized to the reach plus its slice, and every output sample composes all of
-// them; past this the drag is over thirty radii long on a linear curve, and is
-// not one gesture. Beyond it the slices are longer than kStepReach allows and
-// the map may fold again -- stated in the header rather than refused.
+// The most steps one call will take. Past this the drag is over thirty radii
+// long on a linear curve, and is not one gesture. Beyond it the slices are
+// longer than kStepReach allows and the map may fold again -- stated in the
+// header rather than refused.
+//
+// THE COST IS ABOUT QUADRATIC IN n, not linear. Slice i's geodesic grid reads
+// every cell through the i - 1 pull-backs before it, and every output sample
+// composes all n, each a trilinear read of a geodesic. Measured on a unit-sphere
+// cap at cell 0.01, radius 0.3: one slice about 95 ms, 24 slices about 2 s, 64
+// about 13 s. Which is why n is sized from the slope the lattice can SEE below,
+// not from the curve's analytic supremum.
 constexpr int kMaxSteps = 64;
+
+// THE STEEPEST SLOPE THE LATTICE CAN SEE: the curve's steepest SECANT over a
+// window of one cell, as a fraction of the reach -- not its analytic supremum.
+//
+// Two output samples one cell apart differ in weight by |E(t1) - E(t0)| with
+// |t1 - t0| <= cell / radius, so that secant is what decides whether two of
+// them read one source point. A fold narrower than a cell is never sampled.
+// The supremum is the wrong number for the circ family above all: its 71.7 is
+// reached only in a band of t 1e-4 wide at CLAY_CIRC_GUARD -- about 3e-5 of
+// distance at radius 0.3 -- and sized n off it, sending a drag of half the
+// radius to the 64-slice cap: 13 s where one slice took 95 ms. Over one cell at
+// 0.01 the same curve's steepest secant is about 7.7.
+//
+// Sampled at 1025 window offsets with both end windows exact, which is where
+// the circ, expo and quint curves are steepest; an oscillating curve (elastic,
+// bounce) moves its secant smoothly with the offset, and kStepReach's factor
+// of two covers what sampling misses between two offsets. Never above the
+// supremum, so a curve whose secant equals its slope (linear: 1) is not
+// pushed over a ceil() boundary by rounding. A window that is not positive --
+// no cell size -- falls back to the supremum.
+float resolved_slope(std::uint8_t ease, float window) {
+    const float supremum = math::ease_max_slope(ease);
+    if (!(window > 0.0f)) return supremum;
+    const float h = std::min(window, 1.0f);
+    constexpr int kOffsets = 1024;
+    float worst = 0.0f;
+    for (int j = 0; j <= kOffsets; ++j) {
+        const float t0 = (1.0f - h) * static_cast<float>(j) / static_cast<float>(kOffsets);
+        const float t1 = j == kOffsets ? 1.0f : t0 + h;
+        const float rise = kernel::cabs(kernel::cease(ease, t1) - kernel::cease(ease, t0));
+        worst = std::max(worst, rise / (t1 - t0));
+    }
+    return std::min(worst, supremum);
+}
 
 // The drag as the chain of steps it runs as.
 //
@@ -286,8 +327,8 @@ struct MoveChain {
     std::vector<TopologicalMoveSettings> steps;
     std::vector<Geodesic> solved;  // steps[0 .. solved.size()) are solved
 
-    explicit MoveChain(const TopologicalMoveSettings& settings) {
-        const int n = topological_move_steps(settings);
+    MoveChain(const TopologicalMoveSettings& settings, float cell_size) {
+        const int n = topological_move_steps(settings, cell_size);
         // d * 1.0f is d exactly, and anchor + 0 is the anchor, so a one-step
         // chain is the single step it replaced to the bit.
         const cfloat3 slice = settings.displacement * (1.0f / static_cast<float>(n));
@@ -351,7 +392,7 @@ void solve_next(const PointBatch& source, MoveChain& chain, float cell_size) {
 template <typename Source>
 MoveChain solve_chain(const Source& source, const TopologicalMoveSettings& settings,
                       float cell_size) {
-    MoveChain chain(settings);
+    MoveChain chain(settings, cell_size);
     while (!chain.complete()) solve_next(source, chain, cell_size);
     return chain;
 }
@@ -433,11 +474,12 @@ FieldVolume move_topological(const PointBatch& source, const math::Aabb& region,
     return out;
 }
 
-int topological_move_steps(const TopologicalMoveSettings& settings) {
+int topological_move_steps(const TopologicalMoveSettings& settings, float cell_size) {
     if (!(settings.radius > 0.0f)) return 1;
     const float reach = kStepReach * settings.radius;
-    const float wanted = std::ceil(kernel::clength(settings.displacement) *
-                                   math::ease_max_slope(settings.ease) / reach);
+    const float wanted =
+        std::ceil(kernel::clength(settings.displacement) *
+                  resolved_slope(settings.ease, cell_size / settings.radius) / reach);
     if (!(wanted > 1.0f)) return 1;
     return static_cast<int>(std::min(wanted, static_cast<float>(kMaxSteps)));
 }
