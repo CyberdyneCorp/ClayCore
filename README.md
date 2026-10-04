@@ -392,7 +392,10 @@ volume item that carries the palette per sample, so colour survives). Direct —
 trilinear interpolation between cell centres and **redistanced**, so the result
 carries a Lipschitz bound a raymarcher and a blend can trust. Non-destructive:
 the grid is untouched, and the result is an ordinary volume item in an
-ordinary SDF layer.
+ordinary SDF layer. To convert off the interface thread, `clay_voxel_grid_clone`
+the layer's grid there (a copy of its material chunks, every level and the
+palette, in no document) and convert the clone on a worker; `clay.h` states
+the threading contract beside each call.
 
 **Mesh → voxel** — `VoxelGrid.rasterize_mesh(mesh)` in Python,
 `clay_voxel_rasterize_mesh` in C. An imported model reached an SDF layer in one

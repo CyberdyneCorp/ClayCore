@@ -135,6 +135,24 @@ class VoxelGrid {
         palette_.resize(1, kernel::cf3(0, 0, 0));  // index 0 = empty, unused
     }
 
+    // A deep copy of the GRID and none of the SESSION around it (#658): every
+    // level, the palette, the active level and the sculpt layers, with their
+    // strengths and records.
+    //
+    // Use this rather than the copy constructor whenever the source may belong
+    // to a document. The implicit copy is a member-wise copy, so it also takes
+    // the change sink and the pass capture — two pointers into the OWNER's undo
+    // journal — and the recording flag, and an edit to such a copy is written
+    // into the source's history. A clone has no sink and no capture, and no
+    // sculpt layer is recording in it: the layer that was open in the source
+    // is carried as a closed one, because "the next edit belongs to this pass"
+    // is a statement about the source's session, not about its cells.
+    //
+    // It is also a grid nothing has displayed yet: every occupied chunk is
+    // dirty, exactly as a grid read back from a file is, the change counter
+    // starts at zero, and the bounds cache is cold.
+    VoxelGrid clone() const;
+
     // Cell size of the ACTIVE level.
     float voxel_size() const { return levels_[active_].voxel_size; }
 
@@ -585,6 +603,24 @@ class VoxelGrid {
 
     // -- queries -------------------------------------------------------------
     std::size_t occupied_count() const;
+
+    // Every occupied cell of a level with its palette index, sorted by z, then
+    // y, then x — the order a box walk with x innermost visits them, so a
+    // caller replacing one with this sees the same sequence.
+    //
+    // Walks the chunks that hold material rather than the bounding box, so the
+    // cost follows the cells and not the box: two cells far apart are two
+    // chunks, not the volume between them. A partially refined level reports
+    // the cells it INHERITS from its parent as well as the ones it stores,
+    // which is the same solid level_occupied_count counts. Empty for a level
+    // the grid does not have.
+    struct OccupiedCell {
+        VoxelCoord cell;
+        std::uint8_t index = 0;
+        bool operator==(const OccupiedCell&) const = default;
+    };
+    std::vector<OccupiedCell> occupied_cells() const { return occupied_cells(active_); }
+    std::vector<OccupiedCell> occupied_cells(std::size_t level) const;
 
     // Cell writes that actually changed a cell, since this grid was
     // constructed. Monotone; only the DIFFERENCE between two reads means
@@ -1110,6 +1146,10 @@ class VoxelGrid {
     void seed_refined_chunks(std::size_t fine);
     const Chunk* inherited_chunk(std::size_t level, VoxelCoord key, int* out_up) const;
     void ensure_bounds() const;
+    // The occupied cells of one material chunk of a level, stored or
+    // inherited, appended to `out` in the chunk's own z, y, x order.
+    void append_chunk_cells(std::size_t level, VoxelCoord key,
+                            std::vector<OccupiedCell>& out) const;
     // Chunk keys where a level HAS material, which is not the chunks it
     // STORES: an unrefined chunk reads its parent, so the parent's material is
     // at this level too. Every enumeration over a level goes through here.

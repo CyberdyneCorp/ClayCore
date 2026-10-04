@@ -11384,6 +11384,21 @@ clay_result clay_voxel_grid_destroy(clay_voxel_grid* grid) {
     return CLAY_OK;
 }
 
+// VoxelGrid::clone rather than the copy constructor: a borrowed grid's sink and
+// pass capture point into its document's history, and a member-wise copy would
+// carry them (#658). The new handle is an owner, whatever the source was, and
+// carries no staged drain — that belongs to the source handle's conversation.
+clay_result clay_voxel_grid_clone(const clay_voxel_grid* src, clay_voxel_grid** out_owned) {
+    if (!out_owned) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out pointer");
+    voxel::VoxelGrid* g = nullptr;
+    clay_result r = resolve(src, &g);
+    if (r != CLAY_OK) return r;
+    auto* handle = new clay_voxel_grid();
+    handle->owned = new voxel::VoxelGrid(g->clone());
+    *out_owned = handle;
+    return CLAY_OK;
+}
+
 clay_result clay_document_add_voxel_layer(clay_document* doc, const char* name, float voxel_size,
                                           clay_layer_id* out_layer, clay_voxel_grid** out_grid) {
     if (!doc || !name) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or name");
@@ -13838,6 +13853,32 @@ clay_result clay_voxel_occupied_count(const clay_voxel_grid* grid, size_t* out_c
     clay_result r = resolve(grid, &g);
     if (r != CLAY_OK) return r;
     if (out_count) *out_count = g->occupied_count();
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_get_occupied(const clay_voxel_grid* grid, int32_t* out_xyz,
+                                    int32_t* out_index, size_t capacity, size_t* out_count) {
+    if (!out_count) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_count");
+    voxel::VoxelGrid* g = nullptr;
+    clay_result r = resolve(grid, &g);
+    if (r != CLAY_OK) return r;
+    // A count query answers from the per-chunk counters and walks no cell.
+    if (!out_xyz && !out_index) {
+        *out_count = g->occupied_count();
+        return CLAY_OK;
+    }
+    const std::vector<voxel::VoxelGrid::OccupiedCell> cells = g->occupied_cells();
+    *out_count = cells.size();
+    if (capacity < cells.size())
+        return fail(CLAY_ERROR_BUFFER_TOO_SMALL, "capacity is below the occupied cell count");
+    for (std::size_t i = 0; i < cells.size(); ++i) {
+        if (out_xyz) {
+            out_xyz[i * 3] = cells[i].cell.x;
+            out_xyz[i * 3 + 1] = cells[i].cell.y;
+            out_xyz[i * 3 + 2] = cells[i].cell.z;
+        }
+        if (out_index) out_index[i] = cells[i].index;
+    }
     return CLAY_OK;
 }
 

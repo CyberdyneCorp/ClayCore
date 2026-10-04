@@ -1041,6 +1041,53 @@ std::optional<VoxelCoord> VoxelGrid::bounds_max() const {
     return lv.bounds_empty ? std::nullopt : std::optional<VoxelCoord>(lv.bounds_hi);
 }
 
+// Chunk by chunk over the keys that hold material, then one sort into the
+// order a box walk would have produced. The sort is what makes the order a
+// promise: the keys come out of a hash map whose order is its own.
+std::vector<VoxelGrid::OccupiedCell> VoxelGrid::occupied_cells(std::size_t level) const {
+    std::vector<OccupiedCell> out;
+    if (level >= levels_.size()) return out;
+    out.reserve(level_occupied_count(level));
+    for (const VoxelCoord& key : material_chunk_keys(level)) append_chunk_cells(level, key, out);
+    std::sort(out.begin(), out.end(), [](const OccupiedCell& a, const OccupiedCell& b) {
+        if (a.cell.z != b.cell.z) return a.cell.z < b.cell.z;
+        if (a.cell.y != b.cell.y) return a.cell.y < b.cell.y;
+        return a.cell.x < b.cell.x;
+    });
+    return out;
+}
+
+namespace {
+// A cell of an inherited chunk: the ancestor's data at the shifted coordinate,
+// the same read ensure_bounds makes.
+std::uint8_t ancestor_index(const std::vector<std::uint8_t>& data, int up, VoxelCoord c) {
+    const std::size_t ox = static_cast<std::size_t>(fmod_pos(c.x >> up, kChunkDim));
+    const std::size_t oy = static_cast<std::size_t>(fmod_pos(c.y >> up, kChunkDim));
+    const std::size_t oz = static_cast<std::size_t>(fmod_pos(c.z >> up, kChunkDim));
+    return data[(oz * kChunkDim + oy) * kChunkDim + ox];
+}
+}  // namespace
+
+// The same chunk resolution ensure_bounds uses: one lookup for the chunk. A
+// stored chunk is read straight through its flat array, whose layout is the
+// z, y, x walk below; an inherited one through its ancestor.
+void VoxelGrid::append_chunk_cells(std::size_t level, VoxelCoord key,
+                                   std::vector<OccupiedCell>& out) const {
+    const ChunkMap& chunks = levels_[level].chunks;
+    auto it = chunks.find(key);
+    int up = 0;
+    const Chunk* src = it != chunks.end() ? &it->second : inherited_chunk(level, key, &up);
+    if (!src) return;
+    constexpr int kDim = kChunkDim;
+    const VoxelCoord base{key.x * kDim, key.y * kDim, key.z * kDim};
+    for (int i = 0; i < kDim * kDim * kDim; ++i) {
+        const VoxelCoord c{base.x + i % kDim, base.y + i / kDim % kDim, base.z + i / (kDim * kDim)};
+        const std::uint8_t index =
+            up == 0 ? src->data[static_cast<std::size_t>(i)] : ancestor_index(src->data, up, c);
+        if (index != 0) out.push_back({c, index});
+    }
+}
+
 std::optional<VoxelCoord> VoxelGrid::build_plane_pick(const math::Ray& ray,
                                                       std::int32_t plane_cell) const {
     const float vs = voxel_size();
@@ -1381,6 +1428,24 @@ void VoxelGrid::mark_every_chunk_dirty() {
         for (const auto& [key, chunk] : lv.chunks)
             if (chunk.occupied > 0) lv.dirty.insert(key);
     }
+}
+
+// The member-wise copy, then everything that described the SOURCE's session
+// rather than its cells put back to what a fresh grid has. See the header for
+// why each one has to go.
+VoxelGrid VoxelGrid::clone() const {
+    VoxelGrid copy(*this);
+    copy.change_sink_ = nullptr;
+    copy.pass_capture_ = nullptr;
+    copy.recording_ = false;
+    copy.change_count_ = 0;
+    for (Level& lv : copy.levels_) {
+        lv.bounds_valid = false;
+        lv.dirty.clear();
+    }
+    // Like a grid read from a file, a clone has never been drawn.
+    copy.mark_every_chunk_dirty();
+    return copy;
 }
 
 bool VoxelGrid::read_level_tail(const std::uint8_t* data, std::size_t size, std::size_t* pos,
