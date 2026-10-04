@@ -3459,7 +3459,16 @@ typedef struct clay_consolidation_cost {
  * The document is not changed, and that includes an INSTANCE layer's sharing:
  * clay_layer_consolidate severs a shared edit list before it bakes, and this
  * call does not, because it does not bake. Asking what a bake would cost must
- * never be the thing that unlinks a subtool. */
+ * never be the thing that unlinks a subtool.
+ *
+ * Refused: CLAY_ERROR_NOT_FOUND for a layer that is not there;
+ * CLAY_ERROR_UNSUPPORTED for a voxel or a mesh layer, before anything is
+ * sampled, with clay_last_error naming which (#659) — consolidation bakes an
+ * SDF edit list and those layers carry none; CLAY_ERROR_INVALID_ARGUMENT for a
+ * null argument, a malformed params or cost, and for an SDF layer with nothing
+ * to bake ("nothing to consolidate": empty, unbounded, or a region that holds
+ * no surface). A host can therefore tell "wrong kind of layer" from "nothing
+ * there yet" by the code alone. */
 clay_result clay_layer_consolidation_cost(const clay_document* doc, clay_layer_id layer,
                                           const clay_consolidation_params* params,
                                           const float region_min[3], const float region_max[3],
@@ -3575,7 +3584,10 @@ clay_result clay_layer_consolidation_cost(const clay_document* doc, clay_layer_i
  * nothing and zeroes, following clay_layer_warp_cost_get's rule that a host
  * walking a stack of mixed kinds should not have to special-case them. On a
  * protected layer clay_layer_consolidate refuses anyway, so advising a bake it
- * would reject is bad advice rather than an error condition.
+ * would reject is bad advice rather than an error condition. This is the one
+ * consolidation call that answers a voxel or mesh layer: the ones that bake or
+ * price a bake refuse it with CLAY_ERROR_UNSUPPORTED (#659), and "should I?" is
+ * a question with an answer where "do it" is not.
  *
  * out_cost may be NULL. Added in ABI 0.86.0. */
 clay_result clay_layer_consolidation_advice(const clay_document* doc, clay_layer_id layer,
@@ -3611,6 +3623,14 @@ clay_result clay_layer_consolidation_advice(const clay_document* doc, clay_layer
  *
  * Refused on a protected layer, and refused BEFORE the bake, so a locked layer
  * does not cost a full resampling to say no.
+ *
+ * Refused with CLAY_ERROR_UNSUPPORTED on a voxel or a mesh layer, before the
+ * protection check and before the params are read, with clay_last_error
+ * naming the representation (#659). Through 0.123.0 those layers fell
+ * through to the bake and answered CLAY_ERROR_INVALID_ARGUMENT "nothing to
+ * consolidate", the answer meant for an EMPTY SDF layer, which a host passing
+ * the detail on showed an artist as "already optimised". An empty SDF layer
+ * still answers CLAY_ERROR_INVALID_ARGUMENT, so the two stay distinct.
  *
  * What survives: the surface, at `cell_size`. What does not: every parameter
  * of every item absorbed, and every colour but the first one's. Hidden items
@@ -3701,8 +3721,10 @@ typedef struct clay_region_merge {
  * and band; changed sampling settings can require a larger actual out_merge.
  *
  * `params.region` is ignored; the closure replaces it. `out_merge` may be NULL.
- * Refused, with the document unchanged, on a missing, non-SDF, protected or
- * empty layer, and when the region reaches nothing at all. */
+ * Refused, with the document unchanged: CLAY_ERROR_NOT_FOUND on a missing
+ * layer; CLAY_ERROR_UNSUPPORTED on a voxel or a mesh layer, naming which in
+ * clay_last_error (#659); CLAY_ERROR_INVALID_ARGUMENT on a protected or empty
+ * SDF layer, and when the region reaches nothing at all. */
 clay_result clay_layer_consolidate_region(clay_document* doc, clay_layer_id layer,
                                           const float region_min[3], const float region_max[3],
                                           const clay_consolidation_params* params,
@@ -3710,7 +3732,13 @@ clay_result clay_layer_consolidate_region(clay_document* doc, clay_layer_id laye
                                           clay_region_merge* out_merge);
 
 /* What that call WOULD absorb, without baking anything — so a host can show the
- * region whose parameters are about to be lost before the artist commits. */
+ * region whose parameters are about to be lost before the artist commits.
+ *
+ * Refused as that call refuses a layer: CLAY_ERROR_NOT_FOUND when it is not
+ * there and CLAY_ERROR_UNSUPPORTED on a voxel or a mesh layer (#659), rather
+ * than a plan that absorbs nothing — a preview must not show a merge the
+ * commit would reject for a different reason. An empty SDF layer plans zero
+ * absorbed roots and succeeds. */
 clay_result clay_layer_plan_region_merge(const clay_document* doc, clay_layer_id layer,
                                          const float region_min[3], const float region_max[3],
                                          clay_region_merge* out_merge);
@@ -3724,7 +3752,9 @@ clay_result clay_layer_plan_region_merge(const clay_document* doc, clay_layer_id
  * is sugar over this one with a null token, so there is one implementation
  * rather than two that could drift.
  *
- * `token` may be NULL, which is exactly the older call. A cancelled consolidate
+ * `token` may be NULL, which is exactly the older call. It refuses what that
+ * call refuses, in the same order — CLAY_ERROR_UNSUPPORTED on a voxel or a
+ * mesh layer among them (#659). A cancelled consolidate
  * returns CLAY_ERROR_CANCELLED and leaves the document BYTE-IDENTICAL: the bake
  * builds a volume and installs it at the end, so a cancel is a discard rather
  * than a partial commit, and a host never has to undo one. */

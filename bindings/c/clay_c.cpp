@@ -9621,6 +9621,31 @@ void write_cost(const scene::ConsolidationCost& src, clay_consolidation_cost* ou
     write_desc(out, out->struct_size, filled);
 }
 
+// The layer a consolidating call acts on, refused in this order: NOT_FOUND
+// when it is not there; UNSUPPORTED when it is a voxel or a mesh layer; and,
+// for a call that `edits`, INVALID_ARGUMENT when it is protected.
+//
+// Consolidation bakes an SDF edit list and those two layers carry none. Left
+// to the bake, they answered "nothing to consolidate", the answer meant for an
+// EMPTY SDF layer (#659), and a host could not tell "wrong kind of layer" from
+// "nothing there yet". The representation goes before protection because a
+// locked grid is still a grid: "locked" would send the artist to unlock a
+// layer that can never be consolidated.
+clay_result find_consolidatable(const clay_document* doc, clay_layer_id layer_id, bool edits,
+                                const scene::Layer** out_layer) {
+    const scene::Layer* layer = doc->doc.document.find_layer(layer_id);
+    if (!layer) return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
+    if (layer->kind != scene::LayerKind::Sdf)
+        return fail(CLAY_ERROR_UNSUPPORTED,
+                    std::string("consolidation applies to SDF layers: layer ") +
+                        std::to_string(layer_id) + " is a " +
+                        (layer->kind == scene::LayerKind::Voxel ? "voxel" : "mesh") + " layer");
+    if (edits && layer->protected_from_edits())
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "layer is protected (ghosted or locked)");
+    *out_layer = layer;
+    return CLAY_OK;
+}
+
 clay_result read_consolidation(const clay_consolidation_params* params, const float region_min[3],
                                const float region_max[3], scene::ConsolidationParams* out) {
     clay_consolidation_params p;
@@ -9680,10 +9705,11 @@ clay_result clay_layer_consolidation_cost(const clay_document* doc, clay_layer_i
                                           clay_consolidation_cost* out_cost) {
     if (!doc || !params || !out_cost)
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document, params or cost");
-    const scene::Layer* layer = doc->doc.document.find_layer(layer_id);
-    if (!layer) return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
+    const scene::Layer* layer = nullptr;
+    clay_result r = find_consolidatable(doc, layer_id, /*edits=*/false, &layer);
+    if (r != CLAY_OK) return r;
     scene::ConsolidationParams p;
-    clay_result r = read_consolidation(params, region_min, region_max, &p);
+    r = read_consolidation(params, region_min, region_max, &p);
     if (r != CLAY_OK) return r;
     r = begin_out_cost(out_cost);
     if (r != CLAY_OK) return r;
@@ -9763,12 +9789,11 @@ clay_result clay_layer_consolidate_cancellable(clay_document* doc, clay_layer_id
                                    clay_consolidation_cost* out_cost,
                                                clay_cancel_token* token) {
     if (!doc || !params) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or params");
-    const scene::Layer* layer = doc->doc.document.find_layer(layer_id);
-    if (!layer) return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
-    if (layer->protected_from_edits())
-        return fail(CLAY_ERROR_INVALID_ARGUMENT, "layer is protected (ghosted or locked)");
+    const scene::Layer* layer = nullptr;
+    clay_result r = find_consolidatable(doc, layer_id, /*edits=*/true, &layer);
+    if (r != CLAY_OK) return r;
     scene::ConsolidationParams p;
-    clay_result r = read_consolidation(params, region_min, region_max, &p);
+    r = read_consolidation(params, region_min, region_max, &p);
     if (r != CLAY_OK) return r;
     if (out_cost) {
         r = begin_out_cost(out_cost);
@@ -9817,6 +9842,13 @@ clay_result read_region(const float region_min[3], const float region_max[3],
     return CLAY_OK;
 }
 
+// An out_merge the caller may omit, validated before anything is sampled.
+clay_result read_optional_merge(const clay_region_merge* out_merge) {
+    if (!out_merge) return CLAY_OK;
+    clay_region_merge probe;
+    return read_desc(out_merge, kRegionMergeOriginal, &probe);
+}
+
 void write_merge(const scene::RegionMerge& plan, clay_region_merge* out) {
     const std::uint32_t declared = out->struct_size;
     clay_region_merge filled{};
@@ -9844,8 +9876,8 @@ clay_result clay_layer_plan_region_merge(const clay_document* doc, clay_layer_id
     if (r != CLAY_OK) return r;
     math::Aabb region;
     if ((r = read_region(region_min, region_max, &region)) != CLAY_OK) return r;
-    const scene::Layer* layer = doc->doc.document.find_layer(layer_id);
-    if (!layer) return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
+    const scene::Layer* layer = nullptr;
+    if ((r = find_consolidatable(doc, layer_id, /*edits=*/false, &layer)) != CLAY_OK) return r;
     write_merge(scene::plan_region_merge(*layer, region), out_merge);
     return CLAY_OK;
 }
@@ -9859,23 +9891,16 @@ clay_result clay_layer_consolidate_region(clay_document* doc, clay_layer_id laye
     math::Aabb region;
     clay_result r = read_region(region_min, region_max, &region);
     if (r != CLAY_OK) return r;
-    if (out_merge) {
-        clay_region_merge probe;
-        if ((r = read_desc(out_merge, kRegionMergeOriginal, &probe)) != CLAY_OK) return r;
-    }
-    const scene::Layer* layer = doc->doc.document.find_layer(layer_id);
-    if (!layer) return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
-    if (layer->protected_from_edits())
-        return fail(CLAY_ERROR_INVALID_ARGUMENT, "layer is protected (ghosted or locked)");
+    if ((r = read_optional_merge(out_merge)) != CLAY_OK) return r;
+    const scene::Layer* layer = nullptr;
+    if ((r = find_consolidatable(doc, layer_id, /*edits=*/true, &layer)) != CLAY_OK) return r;
 
     scene::ConsolidationParams p;
     // The region goes to the merge, not through the params: the closure
     // replaces params.region, so passing it twice would invite a caller to set
     // one and mean the other.
     if ((r = read_consolidation(params, nullptr, nullptr, &p)) != CLAY_OK) return r;
-    if (out_cost) {
-        if ((r = begin_out_cost(out_cost)) != CLAY_OK) return r;
-    }
+    if (out_cost && (r = begin_out_cost(out_cost)) != CLAY_OK) return r;
 
     scene::ConsolidationCost cost;
     scene::RegionMerge plan;

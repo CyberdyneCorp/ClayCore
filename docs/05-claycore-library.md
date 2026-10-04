@@ -386,6 +386,19 @@ is **not** an error — it succeeds, advises nothing and zeroes, following
 `clay_layer_warp_cost_get`'s rule that a host walking a stack of mixed kinds
 should not have to special-case them.
 
+The calls that bake or price a bake do **not** follow that rule. Since #659
+`clay_layer_consolidation_cost`, `clay_layer_consolidate` (and `_cancellable`),
+`clay_layer_plan_region_merge` and `clay_layer_consolidate_region` refuse a
+voxel or a mesh layer with `CLAY_ERROR_UNSUPPORTED`, before the protection check
+and before anything is sampled, and `clay_last_error` names the representation
+("consolidation applies to SDF layers: layer 3 is a voxel layer"). Before, those
+layers fell through to the bake and answered `CLAY_ERROR_INVALID_ARGUMENT`
+"nothing to consolidate" — the answer for an *empty SDF* layer, which a host
+passing the detail through showed an artist as "already optimised". An empty
+SDF layer still answers `CLAY_ERROR_INVALID_ARGUMENT`, so the code alone tells
+"wrong kind of layer" from "nothing there yet". `clay_layer_consolidation_state`
+stays a plain query and answers 0.
+
 **The engine still never bakes on its own**, and that is the settled answer to
 the standing question of automatic background consolidation. Consolidation is
 destructive; an engine firing it on a background thread would be mutating a
