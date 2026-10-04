@@ -13876,10 +13876,6 @@ clay_result clay_voxel_to_layer(clay_document* doc, const clay_voxel_grid* grid,
     if (!volume)
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "the grid could not be converted to a field");
 
-    clay_layer_id layer = 0;
-    r = clay_add_sdf_layer(doc, name, &layer);
-    if (r != CLAY_OK) return r;
-
     scene::Node node;
     node.prim = scene::Prim::volume();
     node.volume = std::make_shared<const field::FieldVolume>(std::move(*volume));
@@ -13888,10 +13884,24 @@ clay_result clay_voxel_to_layer(clay_document* doc, const clay_voxel_grid* grid,
     // colour to give — and picking a palette entry for it would mean running a
     // conversion per entry just to find one, which is the cost this change
     // exists to remove.
-    clay_node_id placed = 0;
-    r = insert_node(doc, layer, std::move(node), &placed);
+
+    // The layer is added ALREADY HOLDING its volume, as ONE AddLayerCmd, so the
+    // conversion is one undo step (#656). It was clay_add_sdf_layer and then
+    // insert_node — two commands, two steps — and one undo took the volume back
+    // and left an empty layer standing. One command is also atomic: there is
+    // no moment between "layer added" and "item added" for a failure to strand
+    // an empty layer, which a begin/end_group bracket could only paper over by
+    // recording an add and its removal as a step that does nothing.
+    scene::Layer layer;
+    layer.id = doc->doc.document.reserve_layer_id();
+    layer.name = name;
+    layer.sdf = std::make_shared<scene::SdfContent>();
+    layer.sdf->insert(std::move(node));
+    const clay_layer_id id = layer.id;
+    r = apply_edit(doc, scene::Command{scene::AddLayerCmd{std::move(layer), -1}},
+                   "layer could not be added");
     if (r != CLAY_OK) return r;
-    if (out_layer) *out_layer = layer;
+    if (out_layer) *out_layer = id;
     return CLAY_OK;
 }
 
