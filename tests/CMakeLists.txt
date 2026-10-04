@@ -139,6 +139,8 @@ add_executable(clay_unit_tests
   unit/test_c_voxel_incremental.cpp
   unit/test_c_mask.cpp
   unit/test_c_stroke.cpp
+  unit/test_stroke_settle.cpp
+  unit/test_c_stroke_session.cpp
   unit/test_layer_composition.cpp
   unit/test_layer_fold.cpp
   unit/test_layer_fold_sites.cpp

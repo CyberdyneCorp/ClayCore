@@ -53,6 +53,9 @@ CLASS_PREFIX = {
     "VertexDeltas": ("clay_mesh_deltas_",),
     "Lattice": ("clay_mesh_lattice_",),
     "StrokePreset": ("clay_stroke_preset_",),
+    # A stroke resolved as it arrives (#670): append / end / stamps cross as
+    # clay_stroke_tx_append / _end / _stamps.
+    "StrokeTransaction": ("clay_stroke_tx_",),
     # The brush model and preset (add-shared-brush-kernels). Their fields cross
     # as members of clay_brush_model and clay_brush_preset rather than as
     # functions, so a field is satisfied by the call that carries the whole
@@ -185,6 +188,8 @@ ALIASES = {
     # the preset is an argument in C, not the receiver, so the name has no
     # _preset_ in it
     "StrokePreset.resolve": "clay_stroke_resolve",
+    # `_status` is the descriptor's own name in C, so the call is `_get`.
+    "StrokeTransaction.status": "clay_stroke_tx_status_get",
     "Layer.eval": "clay_layer_eval_points",
     "Layer.colors": "clay_layer_eval_points",
     "Layer.gradients": "clay_layer_eval_gradients",
@@ -421,6 +426,7 @@ CLASS_CTOR = {
     "BrushPostPolicy": None,
     "AutomaskFactor": None,
     "StrokePreset": "clay_stroke_preset_defaults",
+    "StrokeTransaction": "clay_stroke_tx_begin",
     "BrushPreset": "clay_brush_preset_defaults",
     "DynamicSurface": "clay_dynamic_surface_from_mesh",
     "DynamicSculptor": "clay_dynamic_sculptor_create",
@@ -597,6 +603,17 @@ EXEMPT = {
 # runs one way. An entry is a follow-up, not an exemption: nothing fails while
 # one is listed, and removing it is the point.
 C_ONLY_FOLLOW_UPS = {
+    "StrokeTransaction consumers": "the six clay_*_apply_stroke_tx calls (ABI 0.126.0, "
+                                   "#670) feed a stroke session to a layer, grid, mask "
+                                   "or sculptor as its stamps settle, holding the "
+                                   "gesture (an undo group, a carried region) open "
+                                   "between calls. pyclay has the session itself -- "
+                                   "StrokeTransaction, so a parity harness compares "
+                                   "batched stamps against StrokePreset.resolve -- but "
+                                   "not the consumers, which want a binding that holds "
+                                   "a borrowed target across calls safely from Python. "
+                                   "The C++ gestures (brush::MeshStrokeGesture and its "
+                                   "two siblings) are what that binding would wrap.",
     "SdfPrefixCache": "clay_sdf_prefix_cache_* (ABI 0.79.0) accelerates ONE thing — the "
                       "SDF Smooth transaction — and pyclay does not expose that "
                       "transaction at all. A Python binding for the cache would be a "
