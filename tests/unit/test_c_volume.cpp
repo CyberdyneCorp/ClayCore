@@ -987,6 +987,119 @@ TEST_CASE("c abi: a relax can be sampled from a document") {
     clay_document_destroy(doc);
 }
 
+namespace {
+
+clay_topological_move_params topological_move(float dx, float dz) {
+    clay_topological_move_params mp;
+    std::memset(&mp, 0, sizeof mp);
+    mp.struct_size = sizeof mp;
+    mp.anchor[2] = 1.0f;  // the crown of the unit ball
+    mp.radius = 0.3f;
+    mp.displacement[0] = dx;
+    mp.displacement[2] = dz;
+    return mp;
+}
+
+clay_document* place_alone(clay_item* it) {
+    clay_document* d = clay_document_create();
+    clay_layer_id l = 0;
+    REQUIRE(clay_add_sdf_layer(d, "o", &l) == CLAY_OK);
+    REQUIRE(clay_layer_add_item(d, l, it, nullptr) == CLAY_OK);
+    return d;
+}
+
+}  // namespace
+
+TEST_CASE("c abi: a topological move can be sampled from a document (#657)") {
+    clay_layer_id layer = 0;
+    clay_document* doc = unit_ball_doc(&layer);
+    clay_volume_params vp = volume_params(0.02f);
+
+    SUBCASE("a short drag matches bake-then-move") {
+        // A band wide enough that the baked volume reports a distance wherever
+        // the drag reads it, so the two differ only by the trilinear read of
+        // the baked samples against the exact document.
+        vp.band = 0.12f;
+        const clay_topological_move_params mp = topological_move(0.06f, 0.04f);
+
+        clay_item* baked = nullptr;
+        REQUIRE(clay_item_volume_from_document(doc, &vp, kCapMin, kCapMax, &baked) == CLAY_OK);
+        REQUIRE(clay_item_volume_move_topological(baked, &mp) == CLAY_OK);
+
+        clay_item* sampled = nullptr;
+        REQUIRE(clay_item_volume_move_topological_from(doc, &mp, &vp, kCapMin, kCapMax,
+                                                       &sampled) == CLAY_OK);
+        REQUIRE(sampled != nullptr);
+
+        clay_document* two_calls = place_alone(baked);
+        clay_document* one_call = place_alone(sampled);
+        for (const kernel::cfloat3& d : cap_directions())
+            for (float r : {0.97f, 1.0f, 1.03f}) {
+                CAPTURE(d.x);
+                CAPTURE(d.y);
+                CAPTURE(r);
+                CHECK(std::fabs(eval_c(one_call, d * r) - eval_c(two_calls, d * r)) < 0.01f);
+            }
+        // and the drag really moved something: the crown rose
+        CHECK(eval_c(one_call, cf3(0.06f, 0, 1.03f)) < 0.0f);
+
+        clay_item_destroy(baked);
+        clay_item_destroy(sampled);
+        clay_document_destroy(two_calls);
+        clay_document_destroy(one_call);
+    }
+
+    SUBCASE("the issue's long drag needs no band and no region") {
+        // |d| = 0.64 at radius 0.3: the drag the single-step pull-back folded,
+        // leaving the crown at 0.94. Here with the defaults -- a three-cell
+        // band and no region -- which the volume form could not have used: the
+        // document has no band to size, and the defaulted region grows by the
+        // drag, so the pulled material is not clipped at the ball's bounds.
+        const clay_topological_move_params mp = topological_move(0.5f, 0.4f);
+        clay_item* moved = nullptr;
+        REQUIRE(clay_item_volume_move_topological_from(doc, &mp, &vp, nullptr, nullptr,
+                                                       &moved) == CLAY_OK);
+        clay_document* out = place_alone(moved);
+        CHECK(eval_c(out, cf3(0, 0, 0.99f)) < 0.0f);     // no crater under the grip
+        CHECK(eval_c(out, cf3(0.35f, 0, 1.25f)) < 0.0f);  // the pull arrives, unclipped
+        CHECK(eval_c(out, cf3(0, 0, 1.25f)) > 0.0f);      // and is a pull, not a slab
+        clay_item_destroy(moved);
+        clay_document_destroy(out);
+    }
+
+    SUBCASE("refusals") {
+        clay_topological_move_params mp = topological_move(0.06f, 0.0f);
+        clay_item* out = nullptr;
+        clay_volume_params bad = vp;
+        bad.cell_size = 0.0f;  // a document has no intrinsic scale
+        CHECK(clay_item_volume_move_topological_from(doc, &mp, &bad, kCapMin, kCapMax, &out) !=
+              CLAY_OK);
+        // half a region is a caller that meant to pass one
+        CHECK(clay_item_volume_move_topological_from(doc, &mp, &vp, kCapMin, nullptr, &out) !=
+              CLAY_OK);
+        CHECK(clay_item_volume_move_topological_from(doc, &mp, &vp, nullptr, kCapMax, &out) !=
+              CLAY_OK);
+        CHECK(clay_item_volume_move_topological_from(nullptr, &mp, &vp, kCapMin, kCapMax,
+                                                     &out) != CLAY_OK);
+        CHECK(clay_item_volume_move_topological_from(doc, nullptr, &vp, kCapMin, kCapMax,
+                                                     &out) != CLAY_OK);
+        CHECK(clay_item_volume_move_topological_from(doc, &mp, nullptr, kCapMin, kCapMax,
+                                                     &out) != CLAY_OK);
+
+        clay_topological_move_params no_reach = mp;
+        no_reach.radius = 0.0f;
+        CHECK(clay_item_volume_move_topological_from(doc, &no_reach, &vp, kCapMin, kCapMax,
+                                                     &out) != CLAY_OK);
+        clay_topological_move_params nan_drag = mp;
+        nan_drag.displacement[0] = std::nanf("");
+        CHECK(clay_item_volume_move_topological_from(doc, &nan_drag, &vp, nullptr, nullptr,
+                                                     &out) != CLAY_OK);
+        CHECK(out == nullptr);
+    }
+
+    clay_document_destroy(doc);
+}
+
 TEST_CASE("c volume: the feather survives the blob, and an old blob reads hard") {
     // The blob header is self-describing (its size IS the index offset), so
     // the feather appends the same way the sample Lipschitz did: a new reader

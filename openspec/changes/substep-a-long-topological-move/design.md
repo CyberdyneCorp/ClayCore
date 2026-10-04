@@ -1,0 +1,22 @@
+## Context
+A topological move pulls each output sample back by `d · w(g(p))`, where `g` is the geodesic distance from the anchor over the source's material and `w` is the easing curve applied to `1 - g/r`. The map `p -> p - d·w(g(p))` is a perturbation of the identity, and it stays injective while `|d| · |∇w| < 1`. Since `|∇w| ≤ ease_max_slope · |∇g| / r`, and `|∇g|` is about 1 inside the material, the fold starts at roughly `|d| · slope = r`. The issue's drag is at 2.1 times that.
+
+## Decisions
+
+**Split in the engine.** Splitting in the engine rather than refusing was the issue's first option. A refusal turns every long drag into a host problem, which is the problem the issue was filed about. A wrong shape returned with `CLAY_OK` is the worst outcome, and splitting removes it without asking the host for anything.
+
+**Re-solve the geodesic per slice, not advect one solve.** The issue offered either. Advecting one geodesic is cheaper per slice but describes the wrong material: after slice 1 the grip has moved, and the distance along the surface from the new grip position runs over the surface as it now is. Re-solving each slice over the material the earlier slices left is what n host calls compute. The test holds the two within 0.005 on the probe, against 0.03 between 5 and 9 slices. The cost is lower anyway, because each grid shrinks with the slice length.
+
+**Compose the pull-backs, read the source once.** Slice `i`'s material array needs the source as slices `1..i-1` left it. That is `f_0(pb_1(…pb_{i-1}(c)))` at each grid cell `c`, so no intermediate volume is ever built. The final sampling reads `f_0` at `pb_1(…pb_n(p))`. The batched overload hands each window of composed points to the `PointBatch` once, so the pooled evaluator path from v0.51.0 is kept. A host splitting the drag re-samples and re-bakes the whole volume `n` times. Its result also degrades by one trilinear re-sample per call, which the engine's single read avoids.
+
+**Half the fold limit.** `kStepReach = 0.5`. The geodesic comes from a 26-neighbour Dijkstra and is read back trilinearly, so its slope runs a little above 1, and the carried shell has steps where it ends. A slice sized exactly to `|d|·slope = r` would sit on the fold line. With half the limit, a drag under half the radius on a linear curve stays one slice, so typical brush dabs are unchanged.
+
+**Cap at 64, documented rather than refused.** Every output sample composes `n` trilinear reads, so cost grows linearly with `n`. 64 covers a drag of 32 radii on a linear curve. A longer drag runs with longer slices and can fold, which the header says.
+
+**`ease_max_slope` moves to `math`.** `check_layering.py` allows `field -> {parallel, kernel, math}` and `scene -> math`. `kernel` is the GPU dialect, where a sampled loop and `std::sqrt` do not belong, and `math` is already header-only host code over kernel types. One inline definition there, with `scene::ease_max_slope` as a using-declaration, keeps `test_ease_slopes.cpp` and every scene caller unchanged.
+
+**The `_from` default region grows by `|d|`.** `read_volume_sampling`'s default is the document's bounds padded by the band. A pull outward carries material up to `|d|` past that and would be clipped at the region's face. pyclay's `moved_topologically_from` already pads by `band + radius + |d|`. The C form grows only the defaulted region and leaves one the caller passed alone, which is the same rule `flatten_from` follows for an explicit region.
+
+## Risks
+- Sub-stepping changes the result of every long drag. The change is intended, but a host that already splits drags itself now gets slices of slices. That is still correct, since each of its steps is either one slice or split further, and it is slower than one call. The `clay.h` note tells such a host it can stop splitting.
+- Memory is `n` geodesic grids alive at once. Each is smaller than the single grid it replaces. The sum of 5 grids of about 94³ floats is about 16 MB, against about 30 MB for the single 196³ grid on the probe.
