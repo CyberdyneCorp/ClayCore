@@ -160,8 +160,34 @@ struct Tape {
 // fixed dilation bounds it for an arbitrary document, which is why the
 // clamp, not the fit, is the last word. Hard unions have no such term —
 // min() is exact and associative — and measure identical at any length.
+//
+// A SQUASHED PLACEMENT reaches further than its bound for a third reason
+// (issue #649). A per-axis scale — the item's or its layer's — makes the field
+// a BOUND on the distance rather than the distance: `cscale_nu_dist` multiplies
+// the local value by the smallest component, so the field can be short of the
+// true distance by up to q = max(s) / min(s), the two levels' ratios
+// multiplied. "More than band + pad from the bound, so more than band + pad in
+// value" then holds only out to q times that, and a brick in between dropped an
+// item whose field was inside the band there — in-band refill samples off the
+// raw field by up to 0.068 on random documents. The compiler widens such an
+// item's bound by (q - 1) * (band + pad + the dilation the bound already
+// carries) before the test (scene::CullSquash): the item is still culled, just
+// not short of where its field reaches.
+//
+// That is what `band` is for: how far inside `region` every sample the caller
+// will trust lies — the dilation it applied to its brick. Zero claims the
+// samples may sit anywhere in the region, which is right for a caller that names
+// a region rather than a brick, and under-widens a squashed item for one that
+// dilated a brick without saying so. Nothing else reads it: a document with no
+// per-axis scale culls exactly as it did, whatever the band says.
 struct CullRegion {
     math::Aabb region;
+    float band = 0.0f;
+
+    CullRegion() = default;
+    // Not explicit: `CullRegion cull{box}` is how a caller that names a region
+    // rather than a brick spells it.
+    CullRegion(const math::Aabb& r, float b = 0.0f) : region(r), band(b) {}
 };
 
 class CullIndex;

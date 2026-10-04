@@ -996,6 +996,28 @@ void expand_by_radial_copies(const Node& item, const Layer& layer, const Aabb& l
 // deformer's own ball -- for `deformer_head_reach_in_document`, which places
 // a region of the item rather than all of it and must take every copy and
 // every dilation this does, not a second spelling of them.
+// How far an item's bound reaches past its placed geometry: the rounding and
+// the combine's support. Shared with `item_cull_squash`, which widens a
+// squashed item's bound by a multiple of exactly this.
+//
+// Rounding is authored in item-local units (tape emits round*scale);
+// erosion (negative rounding) shrinks the surface, never the bound.
+// Paint fades over max(profile support, k). Extended modes deviate
+// within their documented support of the item surface (kernel/tape.h) —
+// for groove/tongue that is the rounding again (rb), on top of the
+// rounding dilation the item field already carries.
+// Rounding is authored in item-local units and the tape converts it by the
+// same factor it multiplies the distance by, so the bound has to use that
+// factor too rather than the uniform scale alone.
+float item_bound_dilation(const Node& item, const Layer& layer) {
+    float round_world = item.rounding * placed_distance_scale(layer, item);
+    float combine = op_is_extended(item.op)
+                        ? kernel::ccombine_extended_support(static_cast<int>(item.op),
+                                                            item.blend.k, round_world)
+                        : kernel::cmax(item.blend.support(), item.blend.k);
+    return kernel::cmax(round_world, 0.0f) + combine;
+}
+
 Aabb placed_local_bound(const Node& item, const Layer& layer, const Aabb& local, bool with_copies,
                         const math::cfloat4x4* layer_m = nullptr) {
     if (local.empty()) return local;
@@ -1013,21 +1035,7 @@ Aabb placed_local_bound(const Node& item, const Layer& layer, const Aabb& local,
         expand_by_mirror_copies(item, layer, local, lm, &bound);
         if (item.mirror) expand_by_radial_copies(item, layer, local, lm, &bound);
     }
-    // Rounding is authored in item-local units (tape emits round*scale);
-    // erosion (negative rounding) shrinks the surface, never the bound.
-    // Paint fades over max(profile support, k). Extended modes deviate
-    // within their documented support of the item surface (kernel/tape.h) —
-    // for groove/tongue that is the rounding again (rb), on top of the
-    // rounding dilation the item field already carries.
-    // Rounding is authored in item-local units and the tape converts it by the
-    // same factor it multiplies the distance by, so the bound has to use that
-    // factor too rather than the uniform scale alone.
-    float round_world = item.rounding * placed_distance_scale(layer, item);
-    float combine = op_is_extended(item.op)
-                        ? kernel::ccombine_extended_support(static_cast<int>(item.op),
-                                                            item.blend.k, round_world)
-                        : kernel::cmax(item.blend.support(), item.blend.k);
-    return bound.dilated(kernel::cmax(round_world, 0.0f) + combine);
+    return bound.dilated(item_bound_dilation(item, layer));
 }
 
 Aabb geometry_bound(const Node& item, const Layer& layer, bool with_copies,
@@ -1039,6 +1047,14 @@ Aabb geometry_bound(const Node& item, const Layer& layer, bool with_copies,
 
 Aabb item_geometry_bound(const Node& item, const Layer& layer) {
     return geometry_bound(item, layer, /*with_copies=*/true);
+}
+
+CullSquash item_cull_squash(const Node& item, const Layer& layer) {
+    if (placed_is_similarity(layer, item)) return CullSquash{};
+    const float q = scale_axes_reach(layer.scale_axes) / scale_axes_factor(layer.scale_axes) *
+                    (scale_axes_reach(item.scale_axes) / scale_axes_factor(item.scale_axes));
+    const float slope = kernel::cmax(q - 1.0f, 0.0f);
+    return CullSquash{slope, slope * item_bound_dilation(item, layer)};
 }
 
 bool item_is_feathered_replace(const Node& item) {
@@ -1691,6 +1707,42 @@ Aabb node_influence_bound(const SdfContent& content, NodeId id, const Layer& lay
         b.expand(cb);
     }
     return b.empty() ? b : b.dilated(group_blend_support(*n, layer));
+}
+
+namespace {
+// What `layer_influence_extent` covers, as a squash: the widest over the items
+// whose geometry it unions. An intersect's bound IS that extent, so this is the
+// widening that goes with it.
+CullSquash layer_cull_squash(const SdfContent& content, const Layer& layer) {
+    CullSquash s;
+    for (const auto& [id, n] : content.nodes()) {
+        (void)id;
+        if (!n.is_group && n.visible) s.raise(item_cull_squash(n, layer));
+    }
+    return s;
+}
+}  // namespace
+
+// Term for term the walk `node_influence_bound` takes, so the widening always
+// goes with the box it widens.
+CullSquash node_cull_squash(const SdfContent& content, NodeId id, const Layer& layer) {
+    const Node* n = content.find(id);
+    if (!n || !n->visible) return CullSquash{};
+    if (!n->is_group)
+        return item_nonlocality(*n) == Nonlocality::BoundedByLayer
+                   ? layer_cull_squash(content, layer)
+                   : item_cull_squash(*n, layer);
+    // An infinite bound is never culled, so only the intersect arm, whose box
+    // is the layer's extent, needs a widening.
+    if (!op_is_local(n->op))
+        return n->op == Op::Intersect ? layer_cull_squash(content, layer) : CullSquash{};
+    CullSquash s;
+    for (NodeId c : n->children) s.raise(node_cull_squash(content, c, layer));
+    // The group's own support is reached at q times its width too, as the
+    // item's is: a child D from its geometry reads at least D / q, and the
+    // group's combine moves the result wherever that is within its support.
+    s.reach += s.slope * group_blend_support(*n, layer);
+    return s;
 }
 
 // Does a group's OWN combine apply at all, or does it merely initialise?

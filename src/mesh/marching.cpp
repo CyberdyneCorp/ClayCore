@@ -736,7 +736,8 @@ void apply_brick_attributes(Mesh& m, const brick::BrickCache& cache, const scene
     math::Aabb all_regions;
     for (const auto& [key, verts] : groups)
         all_regions.expand(cache.cull_region(key).dilated(options.gradient_eps));
-    const scene::CullPlan plan = cull_index->plan(all_regions);
+    const float band = cache.config().band();
+    const scene::CullPlan plan = cull_index->plan(all_regions, band);
     // ONE culled tape per group, shared by the colour and the normal of every
     // vertex the group holds. The evaluation goes to the CPU backend as a
     // single flattened batch (eval_points_batch) rather than a serial loop
@@ -758,7 +759,7 @@ void apply_brick_attributes(Mesh& m, const brick::BrickCache& cache, const scene
     for (const auto& [key, verts] : groups) {
         // Dilated by gradient_eps on top of the band, so the tetrahedron taps
         // of a vertex at the region's edge stay inside the culled zone.
-        const scene::CullRegion cull{cache.cull_region(key).dilated(options.gradient_eps)};
+        const scene::CullRegion cull{cache.cull_region(key).dilated(options.gradient_eps), band};
         tapes.push_back(scene::compile_document(doc, &cull, cull_index, &plan));
         order.insert(order.end(), verts.begin(), verts.end());
         offsets.push_back(order.size());

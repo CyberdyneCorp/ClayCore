@@ -82,6 +82,52 @@ bool deformers_bound_gradient(const Node& item);
 // is what meshing and raycast clipping want.
 math::Aabb item_geometry_bound(const Node& item, const Layer& layer);
 
+// HOW FAR PAST ITS BOUND A SQUASHED PLACEMENT'S FIELD STILL READS IN THE BAND,
+// as the per-brick cull needs it (issue #649; tape.h, CullRegion).
+//
+// Outside its bound an item's field exceeds band + pad only when that field is
+// a distance. Under a per-axis scale it is not: `cscale_nu_dist` multiplies the
+// local value by the smallest component, so the field is short of the true
+// distance by up to q = max(s) / min(s) at each level, the two ratios
+// multiplied. A point D from the item's geometry therefore reads at least D / q
+// (less the rounding), and the cull's "more than band + pad + w from the
+// geometry" -- w being what the bound already dilates by, the rounding and the
+// combine's support -- must become q times that. So the bound is widened by
+//
+//     slope * (band + pad) + reach,    slope = q - 1,  reach = slope * w,
+//
+// before it is tested. A group carries the widest slope of its subtree and the
+// widest reach, plus slope times its own blend support, for the same reason
+// one level up.
+//
+// ZERO for a similarity -- the default (1, 1, 1) included -- exactly, since
+// q is then max/min of three equal floats. So a document with no per-axis
+// scale makes bit-identical cull decisions to the cull before this existed.
+//
+// It widens; it does not exempt. `item_geometry_reach_in_document` refuses a
+// squashed placement outright because it has no band to widen by; the cull
+// does, and keeps culling a squashed item everywhere its field cannot reach.
+struct CullSquash {
+    float slope = 0.0f;
+    float reach = 0.0f;
+
+    bool none() const { return slope == 0.0f && reach == 0.0f; }
+    // The widening for a cull whose samples lie `band_pad` inside its test
+    // region: the caller's band plus the compiler's pad.
+    float dilation(float band_pad) const { return slope * band_pad + reach; }
+    void raise(const CullSquash& o) {
+        slope = kernel::cmax(slope, o.slope);
+        reach = kernel::cmax(reach, o.reach);
+    }
+};
+
+// One item, placed by its layer.
+CullSquash item_cull_squash(const Node& item, const Layer& layer);
+
+// A node as the cull tests it: an item as above, a group over its subtree (the
+// box `node_influence_bound` returns, widened by this, is what it covers).
+CullSquash node_cull_squash(const SdfContent& content, NodeId id, const Layer& layer);
+
 // Whether an item's influence is confined to its own geometry. False means the
 // item changes the field arbitrarily far away — a non-local op, an infinite
 // grid repeat, or a primitive with no finite extent — and no finite bound may

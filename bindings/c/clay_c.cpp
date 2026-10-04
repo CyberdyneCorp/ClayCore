@@ -3798,7 +3798,7 @@ clay_result try_band(const Compile& compile, eval::Backend& backend, const math:
     *out_answered = false;
     *out_reach = std::numeric_limits<float>::infinity();
     scene::Tape tape;
-    const scene::CullRegion cull{box.dilated(band + tap_pad)};
+    const scene::CullRegion cull{box.dilated(band + tap_pad), band};
     clay_result r = compile(&cull, &tape);
     if (r != CLAY_OK) return r;
     // A region that kept NOTHING cannot answer: every probe reads
@@ -4665,6 +4665,22 @@ clay_result read_region(const float region_min[3], const float region_max[3], co
     return CLAY_OK;
 }
 
+// How far inside a host's cull region every sample of its lattice lies: the band
+// the region was dilated by, as far as the call can see it (scene::CullRegion).
+// A host hands clay_eval_grid a brick's cull region and the brick's lattice, so
+// this recovers the band clay_brick_cache_cull_region added. Zero when a sample
+// sits on or outside the region, which claims nothing.
+float lattice_band_in(const math::Aabb& region, const eval::GridQuery& q) {
+    const kernel::cfloat3 last =
+        q.origin + kernel::cf3(q.spacing * static_cast<float>(q.nx - 1),
+                               q.spacing * static_cast<float>(q.ny - 1),
+                               q.spacing * static_cast<float>(q.nz - 1));
+    const float m = std::min({q.origin.x - region.min.x, q.origin.y - region.min.y,
+                              q.origin.z - region.min.z, region.max.x - last.x,
+                              region.max.y - last.y, region.max.z - last.z});
+    return m > 0.0f ? m : 0.0f;
+}
+
 // count * per, computed where it cannot wrap, and required to be exactly the
 // caller's capacity. A count is the one argument this boundary cannot check
 // against the caller's memory, so it is not inferred.
@@ -5168,7 +5184,7 @@ scene::Tape compile_request_tape(const clay_document* doc, const clay_brick_requ
                                  ChunkHalf half, scene::LayerId active,
                                  const scene::CullIndex* index, const scene::CullPlan* plan,
                                  scene::TapeCheckpoint* cp) {
-    scene::CullRegion cull{request_brick_box(req).dilated(req.band)};
+    scene::CullRegion cull{request_brick_box(req).dilated(req.band), req.band};
     const scene::Document& d = doc->doc.document;
     if (half == ChunkHalf::Whole)
         return cp ? scene::compile_document_resumable(d, cp, &cull, index, plan)
@@ -5216,9 +5232,12 @@ clay_result eval_requests_in_chunks(const clay_document* doc, const clay_brick_r
     }
     std::shared_ptr<const scene::CullIndex> index = doc->cull_index();
     math::Aabb batch_region;
-    for (std::size_t i = 0; i < count; ++i)
+    float batch_band = 0.0f;
+    for (std::size_t i = 0; i < count; ++i) {
         batch_region.expand(request_brick_box(requests[i]).dilated(requests[i].band));
-    const scene::CullPlan plan = index->plan(batch_region);
+        batch_band = std::max(batch_band, requests[i].band);
+    }
+    const scene::CullPlan plan = index->plan(batch_region, batch_band);
     constexpr std::size_t kChunk = 4096;
     constexpr bool kWantCheckpoints = !std::is_same_v<std::decay_t<Post>, NoPost>;
     std::vector<scene::Tape> tapes;
@@ -8001,7 +8020,7 @@ void prepare_frontier_seeds(clay_document* doc, const DragFrontier& frontier) {
                         job.key.spacing * static_cast<float>(job.key.dims[1]),
                         job.key.spacing * static_cast<float>(job.key.dims[2]));
         const math::Aabb box = math::Aabb{lo, lo + size}.dilated(job.key.band);
-        scene::CullRegion cull{box};
+        scene::CullRegion cull{box, job.key.band};
         scene::Tape prefix;
         if (!scene::compile_layer_prefix(d, job.boundary, &prefix, &cull, prep.index.get()))
             continue;  // values stay empty; phase C skips the job
@@ -14192,8 +14211,8 @@ clay_result clay_eval_grid(const clay_document* doc, const char* backend,
     // revision-cached cull index, so it walks the region's neighbourhood
     // rather than the whole document.
     std::shared_ptr<const scene::CullIndex> index = doc->cull_index();
-    const scene::CullPlan plan = index->plan(region);
-    scene::CullRegion cull{region};
+    const scene::CullRegion cull{region, lattice_band_in(region, query)};
+    const scene::CullPlan plan = index->plan(region, cull.band);
     scene::Tape tape = scene::compile_document(doc->doc.document, &cull, index.get(), &plan);
     return eval_grid_into(tape, backend, query, out_values, out_colors_rgb);
 }
@@ -14389,8 +14408,8 @@ clay_result clay_eval_grid_device(const clay_document* doc, clay_device* device,
     const scene::Tape* tape = nullptr;
     if (has_region) {
         std::shared_ptr<const scene::CullIndex> index = doc->cull_index();
-        const scene::CullPlan plan = index->plan(region);
-        scene::CullRegion cull{region};
+        const scene::CullRegion cull{region, lattice_band_in(region, query)};
+        const scene::CullPlan plan = index->plan(region, cull.band);
         culled = scene::compile_document(doc->doc.document, &cull, index.get(), &plan);
         tape = &culled;
     } else {
@@ -15214,7 +15233,7 @@ UniformProbe probe_uniform_seed(const clay_document* doc, const clay_brick_reque
 // cull index snapshot and writes only its own brick's slot.
 void run_uniform_task(const clay_document* doc, const clay_brick_request& req,
                       const scene::CullIndex* index, ResumeTask& t) {
-    scene::CullRegion cull{request_brick_box(req).dilated(req.band)};
+    scene::CullRegion cull{request_brick_box(req).dilated(req.band), req.band};
     scene::Tape suffix;
     scene::TapeCheckpoint next;
     if (!scene::compile_layer_suffix(t.plan->checkpoint, doc->doc.document, t.plan->appended,
@@ -15277,8 +15296,9 @@ void run_resume_task(const ResumeRun& run, ResumeTask& t, std::vector<float>& po
         run_uniform_task(run.doc, run.requests[t.slot], run.index, t);
         return;
     }
-    const math::Aabb box = request_brick_box(run.requests[t.slot]).dilated(run.requests[t.slot].band);
-    scene::CullRegion cull{box};
+    const float band = run.requests[t.slot].band;
+    const math::Aabb box = request_brick_box(run.requests[t.slot]).dilated(band);
+    scene::CullRegion cull{box, band};
     // The checkpoint is PER BRICK where it has frames, because a frame's
     // `emits` depends on this brick's own cull. The plan supplies what is
     // batch-wide -- the layer and the appended ids -- and the seed the rest.

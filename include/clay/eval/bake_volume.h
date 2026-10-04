@@ -246,7 +246,7 @@ inline field::FieldVolume::BrickBlockFill document_block_fill(const scene::Docum
             std::size_t sampled = 0, instrs = 0;
             for (std::size_t slot = 0; slot < slots && sampled < kProbes;
                  slot += step, ++sampled) {
-                scene::CullRegion cr{grid.brick_box(slot).dilated(grid.band)};
+                scene::CullRegion cr{grid.brick_box(slot).dilated(grid.band), grid.band};
                 instrs += scene::compile_document(doc, &cr).instrs.size();
             }
             const std::size_t whole = tape.instrs.size();
@@ -274,11 +274,12 @@ inline field::FieldVolume::BrickBlockFill document_block_fill(const scene::Docum
         for (std::size_t s = 0; s < count; ++s)
             window.expand(grid.brick_box(first + s).dilated(grid.band));
         const scene::CullIndex& idx = **index;
-        const scene::CullPlan plan = idx.plan(window);
+        const scene::CullPlan plan = idx.plan(window, grid.band);
         parallel::ThreadPool::instance().parallel_for(
             count, 1, [&](std::size_t lo, std::size_t hi) {
                 for (std::size_t s = lo; s < hi; ++s) {
-                    scene::CullRegion cr{grid.brick_box(first + s).dilated(grid.band)};
+                    scene::CullRegion cr{grid.brick_box(first + s).dilated(grid.band),
+                                         grid.band};
                     const scene::Tape brick = scene::compile_document(doc, &cr, &idx, &plan);
                     float* block = out + s * field::kBrickSamples;
                     bool near = false;

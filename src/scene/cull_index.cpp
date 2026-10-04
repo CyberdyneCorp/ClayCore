@@ -121,12 +121,14 @@ void CullIndex::build_chain(const SdfContent& content, const std::vector<NodeId>
         e.id = id;
         if (n->is_group) {
             e.bound = node_influence_bound(content, id, layer);
+            e.squash = node_cull_squash(content, id, layer);
             // A group is always cull-tested; its bound reports infinity for
             // a non-local subtree, which the survive test lets through.
             e.local = true;
             build_chain(content, n->children, layer);
         } else {
             e.bound = item_geometry_bound(*n, layer);
+            e.squash = item_cull_squash(*n, layer);
             e.local = item_influence_is_local(*n);
             // The compiler's choice between the feathered and the hard
             // replace depends on whether the cull dropped ANYTHING from this
@@ -136,6 +138,7 @@ void CullIndex::build_chain(const SdfContent& content, const std::vector<NodeId>
         }
         chain.entries.push_back(e);
         chain.probes.push_back(probe_for(e));
+        chain.widest.raise(e.squash);
     }
     chains_.push_back(std::move(chain));
 }
@@ -245,6 +248,7 @@ bool CullIndex::append(const std::vector<NodeId>& appended) {
             bool forbids_pruning = false;
             if (n->is_group) {
                 e.bound = node_influence_bound(content, id, layer);
+                e.squash = node_cull_squash(content, id, layer);
                 // A group is always cull-tested; its bound reports infinity for
                 // a non-local subtree, which the survive test lets through.
                 e.local = true;
@@ -252,11 +256,13 @@ bool CullIndex::append(const std::vector<NodeId>& appended) {
                 build_chain(content, n->children, layer);
             } else {
                 e.bound = item_geometry_bound(*n, layer);
+                e.squash = item_cull_squash(*n, layer);
                 e.local = item_influence_is_local(*n);
                 forbids_pruning = item_is_feathered_replace(*n);
             }
             chains_[at].entries.push_back(e);
             chains_[at].probes.push_back(probe_for(e));
+            chains_[at].widest.raise(e.squash);
             if (forbids_pruning) chains_[at].prunable = false;
         }
     }
@@ -276,9 +282,10 @@ bool CullIndex::append(const std::vector<NodeId>& appended) {
     return true;
 }
 
-CullPlan CullIndex::plan(const math::Aabb& region) const {
+CullPlan CullIndex::plan(const math::Aabb& region, float band) const {
     CullPlan plan;
     plan.pruned_.reserve(chains_.size());
+    plan.band_ = band;
     // Dilated by the feather pad exactly as the per-brick test is
     // (Compiler::begin_cull), so coarse survival stays a superset of
     // per-brick survival.
@@ -306,11 +313,21 @@ CullPlan CullIndex::plan(const math::Aabb& region) const {
     const bool packed = !test.is_infinite();
     for (const Chain& chain : chains_) {
         if (!chain.prunable) continue;
+        // A chain holding a squashed placement is scanned against a region
+        // widened by its widest entry's widening at this band (issue #649) --
+        // the same widening the per-brick test applies to each entry's bound,
+        // applied to the region instead, where one box serves the whole chain.
+        // Dilating keeps an infinite region infinite and an empty one empty,
+        // so `packed` still answers for it.
+        const bool squashed = !chain.widest.none();
+        plan.squashed_ = plan.squashed_ || squashed;
+        const math::Aabb chain_test =
+            squashed ? test.dilated(chain.widest.dilation(band + pad_)) : test;
         std::vector<Entry> kept;
         if (packed)
-            scan_packed(chain.entries, chain.probes, test, &kept);
+            scan_packed(chain.entries, chain.probes, chain_test, &kept);
         else
-            scan_exact(chain.entries, test, &kept);
+            scan_exact(chain.entries, chain_test, &kept);
         // Stored even when nothing was dropped: the survivors carry the
         // cached bounds, so a planned chain never recomputes one per brick.
         plan.pruned_.emplace(Key{chain.layer, chain.ids}, std::move(kept));

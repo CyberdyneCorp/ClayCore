@@ -181,6 +181,7 @@ add_executable(clay_unit_tests
   unit/test_c_mask_from_group.cpp
   unit/test_volume_cull.cpp
   unit/test_deformer_cull.cpp
+  unit/test_squashed_cull.cpp
   unit/test_layer_extent_cache.cpp
   unit/test_layer_placement.cpp
   unit/test_computed_placement.cpp
