@@ -864,6 +864,44 @@ TEST_CASE("c stroke session: an adaptive gesture is the whole-path gesture, reco
         clay_dynamic_sculptor_destroy(sculptor);
         clay_dynamic_surface_destroy(surface);
     }
+
+    SUBCASE("a call after the close leaves the record's marks alone") {
+        // The multires consumer once re-bound its record on a call after the
+        // close. The adaptive one must not re-mark either: a record that the
+        // surface has moved past stays refused, however many no-op calls the
+        // host makes after the gesture ended.
+        clay_stroke_preset preset = defaults();
+        preset.radius = 0.3f;
+        std::vector<clay_stroke_sample_full> samples = path(20, -0.4f, 0.4f, false);
+        for (clay_stroke_sample_full& s : samples) s.position[2] = 1.0f;
+        clay_mesh_brush_desc brush = mesh_brush(CLAY_MESH_BRUSH_DRAW, 0.3f, 0.4f);
+        clay_dynamic_surface* surface = sphere_surface(12);
+        clay_dynamic_sculptor* sculptor = nullptr;
+        REQUIRE(clay_dynamic_sculptor_create(surface, &sculptor) == CLAY_OK);
+        clay_dynamic_delta* record = clay_dynamic_delta_create();
+        clay_stroke_tx* tx = begin(preset);
+        std::size_t applied = 0;
+        run_session(tx, samples, 5, [&] {
+            std::size_t n = 0;
+            REQUIRE(clay_dynamic_sculptor_apply_stroke_tx(sculptor, tx, &brush, nullptr, nullptr,
+                                                          0, record, &n, nullptr) == CLAY_OK);
+            applied += n;
+        });
+        REQUIRE(applied > 0);
+        clay_mesh_brush_desc stray = brush;
+        stray.center[2] = 1.0f;
+        REQUIRE(clay_dynamic_sculptor_stamp(sculptor, &stray, nullptr, nullptr, nullptr) ==
+                CLAY_OK);
+        std::size_t n = 7;
+        REQUIRE(clay_dynamic_sculptor_apply_stroke_tx(sculptor, tx, &brush, nullptr, nullptr, 0,
+                                                      record, &n, nullptr) == CLAY_OK);
+        CHECK(n == 0);
+        CHECK(clay_dynamic_delta_revert(record, sculptor) == CLAY_ERROR_SNAPSHOT_MISMATCH);
+        clay_stroke_tx_destroy(tx);
+        clay_dynamic_delta_destroy(record);
+        clay_dynamic_sculptor_destroy(sculptor);
+        clay_dynamic_surface_destroy(surface);
+    }
 }
 
 namespace {

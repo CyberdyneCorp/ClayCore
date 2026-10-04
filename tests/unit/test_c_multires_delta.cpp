@@ -897,3 +897,83 @@ TEST_CASE(
     clay_multires_delta_destroy(record);
     clay_multires_delta_destroy(expected);
 }
+
+TEST_CASE("c multires delta: a pass made active mid-session joins a base-only record") {
+    // The record holds only base entries when the host activates a pass; the
+    // rest of the gesture writes that pass. The two halves are separate
+    // storage, so the call is accepted and one revert takes back both.
+    const clay_stroke_preset preset = stroke_preset();
+    const clay_mesh_brush_desc brush = draw_at(0.0f, 0.0f, 0.4f, 0.3f);
+    const std::vector<clay_stroke_sample_full> samples = session_path();
+    Fixture f(6, 2);
+    const Snapshot before = snapshot(f.surface);
+    clay_multires_delta* record = clay_multires_delta_create();
+    clay_stroke_tx* tx = session(preset);
+    REQUIRE(clay_stroke_tx_append(tx, samples.data(), 12, nullptr, nullptr) == CLAY_OK);
+    size_t n = 0;
+    REQUIRE(clay_multires_sculptor_apply_stroke_tx(f.sculptor, tx, &brush, nullptr, nullptr, 1,
+                                                   record, &n, nullptr) == CLAY_OK);
+    REQUIRE(n > 0);
+    REQUIRE(stats_of(record).detail_entries > 0);
+    REQUIRE(stats_of(record).layer_detail_entries == 0);
+
+    const uint64_t layer = f.add_layer();
+    REQUIRE(clay_stroke_tx_append(tx, samples.data() + 12, 12, nullptr, nullptr) == CLAY_OK);
+    REQUIRE(clay_stroke_tx_end(tx) == CLAY_OK);
+    REQUIRE(clay_multires_sculptor_apply_stroke_tx(f.sculptor, tx, &brush, nullptr, nullptr, 1,
+                                                   record, &n, nullptr) == CLAY_OK);
+    CHECK(n > 0);
+    clay_stroke_tx_destroy(tx);
+    const clay_multires_delta_stats s = stats_of(record);
+    CHECK(s.detail_entries > 0);
+    CHECK(s.layer_detail_entries > 0);
+    CHECK(s.sculpt_layer == layer);
+    // The added pass is empty in `before` and still exists, so a revert puts
+    // its coefficients back to zero and the base back as it was.
+    const Snapshot after = snapshot(f.surface);
+    REQUIRE(clay_multires_delta_revert(record, f.surface) == CLAY_OK);
+    const Snapshot reverted = snapshot(f.surface);
+    CHECK(reverted.detail == before.detail);
+    CHECK(reverted.positions == before.positions);
+    REQUIRE(clay_multires_delta_apply(record, f.surface) == CLAY_OK);
+    CHECK(snapshot(f.surface) == after);
+    clay_multires_delta_destroy(record);
+}
+
+TEST_CASE("c multires delta: a call after a session closes does not re-bind its record") {
+    // Calling after every append is the intended rhythm, so a host can make a
+    // call after the gesture closed: it applies nothing and returns CLAY_OK.
+    // It must not touch the record either. Re-binding there would stamp the
+    // record with the hierarchy's CURRENT structure, and a record from before
+    // a level was removed and added back would then be replayed onto a
+    // hierarchy it does not describe.
+    const clay_stroke_preset preset = stroke_preset();
+    const clay_mesh_brush_desc brush = draw_at(0.0f, 0.0f, 0.4f, 0.3f);
+    const std::vector<clay_stroke_sample_full> samples = session_path();
+    for (bool lagging_call : {false, true}) {
+        CAPTURE(lagging_call);
+        Fixture f(6, 2);
+        clay_multires_delta* record = clay_multires_delta_create();
+        clay_stroke_tx* tx = session(preset);
+        size_t calls = 0;
+        REQUIRE(feed_session(f.sculptor, tx, samples, 4, brush, record, &calls) > 0);
+        REQUIRE(clay_multires_delta_revert(record, f.surface) == CLAY_OK);
+
+        int32_t err = -1;
+        REQUIRE(clay_multires_remove_highest_level(f.surface, &err) == CLAY_OK);
+        REQUIRE(clay_multires_add_level(f.surface, nullptr, &err) == CLAY_OK);
+        if (lagging_call) {
+            size_t n = 7;
+            REQUIRE(clay_multires_sculptor_apply_stroke_tx(f.sculptor, tx, &brush, nullptr,
+                                                           nullptr, 1, record, &n,
+                                                           nullptr) == CLAY_OK);
+            CHECK(n == 0);
+        }
+        const Snapshot relevelled = snapshot(f.surface);
+        CHECK(clay_multires_delta_apply(record, f.surface) == CLAY_ERROR_SNAPSHOT_MISMATCH);
+        CHECK(clay_multires_delta_revert(record, f.surface) == CLAY_ERROR_SNAPSHOT_MISMATCH);
+        CHECK(snapshot(f.surface) == relevelled);
+        clay_stroke_tx_destroy(tx);
+        clay_multires_delta_destroy(record);
+    }
+}

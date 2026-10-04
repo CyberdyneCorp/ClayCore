@@ -23398,7 +23398,14 @@ clay_result clay_multires_sculptor_apply_stroke_tx(clay_multires_sculptor* sculp
     StrokeBatch batch = next_batch(*sink, sink->source(tx->tx));
     const std::size_t applied =
         sink->gesture.apply(batch.stamps, base_half(record), layer_half(record));
-    if (record) record->gesture.bind(*sp);
+    // ONLY A CALL THAT TOOK STAMPS BINDS, and it took them after the check
+    // above accepted the record. A call with nothing to apply -- above all
+    // one after the close, which skips the check -- must leave the binding
+    // alone: re-binding there would stamp a record from before a level change
+    // with the hierarchy's current structure and let it replay onto a
+    // hierarchy it does not describe. An empty record needs no bind, and a
+    // non-empty one was bound by the call that captured into it.
+    if (record && !batch.stamps.empty()) record->gesture.bind(*sp);
     if (out_applied) *out_applied = applied;
     if (batch.closes) {
         sink->closed = true;

@@ -10291,10 +10291,12 @@ clay_result clay_multires_sculptor_apply_stroke(clay_multires_sculptor* sculptor
  * snakehook's anchor to the close, as the whole-path call does within one
  * call. `out_report` describes this call.
  *
- * `record` (a clay_multires_delta, declared below) may be NULL for an
- * unrecorded gesture, which stamps exactly what a recorded one does. Recorded
- * or not, and into which record, is part of the binding: a later call naming
- * another record, or NULL after a record, is CLAY_ERROR_INVALID_ARGUMENT.
+ * `record` is a clay_multires_delta. Its typedef is just below; the record's
+ * own calls are documented further down, under clay_multires_delta. It may be
+ * NULL for an unrecorded gesture, which stamps exactly what a recorded one
+ * does. Recorded or not, and into which record, is part of the binding: a
+ * later call naming another record, or NULL after a record, is
+ * CLAY_ERROR_INVALID_ARGUMENT.
  * Every call of the gesture continues the same record, as consecutive
  * clay_multires_sculptor_stamp_recorded calls do, so one record across the
  * gesture is ONE undo step holding both halves -- the base detail and, with an
@@ -10306,7 +10308,13 @@ clay_result clay_multires_sculptor_apply_stroke(clay_multires_sculptor* sculptor
  * report is CLAY_ERROR_INVALID_ARGUMENT, and a record the hierarchy no longer
  * accepts -- another hierarchy, a changed level structure, or a DIFFERENT
  * sculpt pass made active mid-gesture while the record holds one -- is
- * CLAY_ERROR_SNAPSHOT_MISMATCH, with `*out_applied` 0 and nothing stamped. */
+ * CLAY_ERROR_SNAPSHOT_MISMATCH, with `*out_applied` 0 and nothing stamped. A
+ * pass made active mid-gesture while the record holds only base entries is
+ * ACCEPTED: a base half and a pass half are separate storage, so the record
+ * then holds both and one revert still takes the whole gesture back.
+ *
+ * A call with nothing to apply -- before anything settles, or after the
+ * close -- leaves the record exactly as it was, binding included. */
 typedef struct clay_multires_delta clay_multires_delta;
 clay_result clay_multires_sculptor_apply_stroke_tx(clay_multires_sculptor* sculptor,
                                                    clay_stroke_tx* tx,
