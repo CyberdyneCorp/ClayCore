@@ -534,7 +534,7 @@ class MeshSculptor {
     // only.
     void build_fixed_mesh_workset(const MeshBrushSettings& settings);
     void gather(const MeshBrushSettings& settings, const field::MaskGate& gate);
-    static kernel::cfloat3 normal_of_item(const void* context, WorkItemId item);
+    static kernel::cfloat3 normal_of_item(const void* context, WorkItemId item, float* area);
     std::size_t write(VertexDeltas* record);
     void gather_stroke_origin(const VertexDeltas& record);
     // The colour counterpart of `write`: applies `color_target_` where it

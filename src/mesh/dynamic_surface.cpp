@@ -317,6 +317,16 @@ kernel::cfloat3 DynamicSurface::compute_vertex_normal(VertexId v,
     return safe_unit(sum, kernel::cf3(0, 1, 0));
 }
 
+float DynamicSurface::vertex_area(VertexId v, std::vector<HalfEdgeId>* fan) const {
+    if (!outgoing_halfedges(v, fan)) return 0.0f;
+    float twice_area = 0.0f;
+    for (HalfEdgeId h : *fan) {
+        const FaceId f = face_of(h);
+        if (faces_.live(f)) twice_area += face_area_x2(f);
+    }
+    return twice_area * (1.0f / 6.0f);
+}
+
 void DynamicSurface::refresh_normals(const std::vector<FaceId>& faces) {
     NormalRefreshScratch scratch;
     refresh_normals(faces, &scratch);

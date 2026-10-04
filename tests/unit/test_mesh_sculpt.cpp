@@ -15,6 +15,7 @@
 
 #include "clay/brush/stroke.h"
 #include "clay/mesh/adjacency.h"
+#include "clay/mesh/dynamic_sculpt.h"
 #include "clay/mesh/marching.h"
 #include "clay/mesh/quad_mesh.h"
 #include "clay/mesh/sculpt.h"
@@ -2265,6 +2266,24 @@ TEST_CASE("REGRESSION: a stamp on a symmetric ridge resolves the ridge's own nor
         const math::Aabb region{cf3(-0.605f, -0.105f, -0.605f), cf3(0.605f, 0.605f, 0.605f)};
         const float tilt = draw_frame_tilt(fin, region, ridge, cf3(0, 1, 0));
         MESSAGE("fin, lattice between the faces: " << tilt << " deg");
+        CHECK(tilt < 0.5f);
+    }
+    SUBCASE("the adaptive surface resolves it the same way") {
+        // The frame is resolved once, in `compose_workset`, for all three
+        // representations, so the adaptive surface has to hand over the same
+        // area its vertices stand for. It was 1.4 deg off on this mesh too.
+        const math::Aabb region{cf3(-0.605f, -0.105f, -0.605f), cf3(0.605f, 0.605f, 0.605f)};
+        const Mesh m = mesh::mesh_tape(fin, region, 0.01f);
+        auto surface = mesh::DynamicSurface::from_mesh(m);
+        REQUIRE(surface.has_value());
+        mesh::DynamicSculptor sculptor(*surface);
+        mesh::DynamicTopologySettings fixed_topology;
+        fixed_topology.enabled = false;
+        sculptor.stamp(MeshBrush::Draw, centred(ridge, 0.45f, 0.0f), fixed_topology);
+        REQUIRE(sculptor.workset().size() > 1000);
+        const float c = std::clamp(sculptor.workset().average_normal.y, -1.0f, 1.0f);
+        const float tilt = std::acos(c) * 57.2957795f;
+        MESSAGE("fin on the adaptive surface: " << tilt << " deg");
         CHECK(tilt < 0.5f);
     }
 }

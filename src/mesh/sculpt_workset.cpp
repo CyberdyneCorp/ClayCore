@@ -36,6 +36,7 @@ std::size_t compose_weights(const WorkComposeInputs& in, SculptWorkset& r) {
     const std::size_t candidates = r.items.size();
     r.weights.resize(candidates);
     r.normals.resize(candidates);
+    r.areas.resize(candidates);
 
     std::size_t kept = 0;
     for (std::size_t i = 0; i < candidates; ++i) {
@@ -72,13 +73,14 @@ std::size_t compose_weights(const WorkComposeInputs& in, SculptWorkset& r) {
         // Only now, and only for a survivor: the fixed mesh's normal is an
         // angle-weighted pass over the class's incident triangles, and a rim
         // entry that was about to be dropped must not pay for one.
-        r.normals[kept] = in.reader.normal_at(in.reader.context, item);
+        r.normals[kept] = in.reader.normal_at(in.reader.context, item, &r.areas[kept]);
         ++kept;
     }
     r.items.resize(kept);
     r.weights.resize(kept);
     r.positions.resize(kept);
     r.normals.resize(kept);
+    r.areas.resize(kept);
     return kept;
 }
 
@@ -121,6 +123,7 @@ std::size_t apply_automask(const WorkComposeInputs& in, BrushScratchArena& arena
         r.weights[survived] = w;
         r.positions[survived] = r.positions[i];
         r.normals[survived] = r.normals[i];
+        r.areas[survived] = r.areas[i];
         r.automask[survived] = r.automask[i];
         ++survived;
     }
@@ -130,6 +133,7 @@ std::size_t apply_automask(const WorkComposeInputs& in, BrushScratchArena& arena
     r.weights.resize(survived);
     r.positions.resize(survived);
     r.normals.resize(survived);
+    r.areas.resize(survived);
     r.automask.resize(survived);
     publish_slots(r, survived);
     return survived;
@@ -137,12 +141,30 @@ std::size_t apply_automask(const WorkComposeInputs& in, BrushScratchArena& arena
 
 // The plane and the shared direction, taken from the snapshot and never from
 // what the stamp is about to deposit.
+//
+// EACH NORMAL VOTES WITH THE AREA ITS ITEM STANDS FOR, not once per item
+// (#631). An equal vote makes the average a property of the TRIANGULATION:
+// a patch meshed twice as densely counts twice. That is small where the
+// normals under the stamp agree and decisive where they cancel. On a ridge
+// narrower than the stamp the two faces' normals are opposite, the sum keeps
+// only a few percent of its terms, and the mesher's tetrahedral split is
+// chiral — it chamfers one corner of a lattice-aligned ridge and keeps the
+// other sharp — so the face with the chamfer outvoted the other and a fin
+// 0.1 thick resolved a normal 11-17 deg off its axis of symmetry. Weighted by
+// area the sum is a discretisation of the falloff-weighted integral of the
+// normal over the surface, and that depends on where the surface is: the
+// same fin resolves within 0.2 deg, a sphere's pole within 0.01 and a
+// saddle within 0.01 where the equal vote gave 0.9 and 4.3.
+//
+// The centroid keeps the equal vote. It is a position, not a direction: the
+// triangulation can move it by about a lattice step and there is no
+// cancellation to amplify that.
 void resolve_frame(const WorkComposeInputs& in, SculptWorkset& r, std::size_t kept) {
     const MeshBrushSettings& settings = *in.settings;
     kernel::cfloat3 nsum = kernel::cf3(0, 0, 0), psum = kernel::cf3(0, 0, 0);
     float wsum = 0.0f;
     for (std::size_t i = 0; i < kept; ++i) {
-        nsum = nsum + r.normals[i] * r.weights[i];
+        nsum = nsum + r.normals[i] * (r.weights[i] * r.areas[i]);
         psum = psum + r.positions[i] * r.weights[i];
         wsum += r.weights[i];
     }

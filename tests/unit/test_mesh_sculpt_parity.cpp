@@ -600,6 +600,25 @@ HashVerdict judge(const HashTally& t, const std::string& local_fp, const char* t
     return v;
 }
 
+// The table this build produced, in the shape a committed one has. The
+// configuration goes in first: a table without one cannot be adopted, because
+// whoever adds the arm needs that line as much as the rows.
+void emit_table(std::FILE* f, const std::string& fp, const std::vector<Golden>& results) {
+    std::fprintf(f, "// floating-point configuration: %s\n", fp.c_str());
+    for (const Golden& r : results)
+        std::fprintf(f, "    {\"%s\", \"%s\", %lluull, %uu},\n", r.fixture, r.verb,
+                     static_cast<unsigned long long>(r.hash), r.moved);
+}
+
+bool write_table_file(const std::string& path, const std::string& fp,
+                      const std::vector<Golden>& results) {
+    std::FILE* out = std::fopen(path.c_str(), "w");
+    if (!out) return false;
+    emit_table(out, fp, results);
+    std::fclose(out);
+    return true;
+}
+
 }  // namespace
 
 TEST_CASE("mesh sculpt parity: every verb on every fixture is byte-identical") {
@@ -635,19 +654,6 @@ TEST_CASE("mesh sculpt parity: every verb on every fixture is byte-identical") {
     const bool print_table = regen || !kHaveGoldens;
     const char* out_env = std::getenv("CLAY_PARITY_OUT");
     const std::string out_path = out_env ? out_env : "mesh_sculpt_goldens.generated.inc";
-    std::FILE* out = nullptr;
-    if (write_table) {
-        out = std::fopen(out_path.c_str(), "w");
-        // A table that cannot be written is worth saying out loud rather than
-        // silently not producing: the run still passes, and someone would
-        // otherwise go looking for an artifact that was never created.
-        if (!out) MESSAGE("could not open " << out_path << " to write a table");
-        // The configuration goes in the file, not just in the log. A table
-        // without one cannot be adopted: whoever adds the arm needs the second
-        // line as much as the first.
-        if (print_table) std::printf("// floating-point configuration: %s\n", fp.c_str());
-        if (out) std::fprintf(out, "// floating-point configuration: %s\n", fp.c_str());
-    }
     if (!kHaveGoldens) {
         MESSAGE("no hash table for this toolchain: the byte comparison is "
                 "skipped and the moved counts are still checked against the "
@@ -670,17 +676,14 @@ TEST_CASE("mesh sculpt parity: every verb on every fixture is byte-identical") {
             std::uint32_t moved = 0;
             const std::uint64_t h = run_case(fx, vc.verb, &moved);
             results.push_back({fx.name, vc.name, h, moved});
-            if (write_table) {
-                if (print_table)
-                    std::printf("    {\"%s\", \"%s\", %lluull, %uu},\n", fx.name, vc.name,
-                                static_cast<unsigned long long>(h), moved);
-                if (out)
-                    std::fprintf(out, "    {\"%s\", \"%s\", %lluull, %uu},\n", fx.name,
-                                 vc.name, static_cast<unsigned long long>(h), moved);
-            }
         }
     }
-    if (out) std::fclose(out);
+    if (print_table) emit_table(stdout, fp, results);
+    // A table that cannot be written is worth saying out loud rather than
+    // silently not producing: the run still passes, and someone would
+    // otherwise go looking for an artifact that was never created.
+    if (write_table && !write_table_file(out_path, fp, results))
+        MESSAGE("could not open " << out_path << " to write a table");
     // A DELIBERATE re-baseline prints and checks nothing. An unbaselined
     // toolchain prints AND still gates its moved counts, which is the
     // difference between the two: one is being rewritten on purpose, the other
@@ -730,6 +733,16 @@ TEST_CASE("mesh sculpt parity: every verb on every fixture is byte-identical") {
     }
 
     const HashVerdict verdict = judge(tally, fp, kTableFp, CLAY_PARITY_TABLE, out_path);
+    // A TABLE THAT DIFFERS IS WRITTEN TOO. A deliberate behaviour change has
+    // to re-baseline every toolchain in the commit that makes it, and two of
+    // the three are machines this repository cannot run by hand; CI uploads
+    // the file as an artifact whether the job passes or fails, so this is how
+    // their new tables leave the runner. It changes no verdict.
+    if (!write_table && (tally.hash_mismatches > 0 || tally.moved_mismatches > 0)) {
+        if (write_table_file(out_path, fp, results))
+            MESSAGE("this build's table was written to "
+                    << out_path << ": adopt it only if the difference is a deliberate change");
+    }
     if (verdict.configuration_mismatch) {
         // ONE failure, saying what it is. The individual comparisons are not
         // repeated, because every one of them is the same fact about the build

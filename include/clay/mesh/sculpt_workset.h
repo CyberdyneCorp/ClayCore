@@ -64,6 +64,11 @@ struct SculptWorkset {
     std::vector<float> weights;              // the composed weight, in [0,1]
     std::vector<kernel::cfloat3> positions;  // pre-stamp, one per item
     std::vector<kernel::cfloat3> normals;    // pre-stamp, unit
+    // The surface area each item stands for: one third of every triangle it
+    // is a corner of. Filled by `compose_workset` and read only by its frame,
+    // where it is what makes the averaged normal a property of the surface
+    // rather than of its triangulation (#631, see `resolve_frame`).
+    std::vector<float> areas;
 
     // The automask factors, composed. Sized only when a stamp has any: an
     // automask must cost the workset and never the surface, and an empty vector
@@ -113,6 +118,7 @@ struct SculptWorkset {
         weights.clear();
         positions.clear();
         normals.clear();
+        areas.clear();
         automask.clear();
         write_region.clear();
         write_bounds = math::Aabb{};
@@ -136,11 +142,14 @@ using BrushRegion = SculptWorkset;
 // arriving from a change that looked like it captured one more variable. A
 // function pointer cannot develop that.
 struct WorkItemReader {
-    // The item's pre-stamp normal. Called only for candidates the falloff
-    // KEPT, which is what lets the fixed mesh's angle-weighted `class_normal`
-    // — a pass over the class's incident triangles — stay off the rim entries
-    // that were about to be dropped.
-    kernel::cfloat3 (*normal_at)(const void* context, WorkItemId item) = nullptr;
+    // The item's pre-stamp normal, and through `area` the surface area the
+    // item stands for (one third of each incident triangle's area). Called
+    // only for candidates the falloff KEPT, which is what lets the fixed
+    // mesh's angle-weighted `class_normal` — a pass over the class's incident
+    // triangles — stay off the rim entries that were about to be dropped. The
+    // two answers come from ONE call because they come from one pass over the
+    // same triangles. `area` is never null.
+    kernel::cfloat3 (*normal_at)(const void* context, WorkItemId item, float* area) = nullptr;
     // The freeze the representation carries on the ITEM itself, as opposed to
     // the caller's world-space gate. Null when there is none, and null is not
     // the same as a function returning zero: the adaptive surface takes
@@ -220,6 +229,9 @@ struct WorkComposeInputs {
 //      bit-identical to its input rather than merely close, and republish;
 //   6. resolve `average_normal`, `centroid`, `plane_point` and `plane_normal`
 //      from the snapshot and never from what the stamp is about to deposit.
+//      The normal is the sum of the item normals weighted by weight TIMES
+//      area, so it does not depend on how densely, or how chirally, the
+//      surface under the stamp was triangulated (#631).
 //
 // THE FACTOR ORDER IS THE CONTRACT, not an implementation detail: these are
 // separate multiplications, float multiplication is not associative, and
