@@ -411,6 +411,36 @@ static_assert(std::is_move_assignable_v<ClaySpaceDoc>,
 // 1.52 ms the save producing those bytes costs.
 std::uint64_t snapshot_identity(const std::uint8_t* data, std::size_t size);
 
+// WHICH SNAPSHOT A JOURNAL STARTED NOW CONTINUES FROM (#641) -- the id a
+// binding hands `History::note_snapshot` when undo is enabled.
+//
+// `snapshot_id` names the bytes the document was last loaded from or saved
+// to, and an edit does not clear it, so seeding a journal with it on a
+// document edited since paired the journal with a snapshot that lacks those
+// edits: a recovery onto it was ACCEPTED and silently dropped them. Nothing
+// counts edits -- `content_serial` misses voxel edits, and mesh sculpts, groups
+// and hierarchies have no counter at all -- so this asks the question exactly
+// instead: it encodes the document at this build's minor, WITHOUT stamping it,
+// and compares the identity with the snapshot the document names.
+//
+//   * Unchanged since the snapshot -> that snapshot's id, as before. For a
+//     stream this build would not have written byte for byte (an older minor,
+//     a skipped chunk) the comparison is against what `load_clayspace`
+//     recorded it re-encodes to, so such a load still pairs.
+//   * Changed since -> the identity of the bytes a save would write NOW. No
+//     snapshot that lacks the edits carries it, so a replay onto one is
+//     refused with `snapshot_mismatch`; a save made after enabling writes
+//     exactly those bytes and pairs.
+//   * Never serialized (`snapshot_id` zero) -> zero, unchanged: the journal
+//     names no snapshot and nothing is encoded.
+//
+// Costs one save's encode, once per enable, on a document that names a
+// snapshot. A document saved at an OLDER minor and enabled without an edit
+// since is reported as changed: whether that minor lost anything is not known
+// without loading it back, and refusing is the side that cannot recover a
+// document the session never held.
+std::uint64_t journal_seed_for(const ClaySpaceDoc& doc);
+
 // -- hierarchies, and the two questions carrying one raises -------------------
 
 // Does a hierarchy hold anything an artist authored above its base cage?

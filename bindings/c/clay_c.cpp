@@ -5802,8 +5802,11 @@ clay_result clay_document_enable_undo(clay_document* doc) {
         // the journal that starts here continues from exactly that one. Without
         // this seed the whole recovery path — load a snapshot, enable undo,
         // journal, crash, replay — would produce a journal naming no snapshot
-        // and the pair would go unchecked (survive-a-crash 2.1).
-        doc->undo->note_snapshot(doc->doc.document.snapshot_id);
+        // and the pair would go unchecked (survive-a-crash 2.1). Edited since,
+        // it is no longer that snapshot, and the seed names the bytes a save
+        // would write now instead (#641) — io::journal_seed_for, shared with
+        // pyclay so the two cannot disagree about it.
+        doc->undo->note_snapshot(io::journal_seed_for(doc->doc));
     }
     return CLAY_OK;
 }

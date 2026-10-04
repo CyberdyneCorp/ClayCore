@@ -6678,6 +6678,49 @@ def test_a_journal_from_another_snapshot_is_refused():
     assert right.replay_journal(journal)["applied"] == 3
 
 
+def test_a_journal_begun_on_an_edited_load_is_not_paired_with_it():
+    # #641: enable_undo seeded the journal with the snapshot the document was
+    # LOADED from, edits since or not, so a recovery onto that snapshot was
+    # accepted and silently lacked every edit made before the enable.
+    base = clay.Document()
+    base.add_sdf_layer("body")
+    base.add_voxel_layer("blocks", voxel_size=0.1)
+    snapshot = base.to_bytes()
+
+    doc = clay.load_bytes(snapshot)
+    blocks = doc.voxel_layer("blocks")
+    blocks.set((0, 0, 0), 1)          # before enabling: in no journal
+    doc.enable_undo()
+    blocks.set((1, 0, 0), 1)
+    journal, _ = doc.journal_since(0)
+
+    rec = clay.load_bytes(snapshot)
+    rec.enable_undo()
+    with pytest.raises(ValueError, match="different snapshot"):
+        rec.replay_journal(journal)
+    assert rec.voxel_layer("blocks").get((1, 0, 0)) == 0   # nothing applied
+
+    # A save after enabling holds the pre-enable edit, and pairs.
+    saved = doc.to_bytes()
+    _, at = doc.journal_range()
+    blocks.set((2, 0, 0), 1)
+    tail, _ = doc.journal_since(at)
+    rec = clay.load_bytes(saved)
+    rec.enable_undo()
+    assert rec.replay_journal(tail)["applied"] == 1
+    for x in range(3):
+        assert rec.voxel_layer("blocks").get((x, 0, 0)) == blocks.get((x, 0, 0))
+
+    # And an unedited load still pairs with the bytes it came from.
+    fresh = clay.load_bytes(snapshot)
+    fresh.enable_undo()
+    fresh.voxel_layer("blocks").set((1, 0, 0), 1)
+    clean, _ = fresh.journal_since(0)
+    rec = clay.load_bytes(snapshot)
+    rec.enable_undo()
+    assert rec.replay_journal(clean)["applied"] == 1
+
+
 def test_a_barrier_is_visible_before_the_recovery_needs_it():
     # Replay reports a barrier, but replay happens during the recovery — the
     # one moment when "take a fresher snapshot" is useless. This is how a host

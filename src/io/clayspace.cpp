@@ -136,16 +136,21 @@ bool is_voxel_layer(const scene::Document& document, scene::LayerId id) {
     return layer && layer->kind == scene::LayerKind::Voxel;
 }
 
-void drop_unmatched_voxel_chunks(ClaySpaceDoc* out) {
+// Each `drop_unmatched_*` says whether it dropped anything: a stream that held
+// an orphan is not what this build writes, which `load_clayspace` needs to know.
+bool drop_unmatched_voxel_chunks(ClaySpaceDoc* out) {
+    const std::size_t before = out->voxel_layers.size();
     for (auto it = out->voxel_layers.begin(); it != out->voxel_layers.end();) {
         if (is_voxel_layer(out->document, it->first))
             ++it;
         else
             it = out->voxel_layers.erase(it);
     }
+    return out->voxel_layers.size() != before;
 }
 
-void drop_unmatched_mesh_chunks(ClaySpaceDoc* out) {
+bool drop_unmatched_mesh_chunks(ClaySpaceDoc* out) {
+    const std::size_t before = out->mesh_layers.size();
     for (auto it = out->mesh_layers.begin(); it != out->mesh_layers.end();) {
         if (is_mesh_layer(out->document, it->first)) {
             ++it;
@@ -158,18 +163,21 @@ void drop_unmatched_mesh_chunks(ClaySpaceDoc* out) {
             it = out->mesh_layers.erase(it);
         }
     }
+    return out->mesh_layers.size() != before;
 }
 
 // The same rule for a hierarchy, on the same test its cage takes: a chunk
 // naming a layer this document no longer holds is dropped rather than kept as a
 // hierarchy nothing can reach.
-void drop_unmatched_multires_chunks(ClaySpaceDoc* out) {
+bool drop_unmatched_multires_chunks(ClaySpaceDoc* out) {
+    const std::size_t before = out->multires_layers.size();
     for (auto it = out->multires_layers.begin(); it != out->multires_layers.end();) {
         if (is_mesh_layer(out->document, it->first))
             ++it;
         else
             it = out->multires_layers.erase(it);
     }
+    return out->multires_layers.size() != before;
 }
 
 }  // namespace
@@ -266,7 +274,12 @@ scene::LayerId document_blocking_minor(const ClaySpaceDoc& doc, std::uint16_t mi
     return multires_blocking_minor(doc, minor);
 }
 
-std::vector<std::uint8_t> save_clayspace(const ClaySpaceDoc& doc, std::uint16_t minor) {
+namespace {
+
+// The bytes `save_clayspace` writes, and nothing else: stamping which
+// snapshot the document now is belongs to the caller, because
+// `journal_seed_for` encodes to ASK that question and must not answer it.
+std::vector<std::uint8_t> encode_clayspace(const ClaySpaceDoc& doc, std::uint16_t minor) {
     // REFUSED BEFORE A BYTE IS WRITTEN, so a caller that ignores the return
     // value cannot end up with a partial file that opens. Empty is the refusal,
     // which is `serialize_document`'s convention.
@@ -336,13 +349,41 @@ std::vector<std::uint8_t> save_clayspace(const ClaySpaceDoc& doc, std::uint16_t 
     if (doc.groups && !doc.groups->empty()) put_chunk(out, kGroups, doc.groups->serialize());
     if (!doc.thumbnail_png.empty()) put_chunk(out, kThumb, doc.thumbnail_png);
     if (!doc.camera_bookmarks.empty()) put_chunk(out, kCamera, doc.camera_bookmarks);
+    return out;
+}
+
+std::uint64_t identity_of(const std::vector<std::uint8_t>& bytes) {
+    return snapshot_identity(bytes.data(), bytes.size());
+}
+
+}  // namespace
+
+std::vector<std::uint8_t> save_clayspace(const ClaySpaceDoc& doc, std::uint16_t minor) {
+    std::vector<std::uint8_t> out = encode_clayspace(doc, minor);
+    if (out.empty()) return out;
     // The document now knows which bytes it was last written to, so a journal
     // taken after this names THIS snapshot (survive-a-crash 2.1). Stamped here
     // rather than in each binding because a save path that forgot to stamp
     // would leave the journal naming an older snapshot, and the host would get
     // a refusal on a pair that was in fact correct.
-    doc.document.snapshot_id = snapshot_identity(out.data(), out.size());
+    doc.document.snapshot_id = identity_of(out);
+    // What these bytes re-encode to is either themselves (this build's minor)
+    // or not known without loading them back (an older one). Zero says both,
+    // and clears whatever an earlier load recorded about a different snapshot.
+    doc.document.snapshot_reencoded_id = 0;
     return out;
+}
+
+std::uint64_t journal_seed_for(const ClaySpaceDoc& doc) {
+    const std::uint64_t named = doc.document.snapshot_id;
+    if (named == 0) return 0;
+    const std::vector<std::uint8_t> now = encode_clayspace(doc, kClaySpaceMinor);
+    // Unreachable at this build's own minor, which nothing blocks. Kept to the
+    // behaviour before #641 rather than inventing a third answer.
+    if (now.empty()) return named;
+    const std::uint64_t current = identity_of(now);
+    if (current == named || current == doc.document.snapshot_reencoded_id) return named;
+    return current;
 }
 
 IoStatus decode_document(const std::uint8_t* data, std::size_t size, scene::Document* out,
@@ -352,6 +393,92 @@ IoStatus decode_document(const std::uint8_t* data, std::size_t size, scene::Docu
     *out = std::move(*doc);
     return IoStatus::success();
 }
+
+namespace {
+
+// Which snapshot a freshly loaded document is. `exact` says the stream is what
+// this build would write for it byte for byte; when it is not, the document is
+// re-encoded ONCE, here, while it still IS the snapshot -- after the first
+// edit nothing could recover the answer -- so `journal_seed_for` can tell an
+// unedited older-minor load from an edited one (#641). A load of this build's
+// own output, the common case, pays nothing.
+void stamp_loaded_snapshot(ClaySpaceDoc* doc, const std::uint8_t* data, std::size_t size,
+                           bool exact) {
+    doc->document.snapshot_id = snapshot_identity(data, size);
+    doc->document.snapshot_reencoded_id = 0;
+    if (exact) return;
+    const std::vector<std::uint8_t> reencoded = encode_clayspace(*doc, kClaySpaceMinor);
+    if (reencoded.empty()) return;
+    const std::uint64_t id = identity_of(reencoded);
+    if (id != doc->document.snapshot_id) doc->document.snapshot_reencoded_id = id;
+}
+
+// Every orphan dropped, and whether there was one. All three run: a
+// short-circuit would leave the later kinds' orphans in the document.
+bool drop_unmatched_chunks(ClaySpaceDoc* result) {
+    const bool meshes = drop_unmatched_mesh_chunks(result);
+    const bool hierarchies = drop_unmatched_multires_chunks(result);
+    const bool grids = drop_unmatched_voxel_chunks(result);
+    return meshes || hierarchies || grids;
+}
+
+// The layer id every per-layer chunk starts with.
+std::uint32_t chunk_layer_id(const std::uint8_t* payload) {
+    std::uint32_t layer_id = 0;
+    std::memcpy(&layer_id, payload, 4);
+    return layer_id;
+}
+
+// One chunk into `result`. A chunk this reader does not know is skipped and
+// reported through `*known`, which is what makes the format backward-open.
+IoStatus read_chunk(std::uint32_t cc, const std::uint8_t* payload, std::size_t len,
+                    std::uint16_t minor, ClaySpaceDoc* result, bool* known) {
+    switch (cc) {
+        case kScene:
+            return decode_document(payload, len, &result->document, minor);
+        case kVoxel: {
+            if (len < 4) return IoStatus::fail(IoError::Malformed, "voxel chunk too small");
+            auto grid = voxel::VoxelGrid::deserialize(payload + 4, len - 4);
+            if (!grid) return IoStatus::fail(IoError::Malformed, "voxel chunk parse failed");
+            result->voxel_layers.emplace(chunk_layer_id(payload), std::move(*grid));
+            return IoStatus::success();
+        }
+        case kMask: {
+            if (len < 4) return IoStatus::fail(IoError::Malformed, "mask chunk too small");
+            auto mask = voxel::MaskField::deserialize(payload + 4, len - 4);
+            if (!mask) return IoStatus::fail(IoError::Malformed, "mask chunk parse failed");
+            result->masks.emplace(chunk_layer_id(payload), std::move(*mask));
+            return IoStatus::success();
+        }
+        case kMesh:
+            return read_mesh_chunk(payload, len, result);
+        case kMultires: {
+            if (len < 4) return IoStatus::fail(IoError::Malformed, "multires chunk too short");
+            mesh::MultiresSurface surface;
+            if (!mesh::MultiresSurface::decode(payload + 4, len - 4, &surface))
+                return IoStatus::fail(IoError::Malformed, "multires chunk parse failed");
+            result->multires_layers.emplace(chunk_layer_id(payload), std::move(surface));
+            return IoStatus::success();
+        }
+        case kGroups: {
+            auto groups = voxel::GroupField::deserialize(payload, len);
+            if (!groups) return IoStatus::fail(IoError::Malformed, "group chunk parse failed");
+            result->groups = std::move(*groups);
+            return IoStatus::success();
+        }
+        case kThumb:
+            result->thumbnail_png.assign(payload, payload + len);
+            return IoStatus::success();
+        case kCamera:
+            result->camera_bookmarks.assign(payload, payload + len);
+            return IoStatus::success();
+        default:
+            *known = false;
+            return IoStatus::success();
+    }
+}
+
+}  // namespace
 
 IoStatus load_clayspace(const std::uint8_t* data, std::size_t size, ClaySpaceDoc* out) {
     Cursor c{data, size};
@@ -366,6 +493,10 @@ IoStatus load_clayspace(const std::uint8_t* data, std::size_t size, ClaySpaceDoc
 
     ClaySpaceDoc result;
     bool have_scene = false;
+    // Whether this stream is what this build writes for the document it holds.
+    // An older minor never is -- the header alone differs -- and neither is a
+    // stream holding a chunk this reader skipped or dropped.
+    bool exact = minor == kClaySpaceMinor;
     while (c.ok && c.remaining > 0) {
         std::uint32_t cc = c.u32();
         std::uint64_t len = c.u64();
@@ -375,63 +506,23 @@ IoStatus load_clayspace(const std::uint8_t* data, std::size_t size, ClaySpaceDoc
         c.p += len;
         c.remaining -= static_cast<std::size_t>(len);
 
-        if (cc == kScene) {
-            IoStatus s = decode_document(payload, static_cast<std::size_t>(len),
-                                         &result.document, minor);
-            if (!s.ok()) return s;
-            have_scene = true;
-        } else if (cc == kVoxel) {
-            if (len < 4) return IoStatus::fail(IoError::Malformed, "voxel chunk too small");
-            std::uint32_t layer_id = 0;
-            std::memcpy(&layer_id, payload, 4);
-            auto grid = voxel::VoxelGrid::deserialize(payload + 4,
-                                                      static_cast<std::size_t>(len) - 4);
-            if (!grid) return IoStatus::fail(IoError::Malformed, "voxel chunk parse failed");
-            result.voxel_layers.emplace(layer_id, std::move(*grid));
-        } else if (cc == kMask) {
-            if (len < 4) return IoStatus::fail(IoError::Malformed, "mask chunk too small");
-            std::uint32_t layer_id = 0;
-            std::memcpy(&layer_id, payload, 4);
-            auto mask = voxel::MaskField::deserialize(payload + 4,
-                                                      static_cast<std::size_t>(len) - 4);
-            if (!mask) return IoStatus::fail(IoError::Malformed, "mask chunk parse failed");
-            result.masks.emplace(layer_id, std::move(*mask));
-        } else if (cc == kMesh) {
-            IoStatus s = read_mesh_chunk(payload, static_cast<std::size_t>(len), &result);
-            if (!s.ok()) return s;
-        } else if (cc == kMultires) {
-            if (len < 4) return IoStatus::fail(IoError::Malformed, "multires chunk too short");
-            std::uint32_t layer_id = 0;
-            std::memcpy(&layer_id, payload, 4);
-            mesh::MultiresSurface surface;
-            if (!mesh::MultiresSurface::decode(payload + 4, static_cast<std::size_t>(len) - 4,
-                                               &surface))
-                return IoStatus::fail(IoError::Malformed, "multires chunk parse failed");
-            result.multires_layers.emplace(layer_id, std::move(surface));
-        } else if (cc == kGroups) {
-            auto groups = voxel::GroupField::deserialize(payload, static_cast<std::size_t>(len));
-            if (!groups) return IoStatus::fail(IoError::Malformed, "group chunk parse failed");
-            result.groups = std::move(*groups);
-        } else if (cc == kThumb) {
-            result.thumbnail_png.assign(payload, payload + len);
-        } else if (cc == kCamera) {
-            result.camera_bookmarks.assign(payload, payload + len);
-        }
-        // unknown chunks skipped: backward-open
+        bool known = true;
+        IoStatus s = read_chunk(cc, payload, static_cast<std::size_t>(len), minor, &result, &known);
+        if (!s.ok()) return s;
+        have_scene = have_scene || cc == kScene;
+        exact = exact && known;  // unknown chunks skipped: backward-open
     }
     if (!c.ok) return IoStatus::fail(IoError::Malformed, "truncated stream");
     if (!have_scene) return IoStatus::fail(IoError::Malformed, "missing scene chunk");
     // After the loop rather than in the branch: chunk order is the writer's
     // business, and the scene chunk a mesh chunk is matched against may not
     // have been read yet.
-    drop_unmatched_mesh_chunks(&result);
-    drop_unmatched_multires_chunks(&result);
-    drop_unmatched_voxel_chunks(&result);
+    if (drop_unmatched_chunks(&result)) exact = false;
     // The other half of the pairing: a document loaded from a snapshot knows
     // which one it is, so replay can refuse a journal taken against a
     // different one. Set only on success — a document that failed to load is
     // not a snapshot of anything.
-    result.document.snapshot_id = snapshot_identity(data, size);
+    stamp_loaded_snapshot(&result, data, size, exact);
     *out = std::move(result);
     return IoStatus::success();
 }
