@@ -1347,6 +1347,34 @@ std::vector<brush::StrokeSample> to_stroke_samples(nb::handle obj) {
     return out;
 }
 
+// Stamps as numpy arrays: positions (N, 3), radii, strengths and along.
+// Shared by StrokePreset.resolve and StrokeTransaction.stamps, so the two
+// cannot hand back different shapes.
+nb::dict stamps_to_dict(const std::vector<brush::Stamp>& stamps) {
+    const std::size_t n = stamps.size();
+    float* pos = new float[n ? n * 3 : 1];
+    float* radius = new float[n ? n : 1];
+    float* strength = new float[n ? n : 1];
+    float* along = new float[n ? n : 1];
+    auto own = [](void* q) noexcept { delete[] static_cast<float*>(q); };
+    nb::capsule pos_owner(pos, own), radius_owner(radius, own);
+    nb::capsule strength_owner(strength, own), along_owner(along, own);
+    for (std::size_t i = 0; i < n; ++i) {
+        pos[i * 3 + 0] = stamps[i].position.x;
+        pos[i * 3 + 1] = stamps[i].position.y;
+        pos[i * 3 + 2] = stamps[i].position.z;
+        radius[i] = stamps[i].radius;
+        strength[i] = stamps[i].strength;
+        along[i] = stamps[i].along;
+    }
+    nb::dict out;
+    out["positions"] = nb::ndarray<nb::numpy, float>(pos, {n, 3}, pos_owner);
+    out["radii"] = nb::ndarray<nb::numpy, float>(radius, {n}, radius_owner);
+    out["strengths"] = nb::ndarray<nb::numpy, float>(strength, {n}, strength_owner);
+    out["along"] = nb::ndarray<nb::numpy, float>(along, {n}, along_owner);
+    return out;
+}
+
 // -- voxel wrapper -------------------------------------------------------------
 
 // Owns a grid, or borrows the one stored in a document's voxel layer so edits
@@ -10853,33 +10881,66 @@ NB_MODULE(pyclay, m) {
                      nb::gil_scoped_release release;
                      stamps = brush::resolve_stroke(in, p);
                  }
-                 const std::size_t n = stamps.size();
-                 float* pos = new float[n ? n * 3 : 1];
-                 float* radius = new float[n ? n : 1];
-                 float* strength = new float[n ? n : 1];
-                 float* along = new float[n ? n : 1];
-                 auto own = [](void* q) noexcept { delete[] static_cast<float*>(q); };
-                 nb::capsule pos_owner(pos, own), radius_owner(radius, own);
-                 nb::capsule strength_owner(strength, own), along_owner(along, own);
-                 for (std::size_t i = 0; i < n; ++i) {
-                     pos[i * 3 + 0] = stamps[i].position.x;
-                     pos[i * 3 + 1] = stamps[i].position.y;
-                     pos[i * 3 + 2] = stamps[i].position.z;
-                     radius[i] = stamps[i].radius;
-                     strength[i] = stamps[i].strength;
-                     along[i] = stamps[i].along;
-                 }
-                 nb::dict out;
-                 out["positions"] = nb::ndarray<nb::numpy, float>(pos, {n, 3}, pos_owner);
-                 out["radii"] = nb::ndarray<nb::numpy, float>(radius, {n}, radius_owner);
-                 out["strengths"] = nb::ndarray<nb::numpy, float>(strength, {n}, strength_owner);
-                 out["along"] = nb::ndarray<nb::numpy, float>(along, {n}, along_owner);
-                 return out;
+                 return stamps_to_dict(stamps);
              },
              "samples"_a,
              "Resolve stroke samples into stamps. Pure: no document is read or "
              "touched. samples is (N, 3), (N, 4) with pressure, or (N, 5) with "
              "pressure and tilt. Returns positions/radii/strengths/along arrays.");
+
+    nb::class_<brush::StrokeTransaction>(
+        m, "StrokeTransaction",
+        "A stroke resolved AS ITS SAMPLES ARRIVE (#670); the C ABI's\n"
+        "clay_stroke_tx. Append samples in whatever batches the device\n"
+        "delivers and the stroke is re-resolved as one path, so one batch of\n"
+        "forty and five of eight give the same stamps.\n\n"
+        "status()['settled'] counts the leading stamps no later append can\n"
+        "change in anything a consumer reads. The rest -- an end taper still\n"
+        "tapering, the station just past the pen, and every stamp of a\n"
+        "start-tapered stroke -- settle when the stroke moves on or ends.\n"
+        "After end(), stamps() is exactly StrokePreset.resolve of the whole\n"
+        "path.")
+        .def(nb::init<const brush::StrokePreset&>(), "preset"_a)
+        .def(
+            "append",
+            [](brush::StrokeTransaction& tx, nb::handle samples) {
+                if (tx.finished())
+                    throw std::invalid_argument(
+                        "this stroke has ended; begin another StrokeTransaction");
+                std::vector<brush::StrokeSample> in = to_stroke_samples(samples);
+                const std::size_t before = tx.stamps().size();
+                {
+                    nb::gil_scoped_release release;
+                    tx.append(in);
+                }
+                const std::size_t after = tx.stamps().size();
+                return nb::make_tuple(after > before ? after - before : 0, tx.revised_from());
+            },
+            "samples"_a,
+            "Append (N, 3..8) samples -- position, then optional pressure, tilt,\n"
+            "azimuth, velocity, timestamp -- and re-resolve. Returns\n"
+            "(new_stamps, revised_from): how many stamps the stroke grew by, and\n"
+            "the first stamp this append changed. Raises after end().")
+        .def("end", &brush::StrokeTransaction::finish,
+             "The pen has lifted: every stamp settles, the end taper included.\n"
+             "Idempotent.")
+        .def(
+            "stamps",
+            [](const brush::StrokeTransaction& tx) { return stamps_to_dict(tx.stamps()); },
+            "The stroke's stamps as it now stands, in StrokePreset.resolve's shape.")
+        .def(
+            "status",
+            [](const brush::StrokeTransaction& tx) {
+                nb::dict out;
+                out["ended"] = tx.finished();
+                out["samples"] = tx.samples().size();
+                out["stamps"] = tx.stamps().size();
+                out["settled"] = tx.settled();
+                out["revised_from"] = tx.revised_from();
+                return out;
+            },
+            "ended, samples, stamps, settled and revised_from, as\n"
+            "clay_stroke_tx_status carries them.");
 
     nb::class_<PyGroupField>(
         m, "GroupField",

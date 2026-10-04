@@ -3098,6 +3098,33 @@ clay_result apply_edit(clay_document* doc, const scene::Command& cmd, const char
 clay_result apply_edit_in_gesture(clay_document* doc, const scene::Command& cmd,
                                   const char* what);
 
+// A stroke's nodes into a layer, one AddNodeCmd each, in order. `count` is the
+// capacity of `out_nodes` going in and the number added coming out, which is
+// not limited by the capacity: the ids past it are simply not written. Shared
+// by clay_layer_apply_stroke and clay_layer_apply_stroke_tx, which differ only
+// in how long the undo group around this lasts.
+clay_result add_stroke_nodes(clay_document* doc, clay_layer_id layer_id,
+                             std::vector<scene::Node> nodes, clay_node_id* out_nodes,
+                             std::size_t* count) {
+    const std::size_t capacity = count ? *count : 0;
+    std::size_t written = 0;
+    clay_result r = CLAY_OK;
+    for (scene::Node& node : nodes) {
+        clay_node_id id = node.id;
+        std::vector<scene::Node> subtree;
+        subtree.push_back(std::move(node));
+        r = apply_edit(
+            doc,
+            scene::Command{scene::AddNodeCmd{layer_id, scene::kNoNode, -1, std::move(subtree)}},
+            "layer not found");
+        if (r != CLAY_OK) break;
+        if (out_nodes && written < capacity) out_nodes[written] = id;
+        ++written;
+    }
+    if (count) *count = written;
+    return r;
+}
+
 // The one insertion path: everything authored through this ABI, flat
 // descriptor included, ends here. It routes through the command vocabulary —
 // an AddNodeCmd with a reserved id, since command replay preserves ids — so
@@ -9403,22 +9430,8 @@ clay_result clay_layer_apply_stroke(clay_document* doc, clay_layer_id layer_id,
     // One AddNodeCmd per stamp inside a single undo group, so a whole stroke
     // is one step to undo. Grouping is the stack's, not this module's.
     if (doc->undo) doc->undo->begin_group();
-    std::size_t capacity = count ? *count : 0;
-    std::size_t written = 0;
-    for (scene::Node& node : nodes) {
-        clay_node_id id = node.id;
-        std::vector<scene::Node> subtree;
-        subtree.push_back(std::move(node));
-        r = apply_edit(
-            doc,
-            scene::Command{scene::AddNodeCmd{layer_id, scene::kNoNode, -1, std::move(subtree)}},
-            "layer not found");
-        if (r != CLAY_OK) break;
-        if (out_nodes && written < capacity) out_nodes[written] = id;
-        ++written;
-    }
+    r = add_stroke_nodes(doc, layer_id, std::move(nodes), out_nodes, count);
     if (doc->undo) doc->undo->end_group();
-    if (count) *count = written;
     return r;
 }
 
@@ -22723,6 +22736,588 @@ clay_result clay_multires_sculptor_flush_normals(clay_multires_sculptor* sculpto
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "null multires sculptor");
     sculptor->sculptor->flush_normals();
     return CLAY_OK;
+}
+
+}  // extern "C"
+
+// -- a stroke resolved as it arrives (issue #670) ------------------------------
+//
+// A session is brush::StrokeTransaction plus the ONE consumer its gesture is
+// bound to. The consumer side is a "sink": what the first consumer call bound
+// (the target and the brush arguments a later call must repeat), the cursor
+// over the stamps it has applied, and whatever the gesture holds open on the
+// target between calls — a document undo group, or a mesh gesture with its
+// carried region and deferral.
+//
+// Below every helper it uses, and outside the extern "C" block above, because
+// it is C++ throughout until the entry points.
+
+// What a sink consumes, so a later call naming another kind is refused without
+// RTTI (the library builds -fno-rtti).
+enum class StrokeSinkKind { Layer, Voxel, Mask, Mesh, Dynamic, Multires };
+
+// Global rather than in an anonymous namespace: clay_stroke_tx, which has
+// external linkage, holds one, and GCC warns when a type with external linkage
+// has a member whose type has internal linkage.
+struct StrokeSink {
+    explicit StrokeSink(StrokeSinkKind k) : kind(k) {}
+    virtual ~StrokeSink() = default;
+    StrokeSink(const StrokeSink&) = delete;
+    StrokeSink& operator=(const StrokeSink&) = delete;
+
+    StrokeSinkKind kind;
+    const void* target = nullptr;
+    // The handle pointers and scalars a later call must repeat. Descriptors
+    // are NOT in it: they are read once, at the bind, and a byte comparison of
+    // one would trip on its padding (clay_mesh_brush_desc has two holes).
+    std::vector<std::uint64_t> key;
+    brush::StampCursor cursor;
+    bool closed = false;
+};
+
+struct clay_stroke_tx {
+    explicit clay_stroke_tx(const brush::StrokePreset& preset) : tx(preset) {}
+    brush::StrokeTransaction tx;
+    std::unique_ptr<StrokeSink> sink;
+};
+
+namespace {
+
+// The status descriptor's layout at ABI 0.126.0, named by its last field so
+// appending one does not silently move the baseline.
+constexpr std::size_t kStrokeTxStatusOriginal =
+    offsetof(clay_stroke_tx_status, closed) + sizeof(std::int32_t);
+
+std::uint64_t bind_key(const void* p) {
+    return static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(p));
+}
+std::uint64_t bind_key(std::int32_t v) { return static_cast<std::uint32_t>(v); }
+std::uint64_t bind_key(float v) {
+    std::uint32_t bits = 0;
+    std::memcpy(&bits, &v, sizeof(bits));
+    return bits;
+}
+
+// A document's undo group, held open for one gesture so the gesture is one
+// step. A document without history, or no document, holds nothing.
+class GestureUndoGroup {
+   public:
+    explicit GestureUndoGroup(clay_document* doc) : doc_(doc && doc->undo ? doc : nullptr) {
+        if (doc_) doc_->undo->begin_group();
+    }
+    ~GestureUndoGroup() { close(); }
+    GestureUndoGroup(const GestureUndoGroup&) = delete;
+    GestureUndoGroup& operator=(const GestureUndoGroup&) = delete;
+    void close() {
+        if (doc_ && doc_->undo) doc_->undo->end_group();
+        doc_ = nullptr;
+    }
+
+   private:
+    clay_document* doc_;
+};
+
+// Bind an unbound session to the calling consumer, or check that a later call
+// names what it is bound to. `make` builds the sink on the first call and may
+// refuse, in which case the session stays unbound.
+template <typename Sink, typename Make>
+clay_result bind_stroke_sink(clay_stroke_tx* tx, StrokeSinkKind kind, const void* target,
+                             std::vector<std::uint64_t> key, Make make, Sink** out) {
+    if (!tx) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null stroke session");
+    if (tx->sink) {
+        if (tx->sink->kind != kind || tx->sink->target != target || tx->sink->key != key)
+            return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                        "this stroke session is bound to another target or other brush "
+                        "arguments: a gesture has one target and one brush, fixed by its "
+                        "first consumer call. Nothing applied");
+        *out = static_cast<Sink*>(tx->sink.get());
+        return CLAY_OK;
+    }
+    std::unique_ptr<Sink> sink;
+    const clay_result r = make(&sink);
+    if (r != CLAY_OK) return r;
+    sink->target = target;
+    sink->key = std::move(key);
+    *out = sink.get();
+    tx->sink = std::move(sink);
+    return CLAY_OK;
+}
+
+// -- the three world-space consumers -------------------------------------------
+
+struct LayerStrokeSink : StrokeSink {
+    LayerStrokeSink(clay_document* doc, scene::Node templ)
+        : StrokeSink(StrokeSinkKind::Layer), item(std::move(templ)), undo(doc) {}
+    scene::Node item;  // copied at the bind, so the host may reuse its clay_item
+    GestureUndoGroup undo;
+};
+
+struct GridStrokeSink : StrokeSink {
+    GridStrokeSink(StrokeSinkKind k, clay_document* doc) : StrokeSink(k), undo(doc) {}
+    GestureUndoGroup undo;
+};
+
+// -- the three sculptor consumers ------------------------------------------------
+
+// The session's stamps in a sculptor's own space. A sculptor handle that
+// declares a frame takes its stroke in WORLD and carries it into the mesh's
+// space before resolving — sample by sample, and the preset's lengths — so a
+// session feeding one keeps a second transaction in that space, fed the same
+// samples converted the same way. That is what makes its stamps the floats the
+// whole-path call resolves, rather than world stamps converted afterwards.
+struct FramedStrokeSink : StrokeSink {
+    FramedStrokeSink(StrokeSinkKind k, const SessionFrame& f, brush::StrokePreset preset)
+        : StrokeSink(k), frame(f) {
+        if (!frame.has_frame) return;
+        std::vector<brush::StrokeSample> none;
+        stroke_to_local(frame, &none, &preset);
+        local.emplace(preset);
+    }
+    // The transaction this sink's stamps come from, brought up to date.
+    const brush::StrokeTransaction& source(const brush::StrokeTransaction& session) {
+        if (!local) return session;
+        const std::vector<brush::StrokeSample>& all = session.samples();
+        if (fed < all.size()) {
+            std::vector<brush::StrokeSample> fresh(all.begin() + static_cast<std::ptrdiff_t>(fed),
+                                                   all.end());
+            brush::StrokePreset unused = local->preset();
+            stroke_to_local(frame, &fresh, &unused);
+            local->append(fresh);
+            fed = all.size();
+        }
+        if (session.finished()) local->finish();
+        return *local;
+    }
+
+    SessionFrame frame;
+    std::optional<brush::StrokeTransaction> local;
+    std::size_t fed = 0;
+};
+
+struct MeshStrokeSink : FramedStrokeSink {
+    MeshStrokeSink(const SessionFrame& f, const brush::StrokePreset& preset,
+                   mesh::MeshSculptor& sculptor, mesh::MeshBrush verb,
+                   const mesh::MeshBrushSettings& settings, const voxel::MaskField* mask,
+                   const brush::MeshStrokeOptions& options)
+        : FramedStrokeSink(StrokeSinkKind::Mesh, f, preset),
+          gesture(sculptor, verb, settings, mask, options) {}
+    brush::MeshStrokeGesture gesture;
+};
+
+struct DynamicStrokeSink : FramedStrokeSink {
+    DynamicStrokeSink(const SessionFrame& f, const brush::StrokePreset& preset,
+                      mesh::DynamicSculptor& sculptor, mesh::MeshBrush verb,
+                      const mesh::MeshBrushSettings& settings,
+                      const mesh::DynamicTopologySettings& topology,
+                      const voxel::MaskField* mask, const brush::MeshStrokeOptions& options)
+        : FramedStrokeSink(StrokeSinkKind::Dynamic, f, preset),
+          gesture(sculptor, verb, settings, topology, mask, options) {}
+    brush::DynamicStrokeGesture gesture;
+};
+
+struct MultiresStrokeSink : FramedStrokeSink {
+    MultiresStrokeSink(const SessionFrame& f, const brush::StrokePreset& preset,
+                       mesh::MultiresSculptor& sculptor, mesh::MeshBrush verb,
+                       const mesh::MeshBrushSettings& settings, const voxel::MaskField* mask,
+                       const brush::MeshStrokeOptions& options)
+        : FramedStrokeSink(StrokeSinkKind::Multires, f, preset),
+          gesture(sculptor, verb, settings, mask, options) {}
+    brush::MultiresStrokeGesture gesture;
+};
+
+// The settled stamps a call applies, and whether this call closes the gesture.
+struct StrokeBatch {
+    std::vector<brush::Stamp> stamps;
+    std::size_t first = 0;  // the stroke index of stamps[0]
+    bool closes = false;
+};
+
+StrokeBatch next_batch(StrokeSink& sink, const brush::StrokeTransaction& source) {
+    StrokeBatch batch;
+    if (sink.closed) return batch;
+    batch.first = sink.cursor.taken();
+    batch.stamps = sink.cursor.take(source);
+    batch.closes = sink.cursor.drained(source);
+    return batch;
+}
+
+// The mask argument a consumer call names, resolved; NULL is no mask.
+clay_result optional_mask(const clay_mask* mask, voxel::MaskField** out) {
+    *out = nullptr;
+    return mask ? resolve_mask(mask, out) : CLAY_OK;
+}
+
+// What the three sculptor consumers read from a mesh brush call at the bind:
+// the verb and settings in the mesh's space, and the stroke options.
+struct SculptBind {
+    mesh::MeshBrush verb = mesh::MeshBrush::Draw;
+    mesh::MeshBrushSettings settings;
+    brush::MeshStrokeOptions options;
+    voxel::MaskField* mask = nullptr;
+};
+
+// The options a fixed or multires sculptor's stroke takes: the deferral, and
+// where the mesh sits — the handle's declared frame, or this call's.
+clay_result read_sculpt_bind(const SessionFrame& frame, const clay_mesh_brush_desc* desc,
+                             const clay_mask* mask, const clay_mesh_frame* mesh_to_world,
+                             int32_t defer_normals, SculptBind* out) {
+    clay_result r = read_mesh_brush(desc, &out->verb, &out->settings);
+    if (r != CLAY_OK) return r;
+    out->options.defer_normals = defer_normals != 0;
+    r = reject_conflicting_frame(frame, mesh_to_world);
+    if (r != CLAY_OK) return r;
+    if (frame.has_frame)
+        out->options.mesh_to_world = frame.frame;
+    else
+        r = read_mesh_frame(mesh_to_world, &out->options.mesh_to_world);
+    if (r != CLAY_OK) return r;
+    brush_settings_to_local(frame, &out->settings);
+    return optional_mask(mask, &out->mask);
+}
+
+// The adaptive sink, built at the bind: the brush in the surface's space, the
+// topology, the mask and the frame, read exactly as the whole-path call reads
+// them, and the refusal of a verb an adaptive surface does not offer.
+clay_result make_dynamic_sink(clay_dynamic_sculptor& sculptor, const brush::StrokePreset& preset,
+                              const clay_mesh_brush_desc* brush,
+                              const clay_dynamic_topology_desc* topology, const clay_mask* mask,
+                              int32_t orient_alpha_by_stamp,
+                              std::unique_ptr<DynamicStrokeSink>* made) {
+    SculptBind b;
+    clay_result r = read_mesh_brush(brush, &b.verb, &b.settings);
+    if (r != CLAY_OK) return r;
+    if (!mesh::dynamic_offers(b.verb)) return fail(CLAY_ERROR_INVALID_ARGUMENT, kDynamicLayerRefusal);
+    mesh::DynamicTopologySettings topo;
+    r = read_dynamic_topology(topology, &topo);
+    if (r != CLAY_OK) return r;
+    r = optional_mask(mask, &b.mask);
+    if (r != CLAY_OK) return r;
+    b.options.orient_alpha_by_stamp = orient_alpha_by_stamp != 0;
+    if (sculptor.has_frame) b.options.mesh_to_world = sculptor.frame;
+    brush_settings_to_local(sculptor, &b.settings);
+    *made = std::make_unique<DynamicStrokeSink>(sculptor, preset, *sculptor.sculptor, b.verb,
+                                                b.settings, topo, b.mask, b.options);
+    return CLAY_OK;
+}
+
+}  // namespace
+
+extern "C" {
+
+clay_result clay_stroke_tx_begin(const clay_stroke_preset* preset, clay_stroke_tx** out_tx) {
+    if (!out_tx) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_tx");
+    *out_tx = nullptr;
+    brush::StrokePreset p;
+    const clay_result r = read_preset(preset, &p);
+    if (r != CLAY_OK) return r;
+    *out_tx = new clay_stroke_tx(p);
+    return CLAY_OK;
+}
+
+void clay_stroke_tx_destroy(clay_stroke_tx* tx) { delete tx; }
+
+clay_result clay_stroke_tx_append(clay_stroke_tx* tx, const clay_stroke_sample_full* samples,
+                                  size_t count, size_t* out_new_stamps,
+                                  size_t* out_revised_from) {
+    if (!tx) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null stroke session");
+    if (tx->tx.finished())
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "this stroke has ended (clay_stroke_tx_end); begin another session");
+    std::vector<brush::StrokeSample> in;
+    const clay_result r = read_samples_full(samples, count, &in);
+    if (r != CLAY_OK) return r;
+    const std::size_t before = tx->tx.stamps().size();
+    tx->tx.append(in);
+    const std::size_t after = tx->tx.stamps().size();
+    if (out_new_stamps) *out_new_stamps = after > before ? after - before : 0;
+    if (out_revised_from) *out_revised_from = tx->tx.revised_from();
+    return CLAY_OK;
+}
+
+clay_result clay_stroke_tx_end(clay_stroke_tx* tx) {
+    if (!tx) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null stroke session");
+    tx->tx.finish();
+    return CLAY_OK;
+}
+
+clay_result clay_stroke_tx_stamps(const clay_stroke_tx* tx, clay_stamp* out_stamps,
+                                  size_t* count) {
+    if (!tx) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null stroke session");
+    if (!count) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null count");
+    const std::vector<brush::Stamp>& stamps = tx->tx.stamps();
+    if (out_stamps && *count < stamps.size()) {
+        *count = stamps.size();
+        return fail(CLAY_ERROR_BUFFER_TOO_SMALL,
+                    "the stroke needs " + std::to_string(stamps.size()) + " stamps");
+    }
+    if (out_stamps)
+        for (std::size_t i = 0; i < stamps.size(); ++i) out_stamps[i] = to_c_stamp(stamps[i]);
+    *count = stamps.size();
+    return CLAY_OK;
+}
+
+clay_result clay_stroke_tx_status_get(const clay_stroke_tx* tx,
+                                      clay_stroke_tx_status* out_status) {
+    if (!tx) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null stroke session");
+    if (!out_status) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_status");
+    clay_stroke_tx_status probe;
+    const clay_result r = read_desc(out_status, kStrokeTxStatusOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    clay_stroke_tx_status out{};
+    out.ended = tx->tx.finished() ? 1 : 0;
+    out.samples = tx->tx.samples().size();
+    out.stamps = tx->tx.stamps().size();
+    out.settled = tx->tx.settled();
+    out.revised_from = tx->tx.revised_from();
+    out.bound = tx->sink ? 1 : 0;
+    out.closed = tx->sink && tx->sink->closed ? 1 : 0;
+    write_desc(out_status, out_status->struct_size, out);
+    return CLAY_OK;
+}
+
+clay_result clay_layer_apply_stroke_tx(clay_document* doc, clay_layer_id layer_id,
+                                       clay_stroke_tx* tx, const clay_item* item,
+                                       const clay_mask* mask, clay_node_id* out_nodes,
+                                       size_t* count) {
+    const std::size_t capacity = count ? *count : 0;
+    if (count) *count = 0;
+    if (!doc || !item) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or item");
+    scene::Layer* layer = doc->doc.document.find_layer(layer_id);
+    if (!layer || !layer->sdf) return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
+    voxel::MaskField* m = nullptr;
+    clay_result r = optional_mask(mask, &m);
+    if (r != CLAY_OK) return r;
+
+    LayerStrokeSink* sink = nullptr;
+    r = bind_stroke_sink<LayerStrokeSink>(
+        tx, StrokeSinkKind::Layer, doc,
+        {static_cast<std::uint64_t>(layer_id), bind_key(item), bind_key(mask)},
+        [&](std::unique_ptr<LayerStrokeSink>* made) {
+            const clay_result valid = validate_item(*item);
+            if (valid != CLAY_OK) return valid;
+            *made = std::make_unique<LayerStrokeSink>(doc, item->node);
+            return CLAY_OK;
+        },
+        &sink);
+    if (r != CLAY_OK) return r;
+
+    StrokeBatch batch = next_batch(*sink, tx->tx);
+    std::size_t written = capacity;
+    r = add_stroke_nodes(doc, layer_id,
+                         brush::stamps_to_nodes(*layer->sdf, batch.stamps, sink->item, m),
+                         out_nodes, &written);
+    if (count) *count = written;
+    if (batch.closes) {
+        sink->closed = true;
+        sink->undo.close();
+    }
+    return r;
+}
+
+clay_result clay_voxel_apply_stroke_tx(clay_voxel_grid* grid, clay_stroke_tx* tx, int32_t index,
+                                       int32_t shape, int32_t falloff, const clay_mask* mask,
+                                       size_t* out_applied) {
+    if (out_applied) *out_applied = 0;
+    voxel::VoxelGrid* g = nullptr;
+    clay_result r = resolve(grid, &g);
+    if (r != CLAY_OK) return r;
+    std::uint8_t slot = 0;
+    r = check_palette_index(index, &slot);
+    if (r != CLAY_OK) return r;
+    if (!brush_shape_is_known(shape))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "unknown brush shape: " + std::to_string(shape));
+    if (!brush_falloff_is_known(falloff))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "unknown brush falloff: " + std::to_string(falloff));
+    voxel::MaskField* m = nullptr;
+    r = optional_mask(mask, &m);
+    if (r != CLAY_OK) return r;
+
+    GridStrokeSink* sink = nullptr;
+    r = bind_stroke_sink<GridStrokeSink>(
+        tx, StrokeSinkKind::Voxel, grid,
+        {bind_key(index), bind_key(shape), bind_key(falloff), bind_key(mask)},
+        [&](std::unique_ptr<GridStrokeSink>* made) {
+            *made = std::make_unique<GridStrokeSink>(StrokeSinkKind::Voxel, grid->doc);
+            return CLAY_OK;
+        },
+        &sink);
+    if (r != CLAY_OK) return r;
+
+    StrokeBatch batch = next_batch(*sink, tx->tx);
+    if (!batch.stamps.empty()) {
+        VoxelStep step(grid, g);
+        const std::size_t applied = brush::apply_to_grid(
+            *g, batch.stamps, slot, static_cast<voxel::BrushShape>(shape),
+            static_cast<voxel::BrushFalloff>(falloff), m, batch.first);
+        if (out_applied) *out_applied = applied;
+    }
+    if (batch.closes) {
+        sink->closed = true;
+        sink->undo.close();
+    }
+    return CLAY_OK;
+}
+
+clay_result clay_mask_apply_stroke_tx(clay_mask* mask, clay_stroke_tx* tx, float target,
+                                      int32_t shape, int32_t falloff, size_t* out_applied) {
+    if (out_applied) *out_applied = 0;
+    voxel::MaskField* m = nullptr;
+    clay_result r = resolve_mask(mask, &m);
+    if (r != CLAY_OK) return r;
+    if (!brush_shape_is_known(shape))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "unknown brush shape: " + std::to_string(shape));
+    if (!brush_falloff_is_known(falloff))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "unknown brush falloff: " + std::to_string(falloff));
+
+    GridStrokeSink* sink = nullptr;
+    r = bind_stroke_sink<GridStrokeSink>(
+        tx, StrokeSinkKind::Mask, mask, {bind_key(target), bind_key(shape), bind_key(falloff)},
+        [&](std::unique_ptr<GridStrokeSink>* made) {
+            *made = std::make_unique<GridStrokeSink>(StrokeSinkKind::Mask, mask->doc);
+            return CLAY_OK;
+        },
+        &sink);
+    if (r != CLAY_OK) return r;
+
+    StrokeBatch batch = next_batch(*sink, tx->tx);
+    if (!batch.stamps.empty()) {
+        MaskStep mask_step(mask, m);
+        const std::size_t applied = brush::apply_to_mask(
+            *m, batch.stamps, target, static_cast<voxel::BrushShape>(shape),
+            static_cast<voxel::BrushFalloff>(falloff));
+        if (out_applied) *out_applied = applied;
+    }
+    if (batch.closes) {
+        sink->closed = true;
+        sink->undo.close();
+    }
+    return CLAY_OK;
+}
+
+clay_result clay_mesh_sculptor_apply_stroke_tx(clay_mesh_sculptor* sculptor, clay_stroke_tx* tx,
+                                               const clay_mesh_brush_desc* desc,
+                                               const clay_mask* mask,
+                                               const clay_mesh_frame* mesh_to_world,
+                                               int32_t defer_normals, clay_mesh_deltas* deltas,
+                                               size_t* out_applied) {
+    if (out_applied) *out_applied = 0;
+    clay_result r = resolve_sculptor(sculptor, /*for_edit=*/true);
+    if (r != CLAY_OK) return r;
+
+    MeshStrokeSink* sink = nullptr;
+    r = bind_stroke_sink<MeshStrokeSink>(
+        tx, StrokeSinkKind::Mesh, sculptor, {bind_key(mask), bind_key(defer_normals)},
+        [&](std::unique_ptr<MeshStrokeSink>* made) {
+            SculptBind b;
+            const clay_result read =
+                read_sculpt_bind(*sculptor, desc, mask, mesh_to_world, defer_normals, &b);
+            if (read != CLAY_OK) return read;
+            *made = std::make_unique<MeshStrokeSink>(*sculptor, tx->tx.preset(),
+                                                     *sculptor->sculptor, b.verb, b.settings,
+                                                     b.mask, b.options);
+            return CLAY_OK;
+        },
+        &sink);
+    if (r != CLAY_OK) return r;
+
+    mesh::VertexDeltas* record = deltas ? &deltas->deltas : nullptr;
+    StrokeBatch batch = next_batch(*sink, sink->source(tx->tx));
+    const std::size_t applied = sink->gesture.apply(batch.stamps, record);
+    if (out_applied) *out_applied = applied;
+    if (batch.closes) {
+        sink->closed = true;
+        sink->gesture.finish(record);
+    }
+    return CLAY_OK;
+}
+
+clay_result clay_dynamic_sculptor_apply_stroke_tx(clay_dynamic_sculptor* sculptor,
+                                                  clay_stroke_tx* tx,
+                                                  const clay_mesh_brush_desc* brush,
+                                                  const clay_dynamic_topology_desc* topology,
+                                                  const clay_mask* mask,
+                                                  int32_t orient_alpha_by_stamp,
+                                                  clay_dynamic_delta* record, size_t* out_applied,
+                                                  clay_dynamic_stamp_report* out_report) {
+    if (out_applied) *out_applied = 0;
+    if (!sculptor || !sculptor->sculptor)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null dynamic sculptor");
+    clay_result r = check_dynamic_report(out_report);
+    if (r != CLAY_OK) return r;
+
+    DynamicStrokeSink* sink = nullptr;
+    r = bind_stroke_sink<DynamicStrokeSink>(
+        tx, StrokeSinkKind::Dynamic, sculptor,
+        {bind_key(mask), bind_key(orient_alpha_by_stamp), bind_key(record)},
+        [&](std::unique_ptr<DynamicStrokeSink>* made) {
+            return make_dynamic_sink(*sculptor, tx->tx.preset(), brush, topology, mask,
+                                     orient_alpha_by_stamp, made);
+        },
+        &sink);
+    if (r != CLAY_OK) return r;
+    // THE MARK BEFORE THE STAMPS ARE TAKEN, so a refused call loses none of
+    // them: the next call, once the host has sorted out its history, applies
+    // them. Inside the call nothing else writes the surface.
+    if (record && !sink->closed && !record->gesture.can_capture_on(sculptor->sculptor->surface()))
+        return fail(CLAY_ERROR_SNAPSHOT_MISMATCH,
+                    "the record does not end where this surface is: another surface, or an "
+                    "unrecorded stamp or a replay since its last capture. Nothing applied");
+
+    StrokeBatch batch = next_batch(*sink, sink->source(tx->tx));
+    mesh::DynamicStampResult summary;
+    std::size_t applied = 0;
+    if (record)
+        applied = sink->gesture.apply_recorded(batch.stamps, record->gesture, &summary).value_or(0);
+    else
+        applied = sink->gesture.apply(batch.stamps, nullptr, &summary);
+    if (out_applied) *out_applied = applied;
+    if (batch.closes) {
+        sink->closed = true;
+        sink->gesture.finish();
+    }
+    return write_dynamic_report(*sculptor, summary, out_report);
+}
+
+clay_result clay_multires_sculptor_apply_stroke_tx(clay_multires_sculptor* sculptor,
+                                                   clay_stroke_tx* tx,
+                                                   const clay_mesh_brush_desc* brush,
+                                                   const clay_mask* mask,
+                                                   const clay_mesh_frame* mesh_to_world,
+                                                   int32_t defer_normals, size_t* out_applied,
+                                                   clay_multires_stamp_report* out_report) {
+    if (out_applied) *out_applied = 0;
+    if (!sculptor || !sculptor->sculptor)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null multires sculptor");
+    mesh::MultiresSurface* sp = sculptor->owner ? sculptor->owner->target() : nullptr;
+    if (!sp) return fail(CLAY_ERROR_NOT_FOUND, "hierarchy is no longer in its document");
+
+    MultiresStrokeSink* sink = nullptr;
+    clay_result r = bind_stroke_sink<MultiresStrokeSink>(
+        tx, StrokeSinkKind::Multires, sculptor, {bind_key(mask), bind_key(defer_normals)},
+        [&](std::unique_ptr<MultiresStrokeSink>* made) {
+            SculptBind b;
+            const clay_result read =
+                read_sculpt_bind(*sculptor, brush, mask, mesh_to_world, defer_normals, &b);
+            if (read != CLAY_OK) return read;
+            *made = std::make_unique<MultiresStrokeSink>(*sculptor, tx->tx.preset(),
+                                                         *sculptor->sculptor, b.verb, b.settings,
+                                                         b.mask, b.options);
+            return CLAY_OK;
+        },
+        &sink);
+    if (r != CLAY_OK) return r;
+
+    const std::uint32_t level = sp->sculpt_level();
+    StrokeBatch batch = next_batch(*sink, sink->source(tx->tx));
+    const std::size_t applied = sink->gesture.apply(batch.stamps, nullptr);
+    if (out_applied) *out_applied = applied;
+    if (batch.closes) {
+        sink->closed = true;
+        sink->gesture.finish();
+    }
+    return write_multires_report(*sp, level, applied, out_report);
 }
 
 }  // extern "C"

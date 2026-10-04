@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 125
+#define CLAY_ABI_MINOR 126
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -6978,6 +6978,166 @@ clay_result clay_stroke_resolve_full(const clay_stroke_sample_full* samples, siz
                                      const clay_stroke_preset* preset, clay_stamp* out_stamps,
                                      size_t* count);
 
+/* -- a stroke resolved as it arrives (ABI 0.126.0, issue #670) ---------------
+ *
+ * Every stroke call above takes a WHOLE path and resolves it as a complete
+ * stroke. A host forwarding a live gesture in pieces therefore restarted
+ * spacing, taper, steady and jitter at every call, and had to re-implement the
+ * spacing phase and the lazy-mouse state across its joins to hide the seams —
+ * and could not get the end taper right at all, because no piece knows it is
+ * the last.
+ *
+ * A clay_stroke_tx is one gesture: the samples so far, re-resolved as one path
+ * on every append, so ONE BATCH OF FORTY SAMPLES AND FIVE BATCHES OF EIGHT
+ * RESOLVE TO THE SAME STAMPS, whatever the device's coalescing and frame
+ * pacing did to the batches. It is brush::StrokeTransaction across the ABI.
+ *
+ *   begin(preset) -> append(samples)... -> end -> destroy
+ *
+ * and, beside it, ONE consumer call per representation that applies the
+ * stamps the session has SETTLED and not yet applied:
+ *   clay_layer_apply_stroke_tx, clay_voxel_apply_stroke_tx,
+ *   clay_mask_apply_stroke_tx, clay_mesh_sculptor_apply_stroke_tx,
+ *   clay_dynamic_sculptor_apply_stroke_tx, clay_multires_sculptor_apply_stroke_tx.
+ *
+ * REVISED STAMPS: THE ENGINE'S RULE. Two things about a stamp are properties
+ * of the WHOLE path: `along` is the fraction of the stroke covered, and the
+ * tapers ramp the radius over a fraction of the stroke. So a later append can
+ * revise a stamp an earlier one produced. The rule is:
+ *
+ *   A CONSUMER APPLIES A STAMP ONLY ONCE IT IS SETTLED — once no later append
+ *   can change its position, radius, strength or rotation — and holds back
+ *   the rest until it settles or the stroke ends.
+ *
+ * Settled means: the path has two or more samples; the stamp's station lies
+ * on the path already received; it is outside the END taper at the current
+ * length (growth only moves a station out of that zone); and the preset has
+ * NO START TAPER. taper_start is a fraction of the whole stroke, so as the
+ * stroke grows every station eventually falls inside it: NOTHING OF A
+ * START-TAPERED STROKE SETTLES BEFORE clay_stroke_tx_end, and its consumers
+ * apply it all at lift. That is the cost of the taper's meaning, stated rather
+ * than approximated; a host wanting live feedback on such a stroke draws a
+ * preview from clay_stroke_tx_stamps, which is always the stroke as it now
+ * stands. `along` is not part of "settled": it moves on every append, and no
+ * consumer reads it.
+ *
+ * Under that rule a gesture applied through a session is the gesture the
+ * whole-path call applies, BIT FOR BIT, however it was batched — the
+ * consumers apply the same stamps in the same order through the same code.
+ *
+ * WHAT A SESSION DOES NOT DO:
+ *   - It does not extrapolate. Applied ink trails the pen by up to one
+ *     spacing, and with an end taper by the last taper_end of the stroke,
+ *     which is still tapering until the pen moves on or lifts.
+ *   - It is one gesture. There is no reset; begin another session.
+ *   - It is not thread-safe, like every handle here. One thread at a time.
+ *
+ * COST. Every append re-resolves the whole path, which is linear in it:
+ * measured at 19 us per append ten seconds into a 240 Hz stroke (502
+ * stamps). A sculptor that declares a world frame resolves a second time, in
+ * its own space; see clay_mesh_sculptor_apply_stroke_tx. */
+typedef struct clay_stroke_tx clay_stroke_tx; /* opaque */
+
+/* What a session holds, read in one call. A descriptor: set struct_size. */
+typedef struct clay_stroke_tx_status {
+    uint32_t struct_size;  /* = sizeof(clay_stroke_tx_status); required */
+    int32_t ended;         /* clay_stroke_tx_end has been called */
+    uint64_t samples;      /* samples received */
+    uint64_t stamps;       /* the stroke's stamps as it now stands */
+    /* The leading stamps no later append can change (all of them once ended).
+     * What the consumer calls apply. */
+    uint64_t settled;
+    /* The first stamp the last append changed in anything but `along`, or the
+     * stamp count before it when it only added stamps. A preview redraws from
+     * here. */
+    uint64_t revised_from;
+    /* Non-zero once a consumer call has bound the session; see below. */
+    int32_t bound;
+    /* Non-zero once the bound consumer has applied every stamp of an ended
+     * stroke and closed the gesture. */
+    int32_t closed;
+} clay_stroke_tx_status;
+
+/* Open a gesture. The preset is copied and validated exactly as
+ * clay_stroke_resolve_full validates it; *out_tx is NULL on any refusal. */
+clay_result clay_stroke_tx_begin(const clay_stroke_preset* preset, clay_stroke_tx** out_tx);
+
+/* Destroy a session. NULL is a no-op.
+ *
+ * THE CONSUMER IS BORROWED, NOT OWNED: a bound session holds its target (the
+ * document, grid, mask or sculptor) for the length of the gesture, and its
+ * gesture may still be open — a document undo group, a grab's carried region,
+ * a deferred-normal flag. Destroying a session whose gesture is open CLOSES it
+ * without applying the stamps it held back, and that touches the target. So
+ * DESTROY THE SESSION BEFORE ITS TARGET; to keep the held-back stamps, call
+ * clay_stroke_tx_end and the consumer once more first. */
+void clay_stroke_tx_destroy(clay_stroke_tx* tx);
+
+/* Append samples and re-resolve. The samples are the full form, so pressure,
+ * tilt, azimuth, velocity and timestamp all reach the resolver; a host on the
+ * flat count*5 packing sets the other three to zero, which is what the flat
+ * calls do.
+ *
+ * *out_new_stamps receives how many stamps the stroke grew by, and
+ * *out_revised_from the first stamp this append changed (see
+ * clay_stroke_tx_status.revised_from). Either may be NULL. A count of zero
+ * appends nothing and is not an error.
+ *
+ * Refused with CLAY_ERROR_INVALID_ARGUMENT after clay_stroke_tx_end — the
+ * stroke has ended and its consumers may already have applied its taper —
+ * and for NULL samples with a non-zero count. A refusal appends nothing. */
+clay_result clay_stroke_tx_append(clay_stroke_tx* tx, const clay_stroke_sample_full* samples,
+                                  size_t count, size_t* out_new_stamps,
+                                  size_t* out_revised_from);
+
+/* The pen has lifted: no sample follows, so every stamp settles, the end
+ * taper included. The next consumer call applies the rest and closes the
+ * gesture. Idempotent. */
+clay_result clay_stroke_tx_end(clay_stroke_tx* tx);
+
+/* The stroke's stamps as it now stands, by the size-query pattern of
+ * clay_stroke_resolve_full: NULL out_stamps returns the count in *count; a
+ * short buffer is CLAY_ERROR_BUFFER_TOO_SMALL with the count needed in
+ * *count. After clay_stroke_tx_end these are exactly the stamps
+ * clay_stroke_resolve_full gives for the whole path, `along` included. */
+clay_result clay_stroke_tx_stamps(const clay_stroke_tx* tx, clay_stamp* out_stamps,
+                                  size_t* count);
+
+/* Fill a status descriptor, bounded by the struct_size the caller declared. */
+clay_result clay_stroke_tx_status_get(const clay_stroke_tx* tx, clay_stroke_tx_status* out_status);
+
+/* THE CONSUMER CALLS, which share these rules.
+ *
+ * Each applies the session's settled stamps that have not been applied yet,
+ * and may be called as often as the host likes — after every append is the
+ * intended rhythm, and a call with nothing newly settled applies nothing and
+ * is not an error.
+ *
+ * BOUND BY THE FIRST CALL. The first consumer call binds the session to its
+ * target and its brush arguments for the gesture: a stroke has ONE target and
+ * ONE brush, fixed at pointer-down, and a grab carrying its region or a
+ * snakehook walking its anchor could not survive a change of either. Every
+ * later call must name the same target with the same arguments — the same
+ * descriptor contents, the same mask, item and record pointers, the same
+ * scalars — and a call that differs is refused with
+ * CLAY_ERROR_INVALID_ARGUMENT and applies nothing. The out parameters (ids,
+ * reports, a mesh delta record) are per call and may differ.
+ *
+ * Borrowed pointers the first call reads — a descriptor's alpha, the mask, a
+ * clay_item — must stay valid until the gesture closes. A descriptor is read
+ * ONCE, at the bind; later calls only compare it.
+ *
+ * CLOSED BY THE CALL AFTER clay_stroke_tx_end. That call applies the held-back
+ * stamps, then closes the gesture: it flushes deferred normals into that
+ * call's record, releases a grab's carried region and closes the session's
+ * undo group. Later calls apply nothing and return CLAY_OK.
+ *
+ * WHILE THE GESTURE IS OPEN the target belongs to it. Nothing else should
+ * stamp, undo or replay it between two consumer calls: a grab's carried region
+ * is open, deferred normals are stale, and the SDF, voxel and mask consumers
+ * hold the owning document's undo group open when it records history — so any
+ * other edit the host records in that window joins the stroke's undo step. */
+
 /* Resolve a stroke and stamp it into a grid. `index` is the palette entry to
  * set, or 0 to erase; `mask` may be NULL. *out_applied receives how many
  * stamps actually ran — a stamp in a frozen region is dropped, not weakened
@@ -6986,6 +7146,17 @@ clay_result clay_voxel_apply_stroke(clay_voxel_grid* grid, const float* samples_
                                     size_t sample_count, const clay_stroke_preset* preset,
                                     int32_t index, int32_t shape, int32_t falloff,
                                     const clay_mask* mask, size_t* out_applied);
+
+/* clay_voxel_apply_stroke, fed by a stroke session (ABI 0.126.0): applies the
+ * session's newly settled stamps. See "THE CONSUMER CALLS" beside
+ * clay_stroke_tx_status_get for binding and closing. Each stamp dithers with
+ * its index in the WHOLE stroke, so the pieces are bit-identical to the
+ * whole-path call. On a grid a document owns, the gesture is one undo step:
+ * the session holds that document's undo group open from the first call to
+ * the close. *out_applied counts this call's stamps. */
+clay_result clay_voxel_apply_stroke_tx(clay_voxel_grid* grid, clay_stroke_tx* tx, int32_t index,
+                                       int32_t shape, int32_t falloff, const clay_mask* mask,
+                                       size_t* out_applied);
 
 /* -- the Move brush -------------------------------------------------------- */
 
@@ -8055,6 +8226,11 @@ clay_result clay_mask_apply_stroke(clay_mask* mask, const float* samples_xyzpt,
                                    float target, int32_t shape, int32_t falloff,
                                    size_t* out_applied);
 
+/* clay_mask_apply_stroke, fed by a stroke session (ABI 0.126.0). The same
+ * rules as clay_voxel_apply_stroke_tx, undo group included. */
+clay_result clay_mask_apply_stroke_tx(clay_mask* mask, clay_stroke_tx* tx, float target,
+                                      int32_t shape, int32_t falloff, size_t* out_applied);
+
 /* Resolve a stroke and append one edit per stamp to a layer, using `item` as
  * the stamp template scaled to each stamp's radius. The builder is left
  * untouched. With undo enabled the whole stroke is ONE step.
@@ -8083,6 +8259,23 @@ clay_result clay_layer_apply_stroke(clay_document* doc, clay_layer_id layer,
                                     const clay_stroke_preset* preset, const clay_item* item,
                                     const clay_mask* mask, clay_node_id* out_nodes,
                                     size_t* count);
+
+/* clay_layer_apply_stroke, fed by a stroke session (ABI 0.126.0).
+ *
+ * The node list a gesture leaves is the one the whole-path call leaves, BIT
+ * FOR BIT: the same nodes, in the same order, with the same ids, so long as
+ * nothing else reserves ids in the layer during the gesture. The item is
+ * validated and COPIED at the bind, so a host may reuse its clay_item while
+ * the gesture runs; later calls compare the pointer only.
+ *
+ * ONE GESTURE IS ONE UNDO STEP: the session opens the document's undo group
+ * at the bind and closes it with the gesture, so a host need not bracket it
+ * (bracketing it as well is harmless — brackets nest). `count` is this call's
+ * capacity and node count, exactly as on clay_layer_apply_stroke. */
+clay_result clay_layer_apply_stroke_tx(clay_document* doc, clay_layer_id layer,
+                                       clay_stroke_tx* tx, const clay_item* item,
+                                       const clay_mask* mask, clay_node_id* out_nodes,
+                                       size_t* count);
 
 /* -- fixed-topology mesh brushes ------------------------------------------- */
 
@@ -8855,6 +9048,25 @@ clay_result clay_mesh_sculptor_apply_preset(clay_mesh_sculptor* sculptor,
                                             int32_t defer_normals, clay_mesh_deltas* deltas,
                                             size_t* out_applied);
 
+/* clay_mesh_sculptor_apply_stroke, fed by a stroke session (ABI 0.126.0).
+ *
+ * The SAME GESTURE as the whole-path call, not a stroke per call: a grab
+ * gathers its region at its first stamp and carries it to the close, a
+ * snakehook keeps its anchor, and deferred normals are flushed once, at the
+ * close, into THAT call's `deltas`. Passing one clay_mesh_deltas to every call
+ * of the gesture records it as one undo step, as the whole-path call does.
+ *
+ * A session frame (clay_mesh_sculptor_set_world_frame) is read at the bind:
+ * the session's world samples are carried into the mesh's own space exactly as
+ * the whole-path call carries its own, sample by sample, so the stamps are the
+ * same floats. */
+clay_result clay_mesh_sculptor_apply_stroke_tx(clay_mesh_sculptor* sculptor, clay_stroke_tx* tx,
+                                               const clay_mesh_brush_desc* desc,
+                                               const clay_mask* mask,
+                                               const clay_mesh_frame* mesh_to_world,
+                                               int32_t defer_normals, clay_mesh_deltas* deltas,
+                                               size_t* out_applied);
+
 /* -- ADAPTIVE TOPOLOGY -------------------------------------------------------
  *
  * A surface whose CONNECTIVITY changes under the brush: geometry is created
@@ -9389,6 +9601,24 @@ clay_result clay_dynamic_sculptor_apply_preset_recorded(clay_dynamic_sculptor* s
                                                         clay_dynamic_delta* record,
                                                         size_t* out_applied,
                                                         clay_dynamic_stamp_report* out_report);
+
+/* clay_dynamic_sculptor_apply_stroke_recorded, fed by a stroke session (ABI
+ * 0.126.0). `record` may be NULL for an unrecorded stroke; recorded or not is
+ * part of the binding.
+ *
+ * Each call checks and captures into `record` the way consecutive
+ * clay_dynamic_sculptor_stamp_recorded calls continue one record: a call that
+ * finds the surface moved since the record's last capture is refused with
+ * CLAY_ERROR_SNAPSHOT_MISMATCH and stamps nothing. One record across the
+ * gesture is one undo step. `out_report` describes THIS call's stamps. */
+clay_result clay_dynamic_sculptor_apply_stroke_tx(clay_dynamic_sculptor* sculptor,
+                                                  clay_stroke_tx* tx,
+                                                  const clay_mesh_brush_desc* brush,
+                                                  const clay_dynamic_topology_desc* topology,
+                                                  const clay_mask* mask,
+                                                  int32_t orient_alpha_by_stamp,
+                                                  clay_dynamic_delta* record, size_t* out_applied,
+                                                  clay_dynamic_stamp_report* out_report);
 
 /* Undo and redo, through the SCULPTOR, because the sculptor owns the chunked
  * index and the dirty-chunk stream that have to follow the surface.
@@ -10042,6 +10272,19 @@ clay_result clay_multires_sculptor_apply_stroke(clay_multires_sculptor* sculptor
                                                 const clay_mesh_frame* mesh_to_world,
                                                 int32_t defer_normals, size_t* out_applied,
                                                 clay_multires_stamp_report* out_report);
+
+/* clay_multires_sculptor_apply_stroke, fed by a stroke session (ABI
+ * 0.126.0). The gesture begins the level record MeshBrush::Layer measures
+ * against once, at its first stamp, and carries a grab's region and a
+ * snakehook's anchor to the close, as the whole-path call does within one
+ * call. `out_report` describes this call. */
+clay_result clay_multires_sculptor_apply_stroke_tx(clay_multires_sculptor* sculptor,
+                                                   clay_stroke_tx* tx,
+                                                   const clay_mesh_brush_desc* brush,
+                                                   const clay_mask* mask,
+                                                   const clay_mesh_frame* mesh_to_world,
+                                                   int32_t defer_normals, size_t* out_applied,
+                                                   clay_multires_stamp_report* out_report);
 
 /* -- changed-block transport -------------------------------------------------
  *

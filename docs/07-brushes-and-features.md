@@ -1138,6 +1138,66 @@ nothing can march it. See [`examples/29_claybuildup_smooth.py`](../examples/29_c
 A tap has to leave a mark: a single sample, or a path shorter than one spacing,
 yields exactly one stamp at the start.
 
+### A stroke under the pen (ABI 0.126.0, #670)
+
+Every call above takes a **whole** path. A host forwarding a live gesture in
+pieces — Pencil samples at 240 Hz, batched by frame pacing — used to restart
+spacing, taper, steady and jitter at every call, and could not get the end taper
+right at all, because no piece knows it is the last. `brush::StrokeTransaction`
+(C++), `clay_stroke_tx` (C) and `clay.StrokeTransaction` (pyclay) resolve the
+samples **as they arrive**: each append re-resolves the whole path, so one batch
+of forty samples and five batches of eight give the same stamps.
+
+Two things about a stamp belong to the whole path — `along`, and the tapers,
+which ramp the radius over a *fraction* of the stroke — so a later append can
+**revise** a stamp an earlier one produced. The engine's rule:
+
+> A consumer applies a stamp only once it is **settled**: no later append can
+> change its position, radius, strength or rotation.
+
+A stamp is settled when the path has two or more samples, its station lies on
+the path already received, it is outside the end taper at the current length,
+and the preset has **no start taper** — a start taper is a fraction of the
+whole stroke, so every station eventually falls inside it and nothing settles
+before the pen lifts. Under the rule a gesture fed in pieces is **bit-identical**
+to the whole-path call, on every representation; the price is that applied ink
+trails the pen by up to one spacing, by the end-taper fraction of the stroke,
+or — with a start taper — until lift. A live preview that wants the provisional
+stroke draws it from `clay_stroke_tx_stamps`, which is always the stroke as it
+stands.
+
+```c
+clay_stroke_tx* tx = NULL;
+clay_stroke_tx_begin(&preset, &tx);                    /* pointer down */
+/* every batch of coalesced touches: */
+clay_stroke_tx_append(tx, samples, n, NULL, NULL);
+clay_mesh_sculptor_apply_stroke_tx(sculptor, tx, &brush, mask, NULL, 1, deltas, NULL);
+/* pointer up: */
+clay_stroke_tx_end(tx);
+clay_mesh_sculptor_apply_stroke_tx(sculptor, tx, &brush, mask, NULL, 1, deltas, NULL);
+clay_stroke_tx_destroy(tx);                            /* before the sculptor */
+```
+
+The consumer calls — `clay_layer_apply_stroke_tx`, `clay_voxel_apply_stroke_tx`,
+`clay_mask_apply_stroke_tx`, `clay_mesh_sculptor_apply_stroke_tx`,
+`clay_dynamic_sculptor_apply_stroke_tx`, `clay_multires_sculptor_apply_stroke_tx`
+— each apply what has settled since the last call. The first one **binds** the
+session to its target and brush; a later call naming another target, handle or
+scalar is refused. The call after `_end` applies the held-back tail and closes
+the gesture. Between calls the gesture is open on its target: a grab's carried
+region, the deferred normals, and — for SDF, voxel and mask targets — the
+owning document's undo group, which is what makes a gesture one undo step.
+The mesh consumers are the same code as their whole-path calls
+(`MeshStrokeGesture`, `MultiresStrokeGesture`, `DynamicStrokeGesture`): a stroke
+per call would re-gather a grab's region at every batch and land elsewhere.
+
+Each append re-resolves the whole path, which is linear in it: 19 µs per
+append ten seconds into a 240 Hz stroke (502 stamps). It was quadratic — the
+resolver searched for each station's segment from the start of the path — and
+nothing noticed while a stroke was resolved once. See
+`openspec/changes/add-stroke-session/` for the measurements and the rule's
+derivation.
+
 ---
 
 ## 6. Armatures
@@ -3179,6 +3239,7 @@ Names differ between bindings, so this lists them rather than ticking boxes.
 | Ranged twist / bend | `Deformer::twist_range`, `bend_range` | `p.twist_range(...)`, `p.bend_range(...)` | `CLAY_DEFORM_TWIST_RANGE`, `CLAY_DEFORM_BEND_RANGE` |
 | Bend along a curve | `Deformer::bend_curve` | `p.bend_curve(...)` | `clay_item_add_bend_curve` — its own entry point, because a guide is not a fixed number of floats |
 | Stroke engine | `brush::resolve_stroke`, `StrokePreset` | `clay.StrokePreset`, `layer.apply_stroke(...)` | `clay_stroke_resolve`, `clay_stroke_preset_*`, `clay_layer_apply_stroke`, `clay_voxel_apply_stroke` |
+| A stroke resolved as it arrives | `brush::StrokeTransaction`, `StampCursor`, `MeshStrokeGesture` / `MultiresStrokeGesture` / `DynamicStrokeGesture` | `clay.StrokeTransaction` (the session; the consumers are C and C++ only) | `clay_stroke_tx_*`, `clay_layer_apply_stroke_tx`, `clay_voxel_apply_stroke_tx`, `clay_mask_apply_stroke_tx`, `clay_mesh_sculptor_apply_stroke_tx`, `clay_dynamic_sculptor_apply_stroke_tx`, `clay_multires_sculptor_apply_stroke_tx` |
 | Smooth — `relax` on SDF layers | `field::relax`, `VoxelGrid::sculpt_smooth` | `Volume.relaxed(...)`, `VoxelGrid.sculpt_smooth(...)` | `clay_item_volume_relax`, `clay_item_volume_relax_from`, `clay_voxel_sculpt_smooth` |
 | Flatten | `field::flatten` | `Volume.flattened(...)`, `Volume.flattened_from(...)` | `clay_item_volume_flatten`, `clay_item_volume_flatten_from` |
 | Cut tool | `cut::cut_item`, `cut::CutShape` | `clay.Cut(...)`, `clay.CutShape.rect/circle/from_polygon/from_curve` | `clay_cut_create`, `clay_cut_polygon_from_curve` |
