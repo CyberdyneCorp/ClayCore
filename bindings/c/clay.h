@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 124
+#define CLAY_ABI_MINOR 125
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -10031,10 +10031,9 @@ clay_result clay_multires_sculptor_stamp(clay_multires_sculptor* sculptor,
  * `defer_normals` non-zero recomputes normals once at the end instead of per
  * stamp. Faster, identical result.
  *
- * The whole call accumulates into `out_report`'s revisions, and a host that
- * wants it as one undo step records the gesture through pyclay or the C++
- * MultiresDelta — the ABI does not yet carry that record, which is stated here
- * rather than left to be discovered. */
+ * The whole call accumulates into `out_report`'s revisions. A host that wants
+ * it as one undo step calls clay_multires_sculptor_apply_stroke_recorded
+ * (ABI 0.125.0), which is this call plus a clay_multires_delta. */
 clay_result clay_multires_sculptor_apply_stroke(clay_multires_sculptor* sculptor,
                                                 const float* samples_xyzpt, size_t sample_count,
                                                 const clay_stroke_preset* preset,
@@ -10435,12 +10434,11 @@ typedef enum clay_multires_smooth_mode {
  * transaction, so a mirrored stroke is one layer and one record whose coverage
  * is the union of the two sides.
  *
- * THE RECORD ITSELF DOES NOT CROSS THIS ABI YET, which is stated here rather
- * than left to be discovered — the same sentence
- * clay_multires_sculptor_apply_stroke already carries about MultiresDelta. A
- * host that wants a layered gesture in an undo stack reaches it through pyclay
- * or the C++ SculptLayerDelta; commit reports how many entries the record held
- * so a host can at least see that the gesture coalesced. */
+ * THE RECORD CROSSES THIS ABI SINCE 0.125.0: a host that wants a layered
+ * gesture in its undo stack closes it with
+ * clay_multires_sculpt_layer_stroke_commit_into, which hands the record over
+ * as a clay_multires_delta. Plain _commit still drops it, and still reports
+ * how many entries it held so a host can see that the gesture coalesced. */
 typedef struct clay_multires_sculpt_layer_stroke clay_multires_sculpt_layer_stroke;
 
 clay_result clay_multires_sculpt_layer_stroke_create(
@@ -10531,6 +10529,210 @@ clay_result clay_multires_sculpt_layer_stroke_commit(clay_multires_sculpt_layer_
  * not a recomputation — and leaves the composition and the active layer as they
  * were found. */
 clay_result clay_multires_sculpt_layer_stroke_cancel(clay_multires_sculpt_layer_stroke* stroke);
+
+/* -- undo for a multiresolution gesture (ABI 0.125.0, issue #671) ------------
+ *
+ * One gesture on a hierarchy as ONE record the host holds, reverts and
+ * re-applies: the shape clay_dynamic_delta already gave the adaptive surface,
+ * so a host keeps one pattern for every sculptable representation. A
+ * clay_multires is a standalone handle no document layer owns, so
+ * clay_document_undo cannot reach it; before this a committed multires gesture
+ * could only be undone from a clay_multires_serialize snapshot of the whole
+ * hierarchy.
+ *
+ * WHAT IT HOLDS is what the gesture EDITED, never what the hierarchy derives:
+ * the cage positions a level-0 stroke moved, each level's own detail
+ * coefficients a stroke above level 0 wrote, and the coefficients and mask
+ * weights of the ONE sculpt pass a layered gesture wrote. Every entry is
+ * coalesced per gesture -- a vertex a hundred stamps touched is one entry with
+ * the first `before` and the last `after` -- so the record's size follows the
+ * vertices the gesture REACHED, not the stamps it took and not the levels above
+ * it. Measured on a 6x6 cage at level 2: one stamp and forty stamps on the
+ * same spot record the same entry count and the same encoded bytes.
+ *
+ * THREE WAYS IN, ONE RECORD:
+ *   - clay_multires_sculptor_stamp_recorded and _apply_stroke_recorded: the
+ *     plain sculptor. It writes the stack's ACTIVE sculpt pass when there is
+ *     one and the base when there is not, and the record takes whichever half
+ *     was written -- a host does not have to know in advance;
+ *   - clay_multires_sculpt_layer_stroke_commit_into: the transaction's record,
+ *     handed over at commit instead of dropped.
+ *
+ * WHAT A REPLAY PROMISES:
+ *   - REVERT puts back every recorded value as the gesture found it, APPLY as
+ *     the gesture left it. clay_multires_detail_checksum,
+ *     clay_multires_sculpt_layer_checksum and every level's
+ *     clay_multires_copy_level_mesh positions come back bit-identical, at
+ *     level 0 and above, on uniform and regionally refined hierarchies --
+ *     including a stroke across a refined region's rim, which writes several
+ *     levels.
+ *   - Both are IDEMPOTENT: reverting twice is reverting once, and an empty
+ *     record replays as a no-op that returns CLAY_OK.
+ *   - What moved is MARKED: the evaluated revision advances and
+ *     clay_multires_dirty_blocks names the patches, as after a stamp, so a
+ *     host re-copies its dirty blocks after an undo as it does after a dab. A
+ *     pass is recomposed lazily, so a replay holding a layer half evaluates
+ *     the DISPLAY level before it returns -- the work the host's next copy
+ *     would have done -- or the dirty list would come back empty.
+ *   - A sculptor over the hierarchy keeps working after a replay: the same
+ *     stroke again lands bit-identically where it landed the first time.
+ *
+ * THE BINDING, AND WHAT IT REFUSES. A record is bound to the hierarchy it was
+ * captured on, at the level structure it was captured at. Revert and apply
+ * return CLAY_ERROR_SNAPSHOT_MISMATCH and write NOTHING when:
+ *   - the handle is another hierarchy, even one built from the same cage with
+ *     the same levels and every count equal;
+ *   - the levels changed since the capture: a level added, removed, regionally
+ *     refined, or the cage replaced -- INCLUDING a change that was later undone
+ *     (remove the top level, add it back);
+ *   - the record holds a pass the stack no longer has.
+ * SNAPSHOT_MISMATCH is the RETRYABLE answer, as it is for clay_dynamic_delta:
+ * the call was well formed and the state is wrong. A null handle is
+ * CLAY_ERROR_INVALID_ARGUMENT.
+ *
+ * WHAT IT DOES NOT PROMISE:
+ *   - A RECORD DOES NOT OUTLIVE ITS STRUCTURE. A hierarchy decoded from its own
+ *     clay_multires_serialize bytes, or relevelled and relevelled back, is a
+ *     new structure and accepts no earlier record, even where every vertex is
+ *     numbered as before. A host undoing past a level change restores from
+ *     the snapshot it took for that change, as it does today. Refusing a
+ *     replay that would have been right costs a step; accepting one that is
+ *     wrong writes coefficients into the wrong vertices and says nothing.
+ *   - NO ORDERING IS ENFORCED. Records on disjoint vertices commute. Records
+ *     that overlap must be replayed last in, first out by the host: each one
+ *     puts back absolute values, so reverting an older one under a newer one
+ *     restores the older `before` over the newer gesture's work.
+ *   - A replay while a sculpt-layer stroke is OPEN on the same hierarchy is not
+ *     refused, and that stroke's cancel then restores its own `before` values
+ *     over the replay. Commit or cancel first.
+ *   - clay_multires_memory_ledger DOES NOT COUNT RECORDS. The host holds them
+ *     and budgets them by clay_multires_delta_stats.resident_bytes.
+ *
+ * THREADING. As the hierarchy's: the host serializes calls on one hierarchy,
+ * and a capture into a record is a call on that record too. A replay only
+ * READS its record. */
+
+typedef struct clay_multires_delta clay_multires_delta;
+
+/* An empty, unbound record. Destroy with clay_multires_delta_destroy; NULL is
+ * a no-op. */
+clay_multires_delta* clay_multires_delta_create(void);
+void clay_multires_delta_destroy(clay_multires_delta* delta);
+
+/* Empties the record and unbinds it, so the next capture starts a new gesture,
+ * on any hierarchy. */
+clay_result clay_multires_delta_clear(clay_multires_delta* delta);
+
+typedef struct clay_multires_delta_stats {
+    uint32_t struct_size; /* = sizeof(clay_multires_delta_stats); required */
+    /* The base half: each level's own detail coefficients above level 0, and
+     * the cage vertices a level-0 gesture moved. */
+    uint64_t detail_entries;
+    uint64_t cage_entries;
+    /* The layer half: one pass's coefficients and mask weights. */
+    uint64_t layer_detail_entries;
+    uint64_t layer_mask_entries;
+    /* The pass the layer half belongs to; CLAY_NO_SCULPT_LAYER when the record
+     * holds no layer half. */
+    uint64_t sculpt_layer;
+    /* EXACT and platform-independent: the size clay_multires_delta_serialize
+     * writes -- 40, plus 16 + 32*detail + 28*cage when the base half holds
+     * anything, plus 24 + 32*layer_detail + 16*layer_mask when the layer half
+     * does. The number to assert a count against. */
+    uint64_t encoded_bytes;
+    /* What the record holds in memory, capacities and slot maps included. It
+     * depends on the allocator, so it is the number to BUDGET against and the
+     * wrong one to assert. */
+    uint64_t resident_bytes;
+} clay_multires_delta_stats;
+
+clay_result clay_multires_delta_stats_get(const clay_multires_delta* delta,
+                                          clay_multires_delta_stats* out_stats);
+
+/* The levels the record touched, ascending and without repeats -- what a host
+ * shows for "what did this undo step change". Size-query pattern: out_levels
+ * NULL for the count in *count; a short buffer is CLAY_ERROR_BUFFER_TOO_SMALL
+ * with the needed count in *count and nothing written. */
+clay_result clay_multires_delta_levels(const clay_multires_delta* delta, uint32_t* out_levels,
+                                       size_t* count);
+
+/* clay_multires_sculptor_stamp and _apply_stroke, accumulating into `record`.
+ * NEW ENTRY POINTS rather than new arguments, because changing a shipped
+ * signature breaks every host; the shipped calls are unchanged, and everything
+ * their headers say applies here.
+ *
+ * `record` NULL behaves exactly as the unrecorded call. A recorded stroke
+ * leaves the hierarchy bit-identical to the unrecorded stroke with the same
+ * inputs.
+ *
+ * THE ORDER OF REFUSALS, which is the contract:
+ *   1. Every CLAY_ERROR_INVALID_ARGUMENT the unrecorded call returns -- a null
+ *      handle, a malformed brush, stroke or report size, a bad mask -- is
+ *      returned FIRST, whatever state the record is in.
+ *   2. Then the record: a non-empty record bound to another hierarchy or to an
+ *      earlier structure of this one, or holding one pass while the stack's
+ *      active layer is a DIFFERENT pass, is CLAY_ERROR_SNAPSHOT_MISMATCH --
+ *      continuing it would join two unrelated histories into one undo step. A
+ *      base write (no active pass) joins a record holding either half.
+ * On either, NOTHING is stamped, the report is not written, `*out_applied` is
+ * 0, and the record is untouched.
+ *
+ * ACCUMULATES. A record is continued across calls until it is cleared, and one
+ * revert undoes everything captured into it; for one undo step per stroke,
+ * clay_multires_delta_clear the record (or create a new one) first. An empty
+ * record binds on the first stamp that writes something; a stroke that wrote
+ * nothing leaves it empty and unbound. */
+clay_result clay_multires_sculptor_stamp_recorded(clay_multires_sculptor* sculptor,
+                                                  const clay_mesh_brush_desc* brush,
+                                                  const clay_mask* mask,
+                                                  clay_multires_delta* record,
+                                                  clay_multires_stamp_report* out_report);
+clay_result clay_multires_sculptor_apply_stroke_recorded(
+    clay_multires_sculptor* sculptor, const float* samples_xyzpt, size_t sample_count,
+    const clay_stroke_preset* preset, const clay_mesh_brush_desc* brush, const clay_mask* mask,
+    const clay_mesh_frame* mesh_to_world, int32_t defer_normals, clay_multires_delta* record,
+    size_t* out_applied, clay_multires_stamp_report* out_report);
+
+/* clay_multires_sculpt_layer_stroke_commit, handing the transaction's record to
+ * the host instead of dropping it: everything _commit says applies, and
+ * `*out_entries` is the same count. The record is bound to the hierarchy as it
+ * is at the commit.
+ *
+ * `record` MUST BE EMPTY. A non-empty one is CLAY_ERROR_INVALID_ARGUMENT, the
+ * record is untouched and the stroke STAYS OPEN, so the host can commit into a
+ * fresh record or cancel. Merging two gestures into one step is a host decision
+ * this call does not make for it. A gesture that changed nothing leaves the
+ * record empty. */
+clay_result clay_multires_sculpt_layer_stroke_commit_into(
+    clay_multires_sculpt_layer_stroke* stroke, clay_multires_delta* record, size_t* out_entries);
+
+/* Undo and redo, through the HIERARCHY. A multires sculptor keeps no index a
+ * replay could leave stale -- it reads the hierarchy's own chunk table, which
+ * the replay updates -- so unlike clay_dynamic_delta_revert these take the
+ * surface, and every sculptor over it follows. See WHAT A REPLAY PROMISES and
+ * THE BINDING above. */
+clay_result clay_multires_delta_revert(const clay_multires_delta* delta, clay_multires* surface);
+clay_result clay_multires_delta_apply(const clay_multires_delta* delta, clay_multires* surface);
+
+/* Record <-> bytes, on the size-query pattern: call with out_data NULL for the
+ * size in *count; a buffer that is too small gets CLAY_ERROR_BUFFER_TOO_SMALL
+ * with the needed size in *count and writes nothing.
+ *
+ * FOR SPILLING, NOT FOR CRASH RECOVERY. A host over its undo budget may write
+ * the oldest record out and read it back later, and the result replays exactly
+ * as the original -- onto the hierarchy it was captured on, in the process
+ * that captured it. A record read back in another process decodes, reports its
+ * statistics, and replays onto nothing.
+ *
+ * Deserialize refuses a truncated, trailing, oversized or hostile buffer with
+ * CLAY_ERROR_INVALID_ARGUMENT before allocating from any count in it, and a
+ * record written by a newer format version with CLAY_ERROR_FORWARD_VERSION.
+ * *out_delta is NULL on any refusal. */
+clay_result clay_multires_delta_serialize(const clay_multires_delta* delta, uint8_t* out_data,
+                                          size_t* count);
+clay_result clay_multires_delta_deserialize(const uint8_t* data, size_t size,
+                                            clay_multires_delta** out_delta);
+
 /* -- one transport for all three surfaces ------------------------------------
  *
  * (c-abi spec, add-extreme-poly-runtime.)

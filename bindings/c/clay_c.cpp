@@ -32,6 +32,7 @@
 #include "clay/mesh/maintenance.h"
 #include "clay/brush/stroke.h"
 #include "clay/mesh/layered_sculpt.h"
+#include "clay/mesh/multires_gesture.h"
 #include "clay/mesh/multires_sculpt.h"
 #include "clay/mesh/preflight.h"
 #include "clay/mesh/surface_view.h"
@@ -19683,6 +19684,9 @@ constexpr std::size_t kMultiresProjectReportOriginal =
     offsetof(clay_multires_project_report, mean_offset) + sizeof(float);
 constexpr std::size_t kMultiresStampReportOriginal =
     offsetof(clay_multires_stamp_report, evaluated_revision) + sizeof(std::uint64_t);
+// Original layout (ABI 0.125.0), named by its last field.
+constexpr std::size_t kMultiresDeltaStatsOriginal =
+    offsetof(clay_multires_delta_stats, resident_bytes) + sizeof(std::uint64_t);
 constexpr std::size_t kMultiresBlockInfoOriginal =
     offsetof(clay_multires_block_info, index_count) + sizeof(std::uint32_t);
 
@@ -19720,6 +19724,12 @@ struct clay_multires {
     const mesh::MultiresSurface* target() const {
         return const_cast<clay_multires*>(this)->target();
     }
+};
+
+// One multiresolution gesture a host holds (undo-a-multires-gesture-across-the-
+// abi): both halves and the hierarchy they are bound to. See MultiresGesture.
+struct clay_multires_delta {
+    mesh::MultiresGesture gesture;
 };
 
 struct clay_multires_sculptor : SessionFrame {
@@ -20429,9 +20439,69 @@ clay_result clay_multires_sculptor_world_frame(const clay_multires_sculptor* scu
     return fill_session_frame(*sculptor, out_frame, out_declared);
 }
 
-clay_result clay_multires_sculptor_stamp(clay_multires_sculptor* sculptor,
-                                         const clay_mesh_brush_desc* brush, const clay_mask* mask,
-                                         clay_multires_stamp_report* out_report) {
+namespace {
+
+// A malformed report is refused before anything is stamped. The recorded calls
+// promise that order (header: THE ORDER OF REFUSALS); the shipped unrecorded
+// calls validate it afterwards, and keep doing so.
+clay_result probe_multires_report(clay_multires_stamp_report* out_report) {
+    if (!out_report) return CLAY_OK;
+    clay_multires_stamp_report probe;
+    return read_desc(out_report, kMultiresStampReportOriginal, &probe);
+}
+
+clay_result write_multires_report(const mesh::MultiresSurface& s, std::uint32_t level,
+                                  std::size_t moved, clay_multires_stamp_report* out_report) {
+    if (!out_report) return CLAY_OK;
+    const std::uint32_t declared = out_report->struct_size;
+    clay_result r = probe_multires_report(out_report);
+    if (r != CLAY_OK) return r;
+    clay_multires_stamp_report out{};
+    out.struct_size = static_cast<std::uint32_t>(sizeof(out));
+    out.level = level;
+    out.moved_vertices = moved;
+    out.base_revision = s.base_revision();
+    out.detail_revision = s.detail_revision();
+    out.evaluated_revision = s.evaluated_revision();
+    write_desc(out_report, declared, out);
+    return CLAY_OK;
+}
+
+// Whether `record` may be continued on this hierarchy as it is now. Null is
+// the unrecorded call, which always may.
+clay_result accept_multires_record(const clay_multires_delta* record,
+                                   const mesh::MultiresSurface& s) {
+    if (!record || record->gesture.accepts(s)) return CLAY_OK;
+    return fail(CLAY_ERROR_SNAPSHOT_MISMATCH,
+                "this record belongs to another hierarchy, an earlier level structure of this "
+                "one, or a sculpt pass that is no longer active; clear it or start a new one. "
+                "Nothing stamped");
+}
+
+// Where a whole stroke's frame comes from: the handle's declared session frame
+// or the per-call `mesh_to_world`. This call carried a per-call frame before
+// any handle could declare one, so both spellings exist and BOTH TOGETHER IS
+// REFUSED -- the rule clay_mesh_sculptor_apply_stroke already follows.
+clay_result resolve_stroke_frame(const clay_multires_sculptor& sculptor,
+                                 const clay_mesh_frame* mesh_to_world,
+                                 brush::MeshStrokeOptions* options) {
+    clay_result r = reject_conflicting_frame(sculptor, mesh_to_world);
+    if (r != CLAY_OK) return r;
+    if (!sculptor.has_frame) return read_mesh_frame(mesh_to_world, &options->mesh_to_world);
+    options->mesh_to_world = sculptor.frame;
+    return CLAY_OK;
+}
+
+mesh::MultiresDelta* base_half(clay_multires_delta* record) {
+    return record ? &record->gesture.base() : nullptr;
+}
+mesh::SculptLayerDelta* layer_half(clay_multires_delta* record) {
+    return record ? &record->gesture.layer() : nullptr;
+}
+
+clay_result multires_stamp(clay_multires_sculptor* sculptor, const clay_mesh_brush_desc* brush,
+                           const clay_mask* mask, clay_multires_delta* record,
+                           clay_multires_stamp_report* out_report) {
     if (!sculptor || !sculptor->sculptor)
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "null multires sculptor");
     mesh::MeshBrush verb = mesh::MeshBrush::Draw;
@@ -20455,34 +20525,21 @@ clay_result clay_multires_sculptor_stamp(clay_multires_sculptor* sculptor,
     mesh::MultiresSurface* sp = sculptor->owner ? sculptor->owner->target() : nullptr;
     if (!sp) return fail(CLAY_ERROR_NOT_FOUND, "hierarchy is no longer in its document");
     mesh::MultiresSurface& s = *sp;
+    r = accept_multires_record(record, s);
+    if (r != CLAY_OK) return r;
     const std::uint32_t level = s.sculpt_level();
-    const std::size_t moved = sculptor->sculptor->stamp(verb, settings, gate, nullptr);
-
-    if (out_report) {
-        const std::uint32_t declared = out_report->struct_size;
-        clay_multires_stamp_report probe;
-        r = read_desc(out_report, kMultiresStampReportOriginal, &probe);
-        if (r != CLAY_OK) return r;
-        clay_multires_stamp_report out{};
-        out.struct_size = static_cast<std::uint32_t>(sizeof(out));
-        out.level = level;
-        out.moved_vertices = moved;
-        out.base_revision = s.base_revision();
-        out.detail_revision = s.detail_revision();
-        out.evaluated_revision = s.evaluated_revision();
-        write_desc(out_report, declared, out);
-    }
-    return CLAY_OK;
+    const std::size_t moved =
+        sculptor->sculptor->stamp(verb, settings, gate, base_half(record), layer_half(record));
+    if (record) record->gesture.bind(s);
+    return write_multires_report(s, level, moved, out_report);
 }
 
-clay_result clay_multires_sculptor_apply_stroke(clay_multires_sculptor* sculptor,
-                                                const float* samples_xyzpt, size_t sample_count,
-                                                const clay_stroke_preset* preset,
-                                                const clay_mesh_brush_desc* brush,
-                                                const clay_mask* mask,
-                                                const clay_mesh_frame* mesh_to_world,
-                                                int32_t defer_normals, size_t* out_applied,
-                                                clay_multires_stamp_report* out_report) {
+clay_result multires_apply_stroke(clay_multires_sculptor* sculptor, const float* samples_xyzpt,
+                                  size_t sample_count, const clay_stroke_preset* preset,
+                                  const clay_mesh_brush_desc* brush, const clay_mask* mask,
+                                  const clay_mesh_frame* mesh_to_world, int32_t defer_normals,
+                                  clay_multires_delta* record, size_t* out_applied,
+                                  clay_multires_stamp_report* out_report) {
     if (!sculptor || !sculptor->sculptor)
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "null multires sculptor");
     mesh::MeshBrush verb = mesh::MeshBrush::Draw;
@@ -20492,15 +20549,7 @@ clay_result clay_multires_sculptor_apply_stroke(clay_multires_sculptor* sculptor
 
     brush::MeshStrokeOptions options;
     options.defer_normals = defer_normals != 0;
-    // This call carried a per-call frame before any handle could declare one,
-    // so both spellings now exist and BOTH TOGETHER IS REFUSED -- the rule
-    // clay_mesh_sculptor_apply_stroke already follows.
-    r = reject_conflicting_frame(*sculptor, mesh_to_world);
-    if (r != CLAY_OK) return r;
-    if (sculptor->has_frame)
-        options.mesh_to_world = sculptor->frame;
-    else
-        r = read_mesh_frame(mesh_to_world, &options.mesh_to_world);
+    r = resolve_stroke_frame(*sculptor, mesh_to_world, &options);
     if (r != CLAY_OK) return r;
 
     std::vector<brush::StrokeSample> samples;
@@ -20522,25 +20571,163 @@ clay_result clay_multires_sculptor_apply_stroke(clay_multires_sculptor* sculptor
     mesh::MultiresSurface* sp = sculptor->owner ? sculptor->owner->target() : nullptr;
     if (!sp) return fail(CLAY_ERROR_NOT_FOUND, "hierarchy is no longer in its document");
     mesh::MultiresSurface& s = *sp;
+    r = accept_multires_record(record, s);
+    if (r != CLAY_OK) return r;
     const std::uint32_t level = s.sculpt_level();
-    const std::size_t applied =
-        brush::apply_to_multires(*sculptor->sculptor, brush::resolve_stroke(samples, resolved),
-                                 verb, settings, field_mask, nullptr, options);
+    const std::size_t applied = brush::apply_to_multires(
+        *sculptor->sculptor, brush::resolve_stroke(samples, resolved), verb, settings, field_mask,
+        base_half(record), options, layer_half(record));
+    if (record) record->gesture.bind(s);
     if (out_applied) *out_applied = applied;
-    if (out_report) {
-        const std::uint32_t declared = out_report->struct_size;
-        clay_multires_stamp_report probe;
-        r = read_desc(out_report, kMultiresStampReportOriginal, &probe);
-        if (r != CLAY_OK) return r;
-        clay_multires_stamp_report out{};
-        out.struct_size = static_cast<std::uint32_t>(sizeof(out));
-        out.level = level;
-        out.moved_vertices = applied;
-        out.base_revision = s.base_revision();
-        out.detail_revision = s.detail_revision();
-        out.evaluated_revision = s.evaluated_revision();
-        write_desc(out_report, declared, out);
+    return write_multires_report(s, level, applied, out_report);
+}
+
+}  // namespace
+
+clay_result clay_multires_sculptor_stamp(clay_multires_sculptor* sculptor,
+                                         const clay_mesh_brush_desc* brush, const clay_mask* mask,
+                                         clay_multires_stamp_report* out_report) {
+    return multires_stamp(sculptor, brush, mask, nullptr, out_report);
+}
+
+clay_result clay_multires_sculptor_stamp_recorded(clay_multires_sculptor* sculptor,
+                                                  const clay_mesh_brush_desc* brush,
+                                                  const clay_mask* mask,
+                                                  clay_multires_delta* record,
+                                                  clay_multires_stamp_report* out_report) {
+    clay_result r = probe_multires_report(out_report);
+    if (r != CLAY_OK) return r;
+    return multires_stamp(sculptor, brush, mask, record, out_report);
+}
+
+clay_result clay_multires_sculptor_apply_stroke(clay_multires_sculptor* sculptor,
+                                                const float* samples_xyzpt, size_t sample_count,
+                                                const clay_stroke_preset* preset,
+                                                const clay_mesh_brush_desc* brush,
+                                                const clay_mask* mask,
+                                                const clay_mesh_frame* mesh_to_world,
+                                                int32_t defer_normals, size_t* out_applied,
+                                                clay_multires_stamp_report* out_report) {
+    return multires_apply_stroke(sculptor, samples_xyzpt, sample_count, preset, brush, mask,
+                                 mesh_to_world, defer_normals, nullptr, out_applied, out_report);
+}
+
+clay_result clay_multires_sculptor_apply_stroke_recorded(
+    clay_multires_sculptor* sculptor, const float* samples_xyzpt, size_t sample_count,
+    const clay_stroke_preset* preset, const clay_mesh_brush_desc* brush, const clay_mask* mask,
+    const clay_mesh_frame* mesh_to_world, int32_t defer_normals, clay_multires_delta* record,
+    size_t* out_applied, clay_multires_stamp_report* out_report) {
+    if (out_applied) *out_applied = 0;
+    clay_result r = probe_multires_report(out_report);
+    if (r != CLAY_OK) return r;
+    return multires_apply_stroke(sculptor, samples_xyzpt, sample_count, preset, brush, mask,
+                                 mesh_to_world, defer_normals, record, out_applied, out_report);
+}
+
+// -- the record a host holds (undo-a-multires-gesture-across-the-abi) ---------
+
+clay_multires_delta* clay_multires_delta_create(void) { return new clay_multires_delta(); }
+
+void clay_multires_delta_destroy(clay_multires_delta* delta) { delete delta; }
+
+clay_result clay_multires_delta_clear(clay_multires_delta* delta) {
+    if (!delta) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null multires delta");
+    delta->gesture.clear();
+    return CLAY_OK;
+}
+
+clay_result clay_multires_delta_stats_get(const clay_multires_delta* delta,
+                                          clay_multires_delta_stats* out_stats) {
+    if (!delta) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null multires delta");
+    if (!out_stats) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_stats");
+    clay_multires_delta_stats probe;
+    clay_result r = read_desc(out_stats, kMultiresDeltaStatsOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    const mesh::MultiresGesture& g = delta->gesture;
+    clay_multires_delta_stats out{};
+    out.struct_size = static_cast<std::uint32_t>(sizeof(out));
+    out.detail_entries = g.base().detail_size();
+    out.cage_entries = g.base().base_size();
+    out.layer_detail_entries = g.layer().detail_size();
+    out.layer_mask_entries = g.layer().mask_size();
+    out.sculpt_layer = g.layer().empty() ? CLAY_NO_SCULPT_LAYER : g.layer().layer();
+    out.encoded_bytes = g.encoded_size();
+    out.resident_bytes = g.bytes();
+    write_desc(out_stats, out_stats->struct_size, out);
+    return CLAY_OK;
+}
+
+clay_result clay_multires_delta_levels(const clay_multires_delta* delta, uint32_t* out_levels,
+                                       size_t* count) {
+    if (!delta) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null multires delta");
+    if (!count) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null count");
+    const std::vector<std::uint32_t> levels = delta->gesture.levels();
+    if (out_levels && *count < levels.size()) {
+        *count = levels.size();
+        return fail(CLAY_ERROR_BUFFER_TOO_SMALL,
+                    "the record touched " + std::to_string(levels.size()) + " levels");
     }
+    if (out_levels) std::copy(levels.begin(), levels.end(), out_levels);
+    *count = levels.size();
+    return CLAY_OK;
+}
+
+namespace {
+
+clay_result replay_multires_delta(const clay_multires_delta* delta, clay_multires* surface,
+                                  bool forward) {
+    if (!delta) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null multires delta");
+    mesh::MultiresSurface* s = nullptr;
+    clay_result r = resolve_multires(surface, &s);
+    if (r != CLAY_OK) return r;
+    const bool done = forward ? delta->gesture.apply(*s) : delta->gesture.revert(*s);
+    if (!done)
+        return fail(CLAY_ERROR_SNAPSHOT_MISMATCH,
+                    "this record was captured on another hierarchy, an earlier level structure "
+                    "of this one, or a sculpt pass it no longer has. Nothing written");
+    return CLAY_OK;
+}
+
+}  // namespace
+
+clay_result clay_multires_delta_revert(const clay_multires_delta* delta, clay_multires* surface) {
+    return replay_multires_delta(delta, surface, false);
+}
+
+clay_result clay_multires_delta_apply(const clay_multires_delta* delta, clay_multires* surface) {
+    return replay_multires_delta(delta, surface, true);
+}
+
+clay_result clay_multires_delta_serialize(const clay_multires_delta* delta, uint8_t* out_data,
+                                          size_t* count) {
+    if (!delta) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null multires delta");
+    if (!count) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null count");
+    // The size is exact from the counts, so neither the size query nor a short
+    // buffer pays for an encoding.
+    const std::size_t need = delta->gesture.encoded_size();
+    if (!out_data || *count < need)
+        return write_sized(nullptr, need, out_data, count, "multires delta");
+    const std::vector<std::uint8_t> bytes = delta->gesture.encode();
+    return write_sized(bytes.data(), bytes.size(), out_data, count, "multires delta");
+}
+
+clay_result clay_multires_delta_deserialize(const uint8_t* data, size_t size,
+                                            clay_multires_delta** out_delta) {
+    if (!out_delta) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_delta");
+    *out_delta = nullptr;
+    if (!data || size == 0) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null or empty data");
+    mesh::MultiresGesture built;
+    switch (mesh::MultiresGesture::decode(data, size, &built)) {
+        case mesh::GestureDecode::Ok:
+            break;
+        case mesh::GestureDecode::ForwardVersion:
+            return fail(CLAY_ERROR_FORWARD_VERSION,
+                        "a multires delta written by a newer format version");
+        case mesh::GestureDecode::Malformed:
+            return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                        "not a multires delta: malformed, truncated or trailing bytes");
+    }
+    *out_delta = new clay_multires_delta{std::move(built)};
     return CLAY_OK;
 }
 
@@ -21340,20 +21527,41 @@ clay_result clay_multires_sculpt_layer_stroke_world_frame(
     return fill_session_frame(*stroke, out_frame, out_declared);
 }
 
-clay_result clay_multires_sculpt_layer_stroke_commit(clay_multires_sculpt_layer_stroke* stroke,
-                                                     size_t* out_entries) {
+namespace {
+
+// `record` null is the plain commit, whose record goes nowhere -- but a host
+// still wants to see that a hundred stamps coalesced into far fewer entries.
+clay_result commit_layer_stroke(clay_multires_sculpt_layer_stroke* stroke,
+                                clay_multires_delta* record, size_t* out_entries) {
     mesh::LayeredMultiresSculptor* self = nullptr;
     clay_result r = resolve_layer_stroke(stroke, &self);
     if (r != CLAY_OK) return r;
     if (!self->open()) return fail(CLAY_ERROR_INVALID_ARGUMENT, "no stroke is open");
-    // Read BEFORE the commit, which clears the transaction. The records go
-    // nowhere: this ABI does not carry an undo step yet, which the header says
-    // rather than leaving to be discovered — but a host still wants to see that
-    // a hundred stamps coalesced into far fewer entries.
+    // Read BEFORE the commit, which clears the transaction.
     const std::size_t entries = self->record_size();
-    if (!self->commit()) return fail(CLAY_ERROR_INVALID_ARGUMENT, "no stroke is open");
+    if (!self->commit(layer_half(record), base_half(record)))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "no stroke is open");
+    if (record) record->gesture.bind(self->surface());
     if (out_entries) *out_entries = entries;
     return CLAY_OK;
+}
+
+}  // namespace
+
+clay_result clay_multires_sculpt_layer_stroke_commit(clay_multires_sculpt_layer_stroke* stroke,
+                                                     size_t* out_entries) {
+    return commit_layer_stroke(stroke, nullptr, out_entries);
+}
+
+clay_result clay_multires_sculpt_layer_stroke_commit_into(
+    clay_multires_sculpt_layer_stroke* stroke, clay_multires_delta* record, size_t* out_entries) {
+    if (!record) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null multires delta");
+    // Refused BEFORE the commit, so the gesture stays open and the host still
+    // owns the choice of where it goes.
+    if (!record->gesture.empty())
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "the record already holds a gesture; clear it or commit into a new one");
+    return commit_layer_stroke(stroke, record, out_entries);
 }
 
 clay_result clay_multires_sculpt_layer_stroke_cancel(clay_multires_sculpt_layer_stroke* stroke) {

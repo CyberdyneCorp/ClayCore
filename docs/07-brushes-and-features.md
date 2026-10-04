@@ -2021,7 +2021,7 @@ both is the entire purpose. The relationship IS the feature.
 | Detail vs form | The same edit | The same edit | **Separate, by level** | n/a |
 | Quads | Preserved | None | Preserved at the cage, produced above it | None |
 | Best for | An imported retopologised model | Free-form blocking out | Refining a settled production cage | Rebuilding density after a long session |
-| Undo | `VertexDeltas` | `TopologyDelta` | `MultiresDelta` — coefficients and cage positions |`Step::Kind::MeshReplace` |
+| Undo | `VertexDeltas` | `TopologyDelta` | `MultiresDelta` — coefficients and cage positions; `clay_multires_delta` for a host |`Step::Kind::MeshReplace` |
 
 The lifecycle is explicit and one-way per stage: free-form construction on an
 adaptive surface, freeze the topology, retopologise, then a hierarchy over the
@@ -2389,6 +2389,67 @@ Runnable: [`examples/69_mesh_sculpt_layers.py`](../examples/69_mesh_sculpt_layer
 layer removed with the others byte-identical, what a slider costs measured
 against the level, and a stroke loop that raises leaving nothing behind.
 
+
+### Undo from a host (ABI 0.125.0)
+
+A `clay_multires` is a standalone handle that no document layer owns, so
+`clay_document_undo` never reached it, and until 0.125.0 neither record left the
+C++ side: a host's only undo for a committed multires gesture was a
+`clay_multires_serialize` snapshot of the whole hierarchy. `clay_multires_delta`
+is the same shape `clay_dynamic_delta` gave the adaptive surface — a record the
+host owns, reverts and re-applies — holding **both** records a gesture can
+write: the base half (`MultiresDelta`: cage positions at level 0, a level's own
+coefficients above it) and the layer half (`SculptLayerDelta`: one pass's
+coefficients and mask weights).
+
+Three calls capture into it. `clay_multires_sculptor_stamp_recorded` and
+`_apply_stroke_recorded` are the plain sculptor's calls with a record; the plain
+sculptor writes the **active pass** when there is one, so the record takes
+whichever half was written and a host does not have to know in advance which.
+`clay_multires_sculpt_layer_stroke_commit_into` closes a layered transaction and
+hands its record over instead of dropping it. `clay_multires_delta_revert` /
+`_apply` replay through the hierarchy itself, and every sculptor over it follows:
+the same stroke stamped again after an undo lands bit-identically where it
+landed the first time.
+
+**The binding is the part the C++ records do not have.** Their own `revert`
+refuses only a surface whose counts cannot hold the entries, so a twin built from
+the same cage — or the same hierarchy after its top level was removed and added
+back — accepted a record describing a different surface and wrote into it
+(8 assertions in `test_c_multires_delta.cpp` fail with the binding disabled). A
+`clay_multires_delta` remembers the hierarchy's `structure_revision` at capture,
+plus a per-process origin because that counter restarts in every process, and a
+replay onto anything else is `CLAY_ERROR_SNAPSHOT_MISMATCH` with nothing written.
+The price is stated rather than hidden: a hierarchy relevelled and relevelled
+back, or decoded from its own bytes, accepts no earlier record even where every
+vertex is numbered as before. A refused correct replay costs a step; an accepted
+wrong one corrupts the surface silently.
+
+**What moved is marked.** A base write marks its patches as it lands, but a pass
+is recomposed lazily, and a reverted pass left `clay_multires_dirty_blocks`
+empty. A replay holding a layer half therefore evaluates the display level
+before it returns — the work the host's next copy would have done.
+
+**What it costs.** The record follows the vertices a gesture reached, not the
+stamps it took: one stamp and forty on the same spot record the same entries and
+the same bytes. Measured on a 16x16 triangle cage after seven strokes, one
+nine-stamp Draw stroke of radius 0.3 at the top level:
+
+| levels | top-level vertices | entries | encoded bytes | resident bytes | whole-hierarchy snapshot |
+|---|---|---|---|---|---|
+| 2 | 6,273 | 1,109 | 35,544 | 79,172 | 95,816 |
+| 3 | 24,833 | 4,445 | 142,296 | 315,812 | 317,104 |
+| 4 | 98,817 | 17,759 | 568,344 | 1,262,012 | 1,202,160 |
+
+The encoding is the number a host budgets a spilled step by — exactly
+`40 + 16 + 32d + 28c (+ 24 + 32ld + 16lm)` from `clay_multires_delta_stats` —
+and it is under half the snapshot here. The **resident** record is not smaller
+than the snapshot on a fixture this small: it holds slot maps beside its
+entries, about 2.2x its encoding. What differs is the scaling. A snapshot is the
+whole hierarchy's detail and grows with everything sculpted so far; a record is
+one gesture. A host over budget spills records with
+`clay_multires_delta_serialize`, which is for spilling within the process, not
+for crash recovery.
 
 ## 8c. Voxel remesh — throwing the topology away on purpose
 

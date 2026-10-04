@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.24)
 
 project(claycore
-  VERSION 0.124.0
+  VERSION 0.125.0
   DESCRIPTION "Portable C++20 SDF + voxel engine library"
   LANGUAGES C CXX)  # C: ufbx
 
@@ -111,6 +111,7 @@ add_library(claycore
   src/mesh/multires_mixed.cpp
   src/mesh/multires_chunks.cpp
   src/mesh/multires_sculpt.cpp
+  src/mesh/multires_gesture.cpp
   src/mesh/project.cpp
   src/mesh/multires_serialize.cpp
   src/mesh/sculpt_layer.cpp

@@ -336,6 +336,12 @@ BOUNDED_FILLS = (
     # The adaptive stamp and both adaptive stroke calls, so a stamp's report and
     # a stroke's accumulated one are the same bounded fill.
     "write_dynamic_report",
+    # The multires stamp and stroke reports, recorded or not (ABI 0.125.0). The
+    # two shared bodies end in write_multires_report, and the recorded stroke
+    # names its body here because it also zeroes `*out_applied` first -- a
+    # size_t, which the whole-struct pattern above cannot tell from a report.
+    "write_multires_report",
+    "multires_apply_stroke(",
 )
 
 

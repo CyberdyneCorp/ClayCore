@@ -82,11 +82,16 @@ bool record_matches(const MultiresSurface& surface, std::uint32_t level, std::ui
 
 }  // namespace
 
-bool MultiresDelta::revert(MultiresSurface& surface) const {
+bool MultiresDelta::matches(const MultiresSurface& surface) const {
     for (const DetailEntry& e : detail_)
         if (!record_matches(surface, e.level, e.vertex)) return false;
     for (std::uint32_t v : base_vertices_)
         if (v >= surface.base_vertex_count()) return false;
+    return true;
+}
+
+bool MultiresDelta::revert(MultiresSurface& surface) const {
+    if (!matches(surface)) return false;
     for (std::size_t i = 0; i < base_vertices_.size(); ++i)
         surface.set_base_position(base_vertices_[i], base_before_[i]);
     for (const DetailEntry& e : detail_) surface.set_detail(e.level, e.vertex, e.before);
@@ -94,10 +99,7 @@ bool MultiresDelta::revert(MultiresSurface& surface) const {
 }
 
 bool MultiresDelta::apply(MultiresSurface& surface) const {
-    for (const DetailEntry& e : detail_)
-        if (!record_matches(surface, e.level, e.vertex)) return false;
-    for (std::uint32_t v : base_vertices_)
-        if (v >= surface.base_vertex_count()) return false;
+    if (!matches(surface)) return false;
     for (std::size_t i = 0; i < base_vertices_.size(); ++i)
         surface.set_base_position(base_vertices_[i], base_after_[i]);
     for (const DetailEntry& e : detail_) surface.set_detail(e.level, e.vertex, e.after);

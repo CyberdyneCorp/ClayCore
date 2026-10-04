@@ -765,15 +765,20 @@ void SculptLayerDelta::sync_after(const SculptLayerStack& stack) {
     }
 }
 
-bool SculptLayerDelta::write(SculptLayerStack& stack, bool forward) const {
+bool SculptLayerDelta::matches(const SculptLayerStack& stack) const {
     if (layer_ == kNoSculptLayer || !stack.find(layer_)) return false;
-    // EVERY entry is checked against the stack BEFORE one of them is written,
-    // so a record paired with the wrong surface changes nothing rather than
-    // half of something.
     for (const DetailEntry& e : detail_)
         if (e.vertex >= stack.level_vertex_count(e.level)) return false;
     for (const MaskEntry& e : mask_)
         if (e.vertex >= stack.level_vertex_count(e.level)) return false;
+    return true;
+}
+
+bool SculptLayerDelta::write(SculptLayerStack& stack, bool forward) const {
+    // EVERY entry is checked against the stack BEFORE one of them is written,
+    // so a record paired with the wrong surface changes nothing rather than
+    // half of something.
+    if (!matches(stack)) return false;
     for (const DetailEntry& e : detail_)
         stack.set_detail(layer_, e.level, e.vertex, forward ? e.after : e.before);
     for (const MaskEntry& e : mask_)
