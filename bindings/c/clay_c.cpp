@@ -3,7 +3,9 @@
 // builds with -fno-exceptions on GCC/Clang).
 
 #include <algorithm>
+#include <array>
 #include <atomic>
+#include <bit>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -17,6 +19,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include "clay.h"
@@ -22768,8 +22771,10 @@ struct StrokeSink {
     StrokeSinkKind kind;
     const void* target = nullptr;
     // The handle pointers and scalars a later call must repeat. Descriptors
-    // are NOT in it: they are read once, at the bind, and a byte comparison of
-    // one would trip on its padding (clay_mesh_brush_desc has two holes).
+    // are NOT in it: a byte comparison of one would trip on its padding
+    // (clay_mesh_brush_desc has two holes), so the sculptor sinks keep what
+    // they DECODED at the bind and compare a later call's decode field by
+    // field; see same_sculpt_arguments.
     std::vector<std::uint64_t> key;
     brush::StampCursor cursor;
     bool closed = false;
@@ -22817,19 +22822,25 @@ class GestureUndoGroup {
     clay_document* doc_;
 };
 
+constexpr const char* kStrokeRebindRefusal =
+    "this stroke session is bound to another target or other brush arguments: a gesture "
+    "has one target and one brush, fixed by its first consumer call. Nothing applied";
+
+// The world-space consumers take no descriptor; their key is the whole binding.
+constexpr auto kNoDescriptors = [](const auto&) { return true; };
+
 // Bind an unbound session to the calling consumer, or check that a later call
-// names what it is bound to. `make` builds the sink on the first call and may
-// refuse, in which case the session stays unbound.
-template <typename Sink, typename Make>
+// names what it is bound to: the key, then `same`, which compares this call's
+// decoded descriptors with the bound sink's. `make` builds the sink on the
+// first call and may refuse, in which case the session stays unbound.
+template <typename Sink, typename Make, typename Same>
 clay_result bind_stroke_sink(clay_stroke_tx* tx, StrokeSinkKind kind, const void* target,
-                             std::vector<std::uint64_t> key, Make make, Sink** out) {
+                             std::vector<std::uint64_t> key, Make make, Same same, Sink** out) {
     if (!tx) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null stroke session");
     if (tx->sink) {
-        if (tx->sink->kind != kind || tx->sink->target != target || tx->sink->key != key)
-            return fail(CLAY_ERROR_INVALID_ARGUMENT,
-                        "this stroke session is bound to another target or other brush "
-                        "arguments: a gesture has one target and one brush, fixed by its "
-                        "first consumer call. Nothing applied");
+        if (tx->sink->kind != kind || tx->sink->target != target || tx->sink->key != key ||
+            !same(static_cast<const Sink&>(*tx->sink)))
+            return fail(CLAY_ERROR_INVALID_ARGUMENT, kStrokeRebindRefusal);
         *out = static_cast<Sink*>(tx->sink.get());
         return CLAY_OK;
     }
@@ -22859,6 +22870,80 @@ struct GridStrokeSink : StrokeSink {
 
 // -- the three sculptor consumers ------------------------------------------------
 
+// What a sculptor consumer call decodes from its descriptors: the verb and
+// settings in the mesh's space, the stroke options with the frame, and, for
+// the adaptive consumer only, the topology. Decoded by every call — the first
+// binds with it, a later one is compared against it.
+struct SculptBind {
+    mesh::MeshBrush verb = mesh::MeshBrush::Draw;
+    mesh::MeshBrushSettings settings;
+    brush::MeshStrokeOptions options;
+    voxel::MaskField* mask = nullptr;
+    mesh::DynamicTopologySettings topology;
+};
+
+// A float by its bits, so a comparison is of what the caller sent: a NaN the
+// caller repeats is the same NaN, and -0 is not +0.
+std::uint32_t bits(float v) { return std::bit_cast<std::uint32_t>(v); }
+std::array<std::uint32_t, 3> bits(kernel::cfloat3 v) { return {bits(v.x), bits(v.y), bits(v.z)}; }
+
+// FIELD BY FIELD, through structured bindings that name EVERY member: a field
+// appended to one of these structs stops this file compiling until it is
+// compared too, rather than becoming an argument a later call may change
+// unnoticed.
+auto fields_of(const mesh::AutomaskSettings& s) {
+    const auto& [factors, normal_angle, boundary_rings, cavity_strength] = s;
+    return std::tuple(factors, bits(normal_angle), boundary_rings, bits(cavity_strength));
+}
+
+auto fields_of(const mesh::MeshBrushSettings& s) {
+    const auto& [center, radius, strength, falloff, direction, deposit_normal, geodesic,
+                 seed_class, seed_revision, flatten_mode, use_given_plane, plane_point,
+                 plane_normal, polish_angle, smooth_iterations, layer_height, alpha, alpha_width,
+                 alpha_height, alpha_direction, alpha_tangent, alpha_extent, stamp_azimuth, color,
+                 automask] = s;
+    return std::tuple(bits(center), bits(radius), bits(strength), falloff, bits(direction),
+                      bits(deposit_normal), geodesic, seed_class, seed_revision, flatten_mode,
+                      use_given_plane, bits(plane_point), bits(plane_normal), bits(polish_angle),
+                      smooth_iterations, bits(layer_height), alpha, alpha_width, alpha_height,
+                      bits(alpha_direction), bits(alpha_tangent), bits(alpha_extent),
+                      bits(stamp_azimuth), bits(color), fields_of(automask));
+}
+
+auto fields_of(const mesh::TopologyOpOptions& s) {
+    const auto& [max_normal_swing, min_area_x2, collapse_blockers, flip_blockers] = s;
+    return std::tuple(bits(max_normal_swing), bits(min_area_x2), collapse_blockers, flip_blockers);
+}
+
+auto fields_of(const mesh::DynamicTopologySettings& s) {
+    const auto& [enabled, detail_mode, target_edge_length, detail_resolution, split_factor,
+                 collapse_factor, max_passes, max_ops_per_stamp, allow_split, allow_collapse,
+                 allow_flip, relax_after_remesh, relax_strength, preserve_boundaries,
+                 preserve_uv_seams, preserve_sharp_edges, op] = s;
+    return std::tuple(enabled, detail_mode, bits(target_edge_length), bits(detail_resolution),
+                      bits(split_factor), bits(collapse_factor), max_passes, max_ops_per_stamp,
+                      allow_split, allow_collapse, allow_flip, relax_after_remesh,
+                      bits(relax_strength), preserve_boundaries, preserve_uv_seams,
+                      preserve_sharp_edges, fields_of(op));
+}
+
+auto fields_of(const math::Transform& t) {
+    const auto& [position, rotation, scale] = t;
+    const auto& [x, y, z, w] = rotation;
+    return std::tuple(bits(position), bits(x), bits(y), bits(z), bits(w), bits(scale));
+}
+
+// Whether a later consumer call's descriptors decode to what the session was
+// bound with: the brush (every field, those a stroke overrides per stamp such
+// as `center` and `radius` included), the frame and the topology. The mask,
+// the deferral and the alpha flag are scalars and pointers, so the key holds
+// them.
+bool same_sculpt_arguments(const SculptBind& bound, const SculptBind& call) {
+    return bound.verb == call.verb && fields_of(bound.settings) == fields_of(call.settings) &&
+           fields_of(bound.options.mesh_to_world) == fields_of(call.options.mesh_to_world) &&
+           fields_of(bound.topology) == fields_of(call.topology);
+}
+
 // The session's stamps in a sculptor's own space. A sculptor handle that
 // declares a frame takes its stroke in WORLD and carries it into the mesh's
 // space before resolving — sample by sample, and the preset's lengths — so a
@@ -22866,8 +22951,9 @@ struct GridStrokeSink : StrokeSink {
 // samples converted the same way. That is what makes its stamps the floats the
 // whole-path call resolves, rather than world stamps converted afterwards.
 struct FramedStrokeSink : StrokeSink {
-    FramedStrokeSink(StrokeSinkKind k, const SessionFrame& f, brush::StrokePreset preset)
-        : StrokeSink(k), frame(f) {
+    FramedStrokeSink(StrokeSinkKind k, const SessionFrame& f, brush::StrokePreset preset,
+                     const SculptBind& b)
+        : StrokeSink(k), frame(f), bound(b) {
         if (!frame.has_frame) return;
         std::vector<brush::StrokeSample> none;
         stroke_to_local(frame, &none, &preset);
@@ -22890,40 +22976,41 @@ struct FramedStrokeSink : StrokeSink {
     }
 
     SessionFrame frame;
+    SculptBind bound;  // what the bind decoded, for a later call to match
     std::optional<brush::StrokeTransaction> local;
     std::size_t fed = 0;
 };
 
 struct MeshStrokeSink : FramedStrokeSink {
     MeshStrokeSink(const SessionFrame& f, const brush::StrokePreset& preset,
-                   mesh::MeshSculptor& sculptor, mesh::MeshBrush verb,
-                   const mesh::MeshBrushSettings& settings, const voxel::MaskField* mask,
-                   const brush::MeshStrokeOptions& options)
-        : FramedStrokeSink(StrokeSinkKind::Mesh, f, preset),
-          gesture(sculptor, verb, settings, mask, options) {}
+                   mesh::MeshSculptor& sculptor, const SculptBind& b)
+        : FramedStrokeSink(StrokeSinkKind::Mesh, f, preset, b),
+          gesture(sculptor, b.verb, b.settings, b.mask, b.options) {}
     brush::MeshStrokeGesture gesture;
 };
 
 struct DynamicStrokeSink : FramedStrokeSink {
     DynamicStrokeSink(const SessionFrame& f, const brush::StrokePreset& preset,
-                      mesh::DynamicSculptor& sculptor, mesh::MeshBrush verb,
-                      const mesh::MeshBrushSettings& settings,
-                      const mesh::DynamicTopologySettings& topology,
-                      const voxel::MaskField* mask, const brush::MeshStrokeOptions& options)
-        : FramedStrokeSink(StrokeSinkKind::Dynamic, f, preset),
-          gesture(sculptor, verb, settings, topology, mask, options) {}
+                      mesh::DynamicSculptor& sculptor, const SculptBind& b)
+        : FramedStrokeSink(StrokeSinkKind::Dynamic, f, preset, b),
+          gesture(sculptor, b.verb, b.settings, b.topology, b.mask, b.options) {}
     brush::DynamicStrokeGesture gesture;
 };
 
 struct MultiresStrokeSink : FramedStrokeSink {
     MultiresStrokeSink(const SessionFrame& f, const brush::StrokePreset& preset,
-                       mesh::MultiresSculptor& sculptor, mesh::MeshBrush verb,
-                       const mesh::MeshBrushSettings& settings, const voxel::MaskField* mask,
-                       const brush::MeshStrokeOptions& options)
-        : FramedStrokeSink(StrokeSinkKind::Multires, f, preset),
-          gesture(sculptor, verb, settings, mask, options) {}
+                       mesh::MultiresSculptor& sculptor, const SculptBind& b)
+        : FramedStrokeSink(StrokeSinkKind::Multires, f, preset, b),
+          gesture(sculptor, b.verb, b.settings, b.mask, b.options) {}
     brush::MultiresStrokeGesture gesture;
 };
+
+// A later sculptor consumer call matches the bind in its descriptors too.
+auto same_descriptors(const SculptBind& call) {
+    return [&call](const FramedStrokeSink& sink) {
+        return same_sculpt_arguments(sink.bound, call);
+    };
+}
 
 // The settled stamps a call applies, and whether this call closes the gesture.
 struct StrokeBatch {
@@ -22947,15 +23034,6 @@ clay_result optional_mask(const clay_mask* mask, voxel::MaskField** out) {
     return mask ? resolve_mask(mask, out) : CLAY_OK;
 }
 
-// What the three sculptor consumers read from a mesh brush call at the bind:
-// the verb and settings in the mesh's space, and the stroke options.
-struct SculptBind {
-    mesh::MeshBrush verb = mesh::MeshBrush::Draw;
-    mesh::MeshBrushSettings settings;
-    brush::MeshStrokeOptions options;
-    voxel::MaskField* mask = nullptr;
-};
-
 // The options a fixed or multires sculptor's stroke takes: the deferral, and
 // where the mesh sits — the handle's declared frame, or this call's.
 clay_result read_sculpt_bind(const SessionFrame& frame, const clay_mesh_brush_desc* desc,
@@ -22975,28 +23053,24 @@ clay_result read_sculpt_bind(const SessionFrame& frame, const clay_mesh_brush_de
     return optional_mask(mask, &out->mask);
 }
 
-// The adaptive sink, built at the bind: the brush in the surface's space, the
+// What the adaptive consumer reads: the brush in the surface's space, the
 // topology, the mask and the frame, read exactly as the whole-path call reads
 // them, and the refusal of a verb an adaptive surface does not offer.
-clay_result make_dynamic_sink(clay_dynamic_sculptor& sculptor, const brush::StrokePreset& preset,
+clay_result read_dynamic_bind(const clay_dynamic_sculptor& sculptor,
                               const clay_mesh_brush_desc* brush,
                               const clay_dynamic_topology_desc* topology, const clay_mask* mask,
-                              int32_t orient_alpha_by_stamp,
-                              std::unique_ptr<DynamicStrokeSink>* made) {
-    SculptBind b;
-    clay_result r = read_mesh_brush(brush, &b.verb, &b.settings);
+                              int32_t orient_alpha_by_stamp, SculptBind* out) {
+    clay_result r = read_mesh_brush(brush, &out->verb, &out->settings);
     if (r != CLAY_OK) return r;
-    if (!mesh::dynamic_offers(b.verb)) return fail(CLAY_ERROR_INVALID_ARGUMENT, kDynamicLayerRefusal);
-    mesh::DynamicTopologySettings topo;
-    r = read_dynamic_topology(topology, &topo);
+    if (!mesh::dynamic_offers(out->verb))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, kDynamicLayerRefusal);
+    r = read_dynamic_topology(topology, &out->topology);
     if (r != CLAY_OK) return r;
-    r = optional_mask(mask, &b.mask);
+    r = optional_mask(mask, &out->mask);
     if (r != CLAY_OK) return r;
-    b.options.orient_alpha_by_stamp = orient_alpha_by_stamp != 0;
-    if (sculptor.has_frame) b.options.mesh_to_world = sculptor.frame;
-    brush_settings_to_local(sculptor, &b.settings);
-    *made = std::make_unique<DynamicStrokeSink>(sculptor, preset, *sculptor.sculptor, b.verb,
-                                                b.settings, topo, b.mask, b.options);
+    out->options.orient_alpha_by_stamp = orient_alpha_by_stamp != 0;
+    if (sculptor.has_frame) out->options.mesh_to_world = sculptor.frame;
+    brush_settings_to_local(sculptor, &out->settings);
     return CLAY_OK;
 }
 
@@ -23098,7 +23172,7 @@ clay_result clay_layer_apply_stroke_tx(clay_document* doc, clay_layer_id layer_i
             *made = std::make_unique<LayerStrokeSink>(doc, item->node);
             return CLAY_OK;
         },
-        &sink);
+        kNoDescriptors, &sink);
     if (r != CLAY_OK) return r;
 
     StrokeBatch batch = next_batch(*sink, tx->tx);
@@ -23141,7 +23215,7 @@ clay_result clay_voxel_apply_stroke_tx(clay_voxel_grid* grid, clay_stroke_tx* tx
             *made = std::make_unique<GridStrokeSink>(StrokeSinkKind::Voxel, grid->doc);
             return CLAY_OK;
         },
-        &sink);
+        kNoDescriptors, &sink);
     if (r != CLAY_OK) return r;
 
     StrokeBatch batch = next_batch(*sink, tx->tx);
@@ -23178,7 +23252,7 @@ clay_result clay_mask_apply_stroke_tx(clay_mask* mask, clay_stroke_tx* tx, float
             *made = std::make_unique<GridStrokeSink>(StrokeSinkKind::Mask, mask->doc);
             return CLAY_OK;
         },
-        &sink);
+        kNoDescriptors, &sink);
     if (r != CLAY_OK) return r;
 
     StrokeBatch batch = next_batch(*sink, tx->tx);
@@ -23205,21 +23279,19 @@ clay_result clay_mesh_sculptor_apply_stroke_tx(clay_mesh_sculptor* sculptor, cla
     if (out_applied) *out_applied = 0;
     clay_result r = resolve_sculptor(sculptor, /*for_edit=*/true);
     if (r != CLAY_OK) return r;
+    SculptBind b;
+    r = read_sculpt_bind(*sculptor, desc, mask, mesh_to_world, defer_normals, &b);
+    if (r != CLAY_OK) return r;
 
     MeshStrokeSink* sink = nullptr;
     r = bind_stroke_sink<MeshStrokeSink>(
         tx, StrokeSinkKind::Mesh, sculptor, {bind_key(mask), bind_key(defer_normals)},
         [&](std::unique_ptr<MeshStrokeSink>* made) {
-            SculptBind b;
-            const clay_result read =
-                read_sculpt_bind(*sculptor, desc, mask, mesh_to_world, defer_normals, &b);
-            if (read != CLAY_OK) return read;
             *made = std::make_unique<MeshStrokeSink>(*sculptor, tx->tx.preset(),
-                                                     *sculptor->sculptor, b.verb, b.settings,
-                                                     b.mask, b.options);
+                                                     *sculptor->sculptor, b);
             return CLAY_OK;
         },
-        &sink);
+        same_descriptors(b), &sink);
     if (r != CLAY_OK) return r;
 
     mesh::VertexDeltas* record = deltas ? &deltas->deltas : nullptr;
@@ -23246,16 +23318,20 @@ clay_result clay_dynamic_sculptor_apply_stroke_tx(clay_dynamic_sculptor* sculpto
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "null dynamic sculptor");
     clay_result r = check_dynamic_report(out_report);
     if (r != CLAY_OK) return r;
+    SculptBind b;
+    r = read_dynamic_bind(*sculptor, brush, topology, mask, orient_alpha_by_stamp, &b);
+    if (r != CLAY_OK) return r;
 
     DynamicStrokeSink* sink = nullptr;
     r = bind_stroke_sink<DynamicStrokeSink>(
         tx, StrokeSinkKind::Dynamic, sculptor,
         {bind_key(mask), bind_key(orient_alpha_by_stamp), bind_key(record)},
         [&](std::unique_ptr<DynamicStrokeSink>* made) {
-            return make_dynamic_sink(*sculptor, tx->tx.preset(), brush, topology, mask,
-                                     orient_alpha_by_stamp, made);
+            *made = std::make_unique<DynamicStrokeSink>(*sculptor, tx->tx.preset(),
+                                                        *sculptor->sculptor, b);
+            return CLAY_OK;
         },
-        &sink);
+        same_descriptors(b), &sink);
     if (r != CLAY_OK) return r;
     // THE MARK BEFORE THE STAMPS ARE TAKEN, so a refused call loses none of
     // them: the next call, once the host has sorted out its history, applies
@@ -23292,21 +23368,19 @@ clay_result clay_multires_sculptor_apply_stroke_tx(clay_multires_sculptor* sculp
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "null multires sculptor");
     mesh::MultiresSurface* sp = sculptor->owner ? sculptor->owner->target() : nullptr;
     if (!sp) return fail(CLAY_ERROR_NOT_FOUND, "hierarchy is no longer in its document");
+    SculptBind b;
+    clay_result r = read_sculpt_bind(*sculptor, brush, mask, mesh_to_world, defer_normals, &b);
+    if (r != CLAY_OK) return r;
 
     MultiresStrokeSink* sink = nullptr;
-    clay_result r = bind_stroke_sink<MultiresStrokeSink>(
+    r = bind_stroke_sink<MultiresStrokeSink>(
         tx, StrokeSinkKind::Multires, sculptor, {bind_key(mask), bind_key(defer_normals)},
         [&](std::unique_ptr<MultiresStrokeSink>* made) {
-            SculptBind b;
-            const clay_result read =
-                read_sculpt_bind(*sculptor, brush, mask, mesh_to_world, defer_normals, &b);
-            if (read != CLAY_OK) return read;
             *made = std::make_unique<MultiresStrokeSink>(*sculptor, tx->tx.preset(),
-                                                         *sculptor->sculptor, b.verb, b.settings,
-                                                         b.mask, b.options);
+                                                         *sculptor->sculptor, b);
             return CLAY_OK;
         },
-        &sink);
+        same_descriptors(b), &sink);
     if (r != CLAY_OK) return r;
 
     const std::uint32_t level = sp->sculpt_level();

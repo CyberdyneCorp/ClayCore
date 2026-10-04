@@ -7117,15 +7117,27 @@ clay_result clay_stroke_tx_status_get(const clay_stroke_tx* tx, clay_stroke_tx_s
  * target and its brush arguments for the gesture: a stroke has ONE target and
  * ONE brush, fixed at pointer-down, and a grab carrying its region or a
  * snakehook walking its anchor could not survive a change of either. Every
- * later call must name the same target with the same arguments — the same
- * descriptor contents, the same mask, item and record pointers, the same
- * scalars — and a call that differs is refused with
- * CLAY_ERROR_INVALID_ARGUMENT and applies nothing. The out parameters (ids,
- * reports, a mesh delta record) are per call and may differ.
+ * later call must name the same target with the same arguments, and a call
+ * that differs is refused with CLAY_ERROR_INVALID_ARGUMENT and applies
+ * nothing. What is compared:
+ *   - the target, and the mask, item and record pointers, by pointer;
+ *   - the scalars (index, shape, falloff, target, defer_normals,
+ *     orient_alpha_by_stamp), by value;
+ *   - the sculptor consumers' descriptors — the clay_mesh_brush_desc, the
+ *     clay_dynamic_topology_desc and the clay_mesh_frame — by what they
+ *     DECODE to, field by field: every call decodes them, so a NULL or
+ *     malformed one is refused as it would be at the bind, and one that
+ *     decodes differently is refused as another brush. That includes the
+ *     fields a stroke replaces per stamp (center, radius) and the alpha
+ *     pointer; it does not include padding or a declared struct_size, so a
+ *     descriptor rebuilt with the same values matches.
+ * The out parameters (ids, reports, a mesh delta record) are per call and may
+ * differ. A clay_item's CONTENTS are copied at the bind and not compared: the
+ * host may reuse the item, but must pass the same pointer.
  *
  * Borrowed pointers the first call reads — a descriptor's alpha, the mask, a
- * clay_item — must stay valid until the gesture closes. A descriptor is read
- * ONCE, at the bind; later calls only compare it.
+ * clay_item — must stay valid until the gesture closes. The gesture uses what
+ * the bind decoded; later calls' descriptors are only compared with it.
  *
  * CLOSED BY THE CALL AFTER clay_stroke_tx_end. That call applies the held-back
  * stamps, then closes the gesture: it flushes deferred normals into that

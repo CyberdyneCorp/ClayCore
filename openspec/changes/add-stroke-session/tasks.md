@@ -8,7 +8,7 @@
 
 ## C ABI
 - [x] `clay_stroke_tx` and `clay_stroke_tx_status` in `bindings/c/clay.h`, with the settle rule, the binding rule, what a session holds open and what it does not do, all stated beside the calls.
-- [x] The six `*_apply_stroke_tx` consumers. `add_stroke_nodes` and `write_multires_report` are shared with the whole-path calls; `write_multires_report` is already registered as a bounded fill in `tools/check_c_abi.py`.
+- [x] The six `*_apply_stroke_tx` consumers. A later sculptor call's descriptors are decoded and compared field by field with the bind's (`same_sculpt_arguments`). `add_stroke_nodes` and `write_multires_report` are shared with the whole-path calls; `write_multires_report` is already registered as a bounded fill in `tools/check_c_abi.py`.
 - [x] C ABI 0.125.0 -> 0.126.0 in `CMakeLists.txt`, `bindings/c/clay.h` and `pyproject.toml`.
 
 ## Bindings

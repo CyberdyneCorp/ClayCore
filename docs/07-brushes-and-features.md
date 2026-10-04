@@ -1183,10 +1183,12 @@ The consumer calls — `clay_layer_apply_stroke_tx`, `clay_voxel_apply_stroke_tx
 `clay_dynamic_sculptor_apply_stroke_tx`, `clay_multires_sculptor_apply_stroke_tx`
 — each apply what has settled since the last call. The first one **binds** the
 session to its target and brush; a later call naming another target, handle or
-scalar is refused. The call after `_end` applies the held-back tail and closes
-the gesture. Between calls the gesture is open on its target: a grab's carried
-region, the deferred normals, and — for SDF, voxel and mask targets — the
-owning document's undo group, which is what makes a gesture one undo step.
+scalar, or whose descriptors decode differently (compared field by field, so a
+rebuilt descriptor with the same values matches), is refused. The call after
+`_end` applies the held-back tail and closes the gesture. Between calls the
+gesture is open on its target: a grab's carried region, the deferred normals,
+and — for SDF, voxel and mask targets — the owning document's undo group,
+which is what makes a gesture one undo step.
 The mesh consumers are the same code as their whole-path calls
 (`MeshStrokeGesture`, `MultiresStrokeGesture`, `DynamicStrokeGesture`): a stroke
 per call would re-gather a grab's region at every batch and land elsewhere.
