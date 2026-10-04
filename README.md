@@ -387,8 +387,8 @@ staircase at the cell size, and only the region you pass is rasterized.
 
 **Voxel → SDF** — `Volume.from_voxels(grid)` in Python,
 `clay_item_volume_from_voxels` in C, or `clay_voxel_to_layer` to convert a
-whole coloured sculpt into a new layer in one call (one volume item per palette
-entry, so colour survives). Direct — no mesh detour: occupancy is read by
+whole coloured sculpt into a new layer in one call and one undo step (one
+volume item that carries the palette per sample, so colour survives). Direct — no mesh detour: occupancy is read by
 trilinear interpolation between cell centres and **redistanced**, so the result
 carries a Lipschitz bound a raymarcher and a blend can trust. Non-destructive:
 the grid is untouched, and the result is an ordinary volume item in an

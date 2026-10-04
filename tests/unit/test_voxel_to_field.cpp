@@ -280,3 +280,48 @@ TEST_CASE("converting an empty grid refuses rather than making an empty layer") 
           CLAY_ERROR_INVALID_ARGUMENT);
     clay_document_destroy(doc);
 }
+
+// #656: the conversion is ONE user action, so it is ONE undo step. It used to
+// record two — the layer, then its volume — and a single undo left an empty
+// layer standing, with the redo after it reporting that nothing had changed.
+TEST_CASE("a conversion into a layer is one undo step, and undoes completely") {
+    clay_document* doc = clay_document_create();
+    REQUIRE(doc != nullptr);
+    REQUIRE(clay_document_enable_undo(doc) == CLAY_OK);
+    clay_voxel_grid* grid = clay_voxel_grid_create(0.05f);
+    REQUIRE(grid != nullptr);
+    int32_t c = 0;
+    float rgb[3] = {0.8f, 0.5f, 0.3f};
+    REQUIRE(clay_voxel_palette_add(grid, rgb, &c) == CLAY_OK);
+    int32_t lo[3] = {-4, -4, -4}, hi[3] = {4, 4, 4};
+    REQUIRE(clay_voxel_fill_box(grid, lo, hi, c) == CLAY_OK);
+
+    size_t depth_before = 0;
+    REQUIRE(clay_document_undo_state(doc, nullptr, &depth_before, nullptr) == CLAY_OK);
+    clay_layer_id converted = 0;
+    REQUIRE(clay_voxel_to_layer(doc, grid, "converted", 0, &converted) == CLAY_OK);
+    size_t depth_after = 0;
+    REQUIRE(clay_document_undo_state(doc, nullptr, &depth_after, nullptr) == CLAY_OK);
+    CHECK(depth_after == depth_before + 1);
+
+    // One undo takes the whole conversion back: no empty layer left behind.
+    int32_t undone = 0;
+    REQUIRE(clay_document_undo(doc, &undone) == CLAY_OK);
+    CHECK(undone == 1);
+    size_t layers = 99;
+    REQUIRE(clay_document_layer_count(doc, &layers) == CLAY_OK);
+    CHECK(layers == 0);
+
+    // And one redo brings the layer back WITH its single volume item.
+    int32_t redone = 0;
+    REQUIRE(clay_document_redo(doc, &redone) == CLAY_OK);
+    CHECK(redone == 1);
+    REQUIRE(clay_document_layer_count(doc, &layers) == CLAY_OK);
+    CHECK(layers == 1);
+    size_t nodes = 0;
+    REQUIRE(clay_layer_node_count(doc, converted, &nodes) == CLAY_OK);
+    CHECK(nodes == 1);
+
+    clay_voxel_grid_destroy(grid);
+    clay_document_destroy(doc);
+}

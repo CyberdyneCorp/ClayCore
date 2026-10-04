@@ -11508,15 +11508,23 @@ clay_result clay_voxel_mesh_quads(const clay_voxel_grid* grid, const clay_quad_p
  * read by trilinear interpolation between cell CENTRES, and the result is
  * redistanced so it carries a Lipschitz bound a marcher and a blend can trust.
  *
- * COLOUR SURVIVES by conversion per palette entry. A field has nowhere to put
- * a palette, so this places one volume item per entry the grid carries, each
- * with that entry's colour, unioned without a blend. The union of the parts is
- * the solid; the interface between two colours is interior to it.
+ * COLOUR SURVIVES in the volume itself. The layer holds ONE volume item, and
+ * that volume carries the palette per sample, so a forty-entry sculpt is one
+ * item and one volume, not forty. (It was one item per palette entry until the
+ * field grew a colour channel; a host that counted a node per entry counts
+ * one.) The item's own colour is left at its default: it is what a sample
+ * outside the stored bricks reports, which is empty space.
+ *
+ * ONE UNDO STEP. The layer arrives already holding its volume, as a single
+ * edit, so one clay_document_undo takes the whole conversion back and one
+ * redo restores the layer with its item. Through 0.121.0 the layer and the
+ * item were two steps, and one undo left an empty layer standing (#656).
  *
  * NON-DESTRUCTIVE. A new layer, and the grid is untouched — so a host offers
  * "go back" by keeping the original, and one misclick cannot cost a
- * parametric model. Nothing about the document format changes: these are
- * ordinary volume items in an ordinary SDF layer.
+ * parametric model. Nothing about the document format changes: this is an
+ * ordinary volume item in an ordinary SDF layer. A conversion that fails
+ * leaves the document exactly as it was — no layer, no history step.
  *
  * LOSSY, in both directions, and the spec says so rather than implying
  * otherwise. Going to voxels quantised to the lattice and nothing here
@@ -11532,9 +11540,10 @@ clay_result clay_voxel_mesh_quads(const clay_voxel_grid* grid, const clay_quad_p
  * CLAY_ERROR_INVALID_ARGUMENT when the grid holds nothing convertible. */
 /* One palette entry of a sculpt as a placeable ITEM, the counterpart to
  * clay_item_volume_from_mesh. `index` 0 converts every occupied cell into one
- * item; a non-zero index converts only that entry's cells and gives the item
- * that entry's colour, which is how a caller assembles a coloured sculpt by
- * hand. clay_voxel_to_layer is this in a loop, into a new layer.
+ * item whose volume carries each cell's colour; a non-zero index converts
+ * only that entry's cells and gives the item that entry's colour, which is
+ * how a caller assembles a sculpt one entry at a time by hand. clay_voxel_to_layer does NOT need that: it converts at index 0, whose
+ * volume already carries every entry's colour per sample.
  *
  * Free with clay_item_destroy; placing it copies it, as every item does. */
 clay_result clay_item_volume_from_voxels(const clay_voxel_grid* grid, int32_t blur, int32_t index,
