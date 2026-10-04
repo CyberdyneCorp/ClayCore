@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 121
+#define CLAY_ABI_MINOR 122
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -5212,9 +5212,65 @@ typedef struct clay_topological_move_params {
  * It re-samples that volume with the move applied, and declares the Lipschitz
  * the result measured. clay_layer_move_surface is the cheaper Euclidean move and
  * does not bake — prefer it unless the form has parts close in space and far
- * along the surface. */
+ * along the surface.
+ *
+ * A DRAG LONGER THAN THE REACH IS SUB-STEPPED INTERNALLY (0.122.0). One pull
+ * p - d*w(g(p)) folds once |d| times the curve's steepest slope passes the
+ * radius: two output points read one source point, the surface under the grip
+ * sinks and the pulled material falls away before the drag's end. Measured on
+ * a unit sphere, a 0.64 drag at radius 0.3 left the anchor at 0.940 against
+ * 1.000 before this. The drag now runs as the fewest slices that keep each
+ * under HALF that limit — each anchored where the last left the grip, each
+ * with its own geodesic — and the volume is still re-sampled once. That is
+ * what a host splitting the drag into that many calls would get, so a host
+ * that did so can stop: one call is cheaper (361 ms against 690 ms for nine
+ * calls on that probe). A drag under half the radius on a linear curve is one
+ * slice and unchanged. The slope that sizes the slices is the curve's steepest
+ * change over ONE CELL of the reach, not its analytic peak: a circ curve peaks
+ * at 71.7 in a band far narrower than a cell, and sized off that a drag of half
+ * the radius took 64 slices and 13 s where one took 95 ms; over a cell at
+ * 0.01 / radius 0.3 it is about 7.7, and the same drag is 8 slices, 0.43 s.
+ * The cost grows about quadratically with the slice count, so a steep curve
+ * (circ, elastic, expo) dragged far is the expensive case. NOT promised past
+ * 64 slices — a drag over thirty radii on a linear curve — where the slices
+ * are longer than that and can fold.
+ *
+ * Re-sampling a VOLUME reads a bound rather than a distance outside its band,
+ * so the band must cover the drag; where a document exists, use
+ * clay_item_volume_move_topological_from below, which has no band to size.
+ * A non-finite anchor or displacement is refused. */
 clay_result clay_item_volume_move_topological(clay_item* item,
                                               const clay_topological_move_params* params);
+
+/* The same move, sampled from a DOCUMENT rather than from an existing volume —
+ * the counterpart clay_item_volume_flatten_from is to the flatten.
+ *
+ * The call above re-samples a baked volume, which reports a distance only
+ * inside its band; a host had to bake with a band widened to cover the drag
+ * (0.67 for the probe above) or the material pulled from outside it arrived
+ * as a bound. A document has no band, so this call needs no such sizing, and
+ * the pulled-back query points — which are not the sample lattice — are
+ * answered a window at a time by the pooled evaluator. Sub-stepped exactly as
+ * the call above is.
+ *
+ * `move` is validated exactly as the in-place form validates it. `volume`
+ * gives the sampling of the RESULT — cell_size required and > 0; band, padding
+ * and feather as clay_item_volume_from_document takes them. The geodesic is
+ * solved at that cell size too. `region_min`/`region_max` are the same
+ * optional pair: both NULL means the document's bounds padded by the band AND
+ * grown by |displacement|, so a pull outward is not clipped at the region's
+ * face; a region the caller passes is used as given; one without the other is
+ * refused.
+ *
+ * Returns a NEW item carrying the moved volume; the document is not modified.
+ * Free it with clay_item_destroy, or place it with clay_layer_add_item. A
+ * region holding no surface is refused rather than returning an empty item. */
+clay_result clay_item_volume_move_topological_from(const clay_document* doc,
+                                                   const clay_topological_move_params* move,
+                                                   const clay_volume_params* volume,
+                                                   const float region_min[3],
+                                                   const float region_max[3],
+                                                   clay_item** out_item);
 
 /* -- voxel grids ----------------------------------------------------------- */
 

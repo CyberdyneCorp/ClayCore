@@ -55,6 +55,20 @@ struct TopologicalMoveSettings {
 // A zero displacement, a radius that is not positive, or an anchor with no
 // material within reach all yield a plain sampling of the source: a drag that
 // touches nothing is not an error.
+//
+// A DRAG LONGER THAN THE REACH IS SUB-STEPPED (#657). One step pulls each
+// output point back by p - d * w(g(p)), and that map stops being one-to-one
+// once |d| * slope / radius passes one: two output points read one source
+// point, and the surface under the grip sinks while the pulled material falls
+// away before the drag's end. Measured on a unit sphere, a 0.64 drag at radius
+// 0.3 left the anchor at 0.940 against 1.000. So the drag runs as
+// topological_move_steps() slices of d/n, each anchored where the one before
+// left the grip and each solving its own geodesic over the material the
+// earlier ones left -- what a host calling n times would get, to within 0.003
+// on that probe -- while the source is still read ONCE per output sample, at
+// the composed pull-back. A drag under half the radius on a linear curve is
+// one step and identical to what this did before. The cost grows about
+// quadratically with the slice count; see topological_move_steps.
 // A source that answers a batch of arbitrary points at once: `count` packed
 // xyz triples in, `count` distances out.
 using PointBatch = std::function<void(const float* points_xyz, std::size_t count, float* out)>;
@@ -96,6 +110,23 @@ FieldVolume move_topological(const PointBatch& source, const math::Aabb& region,
 // functions above cannot: they are handed a region rather than a volume, and
 // leave the feather at its default.
 FieldVolume move_topological(const FieldVolume& v, const TopologicalMoveSettings& settings);
+
+// How many slices move_topological splits this drag into at `cell_size`: the
+// fewest that keep each slice's |d/n| * slope / radius at or under one half,
+// capped at 64. The slope is the curve's steepest secant over ONE CELL of the
+// reach (cell_size / radius), not its analytic supremum: a fold narrower than a
+// cell is never sampled, and the supremum overstates the circ family about
+// ninefold at cell 0.01 / radius 0.3, which sent a drag of half the radius to
+// the cap. A cell size that is not positive uses the supremum.
+//
+// The cost of a call grows about QUADRATICALLY with this count -- each slice's
+// geodesic grid is read through every slice before it -- so it is the number to
+// watch: one slice about 95 ms on a unit-sphere cap at cell 0.01, 64 about 13 s.
+// Past the cap -- a drag over thirty radii on a linear curve -- the slices are
+// longer than that and the map can fold again; the cap bounds the work a single
+// call can be asked for rather than refusing the drag. 1 for a radius that is
+// not positive, where nothing is moved anyway.
+int topological_move_steps(const TopologicalMoveSettings& settings, float cell_size);
 
 }  // namespace field
 }  // namespace clay

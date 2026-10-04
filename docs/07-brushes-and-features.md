@@ -912,8 +912,57 @@ the sampling pass, and the material the geodesic walk runs over.
 15× at 193 nodes and 16× at 600, byte-identical. The geodesic walk itself was
 measured before any of this and is only 4–5% of the operation — it makes 87k of
 the 2.09 million source calls — so its traversal is deliberately left
-sequential. This form is reached from `pyclay`; the C ABI's move takes an
-existing volume.
+sequential. This form is reached from `pyclay` and, since ABI 0.122.0, from
+the C ABI as `clay_item_volume_move_topological_from` (#657) — so a host no
+longer has to bake a volume with a band widened to cover the drag first. With
+no region it samples the document's bounds grown by `|displacement|`, so a pull
+outward is not clipped at the region's face.
+
+**A drag longer than the reach is sub-stepped (#657).** One pull-back
+`p - d·w(g(p))` stops being one-to-one once `|d| · ease_max_slope / radius`
+passes one: two output points read one source point, the surface under the grip
+sinks and the pulled material falls away before the drag's end. The drag now
+runs as `field::topological_move_steps` slices — the fewest that keep each at
+half that limit, capped at 64 — each anchored where the last left the grip and
+each solving its own geodesic over the material the earlier slices left. The
+source is still read **once** per output sample, at the composed pull-back
+`pb_1(pb_2(…pb_n(p)))`, so this is what a host splitting the drag into n calls
+gets without the n re-samples. A drag under half the radius on a linear curve
+is one slice and unchanged.
+
+| unit sphere, cell 0.01, anchor (0,0,1), r 0.3, d (0.5,0,0.4) | height at x = 0 | x = 0.35 | one call |
+|---|---:|---:|---:|
+| single step (before) | 0.939 — below the 1.000 it was grabbed from | 0.936 | 388–418 ms |
+| 5 slices, one call (now) | 1.116 | 1.365 | **361 ms** |
+| the same 5 slices as 5 host calls | 1.119 | 1.362 | — |
+| the host workaround: 9 calls of d/9 | 1.096 | 1.335 | 690 ms in all |
+
+The sub-stepped call is cheaper than the single step it replaces: each slice's
+geodesic grid is sized to the radius plus `|d|/n` rather than plus `|d|`.
+
+**The slope is the one the lattice can see.** The cost grows about
+quadratically with the slice count — slice i's geodesic grid is read through
+the i − 1 slices before it, and every output sample composes all n — so the
+count is sized from the curve's steepest *secant over one cell* of the reach
+(`cell / radius` in t), not from `ease_max_slope`. Two samples one cell apart
+can only read one source point if their weights differ by that much; a fold
+narrower than a cell is never sampled. The analytic peak is badly wrong for the
+circ curves: 71.7, reached only within 1e-4 of t of `CLAY_CIRC_GUARD` (about
+3e-5 of distance at radius 0.3). Measured on a unit-sphere cap at cell 0.01,
+band 0.2, anchor (0,0,1), r 0.3, drag along +x, Release on Apple silicon:
+
+| drag | sized off the peak | sized off one cell |
+|---|---:|---:|
+| linear, \|d\| 0.15 | 1 slice, 96 ms | 1 slice, 93 ms |
+| in_circ, \|d\| 0.15 | 64 slices, 13,024 ms | 8 slices, 432 ms |
+| in_circ, \|d\| 0.05 | 24 slices, 2,053 ms | 3 slices, 151 ms |
+| in_circ, \|d\| 0.01 | 5 slices, 233 ms | 1 slice, 67 ms |
+| in_elastic, \|d\| 0.10 | 13 slices, 833 ms | 11 slices, 659 ms |
+| in_bounce, \|d\| 0.10 | 5 slices, 250 ms | 4 slices, 204 ms |
+
+Against the same drag of 0.15 made as 32 host calls of d/32, the one-cell count
+stays within 0.006 of surface height for every circ curve, elastic and bounce:
+under a cell, which is the resolution the count is chosen for.
 
 **Putting a bake back: feather the replace.** Every one of these verbs returns
 a volume that a host then places with `CLAY_OP_REPLACE`, and the hard replace
@@ -3078,7 +3127,7 @@ Names differ between bindings, so this lists them rather than ticking boxes.
 | Did an edit change anything | `VoxelGrid::change_count()` | `VoxelGrid.change_count` | `clay_voxel_change_count` |
 | Sculpt layers (voxel) | `VoxelGrid::begin_sculpt_layer` / `end_sculpt_layer`, `set_sculpt_layer_strength`, `move_sculpt_layer`, `merge_sculpt_layer_down` | `with grid.sculpt_layer(name):`, `grid.set_sculpt_layer_strength(...)` | `clay_voxel_begin_sculpt_layer`, `clay_voxel_end_sculpt_layer`, `clay_voxel_set_sculpt_layer_strength`, `clay_voxel_move_sculpt_layer`, `clay_voxel_merge_sculpt_layer_down` |
 | Move brush | `brush::move_brush`, `moved_chain` | `Layer.move_surface(...)`, `.move_surface_preview(...)` | `clay_layer_move_surface`, `clay_layer_move_surface_preview` |
-| Move Topological | `field::move_topological` | `Volume.moved_topologically_from(...)` | `clay_item_volume_move_topological` |
+| Move Topological | `field::move_topological` | `Volume.moved_topologically_from(...)` | `clay_item_volume_move_topological`, `clay_item_volume_move_topological_from` |
 | Deformers on a placed node | `scene::SetDeformersCmd` | (through `move_surface`) | `clay_layer_add_deformer` |
 | Masks | `voxel::MaskField` | `clay.MaskField` | `clay_mask_*` |
 | Mask brush | `brush::apply_to_mask` | `MaskField.apply_stroke(...)` | `clay_mask_apply_stroke` |

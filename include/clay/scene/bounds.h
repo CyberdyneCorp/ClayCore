@@ -14,6 +14,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "clay/math/ease_slope.h"
 #include "clay/math/geom.h"
 #include "clay/scene/document.h"
 
@@ -54,10 +55,11 @@ float deformer_lipschitz(const Node& item);
 // the chain is taken from the caller.
 float deformer_lipschitz(const Node& item, const std::vector<Deformer>& deformers);
 
-// Steepest slope of an easing curve, measured by dense sampling. The curves are
-// arbitrary — back and elastic overshoot — so a constant would not be a safe
-// bound. Shared by the transition weight and the region deformers.
-float ease_max_slope(std::uint8_t ease);
+// Steepest slope of an easing curve: exact where the supremum is known, sampled
+// with a margin where it is not. Shared by the transition weight, the region
+// deformers and Move Topological's sub-step count, which is why it is defined
+// in math (field may not include scene) and only named here.
+using math::ease_max_slope;
 
 // Half-extent of a 2D profile about its own origin. Shared because bounds and
 // the compiler's Lipschitz estimate both need it once per profile, and a

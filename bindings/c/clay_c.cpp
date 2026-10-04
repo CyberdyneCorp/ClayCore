@@ -11180,26 +11180,84 @@ clay_result clay_item_volume_relax_from(const clay_document* doc,
     return CLAY_OK;
 }
 
-clay_result clay_item_volume_move_topological(clay_item* item,
-                                             const clay_topological_move_params* params) {
-    if (!item || !params) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
+// Reads and validates a topological-move descriptor into settings. Shared by
+// the in-place move and the document-sourced one, for the reason
+// read_flatten_settings is: the refusals are the contract.
+static clay_result read_topological_move_settings(const clay_topological_move_params* params,
+                                                  field::TopologicalMoveSettings* out) {
     clay_topological_move_params p;
     clay_result r = read_desc(params, kTopologicalMoveParamsOriginal, &p);
     if (r != CLAY_OK) return r;
     if (!(p.radius > 0.0f)) return fail(CLAY_ERROR_INVALID_ARGUMENT, "radius must be > 0");
     if ((r = check_ease(p.ease)) != CLAY_OK) return r;
+    // A non-finite drag sizes every grid, every slice count and the defaulted
+    // region of the document-sourced form; refused rather than sampled.
+    for (int i = 0; i < 3; ++i)
+        if (!std::isfinite(p.anchor[i]) || !std::isfinite(p.displacement[i]))
+            return fail(CLAY_ERROR_INVALID_ARGUMENT, "anchor and displacement must be finite");
+
+    out->anchor = kernel::cf3(p.anchor[0], p.anchor[1], p.anchor[2]);
+    out->radius = p.radius;
+    out->displacement = kernel::cf3(p.displacement[0], p.displacement[1], p.displacement[2]);
+    out->ease = static_cast<std::uint8_t>(p.ease);
+    return CLAY_OK;
+}
+
+clay_result clay_item_volume_move_topological(clay_item* item,
+                                             const clay_topological_move_params* params) {
+    if (!item || !params) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
+    field::TopologicalMoveSettings settings;
+    clay_result r = read_topological_move_settings(params, &settings);
+    if (r != CLAY_OK) return r;
     if (item->node.prim.type != scene::PrimType::Volume || !item->node.volume)
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "this item carries no volume to move");
 
-    field::TopologicalMoveSettings settings;
-    settings.anchor = kernel::cf3(p.anchor[0], p.anchor[1], p.anchor[2]);
-    settings.radius = p.radius;
-    settings.displacement =
-        kernel::cf3(p.displacement[0], p.displacement[1], p.displacement[2]);
-    settings.ease = static_cast<std::uint8_t>(p.ease);
-
     item->node.volume = std::make_shared<field::FieldVolume>(
         field::move_topological(*item->node.volume, settings));
+    return CLAY_OK;
+}
+
+clay_result clay_item_volume_move_topological_from(const clay_document* doc,
+                                                  const clay_topological_move_params* move,
+                                                  const clay_volume_params* volume,
+                                                  const float region_min[3],
+                                                  const float region_max[3],
+                                                  clay_item** out_item) {
+    if (!doc || !move || !volume || !out_item)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
+    *out_item = nullptr;
+
+    field::TopologicalMoveSettings settings;
+    clay_result r = read_topological_move_settings(move, &settings);
+    if (r != CLAY_OK) return r;
+
+    math::Aabb region;
+    float cell = 0.0f, band = 0.0f, feather = 0.0f;
+    r = read_volume_sampling(doc, volume, region_min, region_max, &region, &cell, &band,
+                             &feather);
+    if (r != CLAY_OK) return r;
+    // The defaulted region is the document's bounds, and the drag carries
+    // material up to |d| past them: grown by that, or a pull outward is
+    // clipped at the region's face and comes back as a wrong shape with
+    // CLAY_OK. A region the caller passed is the caller's.
+    if (!region_min) region = region.dilated(kernel::clength(settings.displacement));
+
+    std::shared_ptr<const scene::Tape> tape_ref = doc->tape();
+    const scene::Tape& tape = *tape_ref;
+
+    // The document is exact everywhere, so no band has to be sized against
+    // the drag, and the pulled-back points -- which are not the lattice --
+    // are answered a window at a time by the pooled point evaluator.
+    field::FieldVolume moved =
+        field::move_topological(eval::tape_point_batch(tape), region, cell, band, settings);
+    if (moved.brick_count() == 0)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "the region contains no surface to sample");
+    moved.set_feather(feather);
+
+    auto* item = new clay_item();
+    item->node.prim = scene::Prim::volume();
+    item->node.volume = std::make_shared<field::FieldVolume>(std::move(moved));
+    *out_item = item;
     return CLAY_OK;
 }
 
