@@ -123,6 +123,61 @@ TEST_CASE("clayspace: forward-refuse, truncation, unknown chunks") {
     CHECK(io::load_clayspace(extended.data(), extended.size(), &out).ok());
 }
 
+TEST_CASE("clayspace: the journal seed names the loaded snapshot only while the document is it") {
+    // #641. The seed is what a journal started by enabling undo pairs with:
+    // the loaded snapshot while the document is still that snapshot, and the
+    // identity of what a save would write NOW once anything has been edited --
+    // including an edit nothing counts, a voxel cell or a mask.
+    const std::vector<std::uint8_t> bytes = io::save_clayspace(sample_clayspace());
+    io::ClaySpaceDoc doc;
+    REQUIRE(io::load_clayspace(bytes.data(), bytes.size(), &doc).ok());
+    const std::uint64_t loaded = doc.document.snapshot_id;
+    REQUIRE(loaded == io::snapshot_identity(bytes.data(), bytes.size()));
+    // This build's own output re-encodes to itself, so the load paid nothing.
+    CHECK(doc.document.snapshot_reencoded_id == 0);
+    CHECK(io::journal_seed_for(doc) == loaded);
+
+    voxel::VoxelGrid& grid = doc.voxel_layers.begin()->second;
+    grid.set({9, 9, 9}, 1);
+    const std::uint64_t edited = io::journal_seed_for(doc);
+    CHECK(edited != loaded);
+    CHECK(doc.document.snapshot_id == loaded);  // asking does not stamp
+    CHECK(io::save_clayspace(doc) == io::save_clayspace(doc));
+    CHECK(edited == doc.document.snapshot_id);  // the save writes exactly those bytes
+    CHECK(io::journal_seed_for(doc) == edited);
+
+    voxel::MaskField& mask = doc.masks[doc.voxel_layers.begin()->first];
+    mask.set({0, 0, 0}, 0.5f);
+    CHECK(io::journal_seed_for(doc) != edited);
+
+    io::ClaySpaceDoc never;
+    never.document.add_sdf_layer("body");
+    CHECK(io::journal_seed_for(never) == 0);  // names no snapshot, as before
+}
+
+TEST_CASE("clayspace: a stream this build would not write still seeds its own snapshot") {
+    // A skipped chunk means the loaded bytes are not what a save writes, so
+    // the load re-encodes once and the unedited document still pairs.
+    std::vector<std::uint8_t> extended = io::save_clayspace(sample_clayspace());
+    const char cc[4] = {'F', 'U', 'T', 'R'};
+    extended.insert(extended.end(), cc, cc + 4);
+    for (int i = 0; i < 8; ++i) extended.push_back(i == 0 ? 4 : 0);  // u64 size = 4
+    for (int i = 0; i < 4; ++i) extended.push_back(0xAB);
+
+    io::ClaySpaceDoc doc;
+    REQUIRE(io::load_clayspace(extended.data(), extended.size(), &doc).ok());
+    const std::uint64_t loaded = doc.document.snapshot_id;
+    CHECK(doc.document.snapshot_reencoded_id != 0);
+    CHECK(io::journal_seed_for(doc) == loaded);
+
+    doc.voxel_layers.begin()->second.set({9, 9, 9}, 1);
+    CHECK(io::journal_seed_for(doc) != loaded);
+
+    // A save names a different snapshot, and forgets what the load recorded.
+    (void)io::save_clayspace(doc);
+    CHECK(doc.document.snapshot_reencoded_id == 0);
+}
+
 TEST_CASE("OBJ: vertex-color round trip") {
     mesh::Mesh m = sample_mesh();
     std::string text = io::save_obj(m, "clay", "clay.mtl");

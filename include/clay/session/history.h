@@ -502,8 +502,10 @@ class History {
     // -- which snapshot a journal continues from (survive-a-crash 2.1) -------
     //
     // A binding calls this with `io::snapshot_identity` of the bytes every
-    // time the document is serialized, and once when undo is enabled on a
-    // document that was loaded from bytes. The pair recorded is
+    // time the document is serialized, and once when undo is enabled with
+    // `io::journal_seed_for` -- the snapshot the document was loaded from or
+    // saved to if it is still that snapshot, and the identity of what a save
+    // would write now if it was edited since (#641). The pair recorded is
     // (the journal index reached, the identity), and `journal_since` stamps
     // the identity of the newest snapshot taken AT OR BEFORE the index asked
     // for.

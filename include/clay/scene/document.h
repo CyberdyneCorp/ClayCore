@@ -422,6 +422,19 @@ class Document {
     // copy of a snapshot IS that snapshot.
     mutable std::uint64_t snapshot_id = 0;
 
+    // WHAT THE SNAPSHOT RE-ENCODES TO, when that is not the snapshot's own
+    // bytes (#641). Enabling undo asks "is this document still the snapshot it
+    // names?" by encoding it at this build's minor and comparing with
+    // `snapshot_id`; a stream this build would not write byte for byte -- an
+    // older minor, a skipped chunk -- can never compare equal, so
+    // `io::load_clayspace` re-encodes such a stream once and records the
+    // result here. Zero when the snapshot's bytes are already what this build
+    // writes, or when nobody knows (a save at an older minor).
+    //
+    // Stamped and cleared beside `snapshot_id` by the same two functions, and
+    // runtime only for the same reasons.
+    mutable std::uint64_t snapshot_reencoded_id = 0;
+
     Layer& add_sdf_layer(std::string name) {
         Layer l;
         l.id = next_layer_id_++;

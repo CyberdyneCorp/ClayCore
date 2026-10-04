@@ -8132,8 +8132,10 @@ NB_MODULE(pyclay, m) {
                      // from that one. Without this seed the recovery path —
                      // load_bytes, enable_undo, journal, crash, replay —
                      // produces a journal naming no snapshot and the pair goes
-                     // unchecked (survive-a-crash 2.1).
-                     (*d.undo)->note_snapshot(d.doc->document.snapshot_id);
+                     // unchecked (survive-a-crash 2.1). Edited since, it is
+                     // no longer that snapshot (#641): io::journal_seed_for,
+                     // the same call the C binding makes.
+                     (*d.undo)->note_snapshot(io::journal_seed_for(*d.doc));
                  }
              },
              "Start recording edits. Off by default, so a document that never "

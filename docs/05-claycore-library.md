@@ -1592,11 +1592,28 @@ history**, and a second call keeps the history it already has.
 - **Memory.** Enabling allocates the history and nothing else; bytes grow with
   the first recorded step.
 - **The crash journal.** Enabling seeds the journal with the snapshot the
-  document was last loaded from or saved to. If the document was **edited since
-  then**, that pairing is wrong and replay accepts it: a recovery onto that
-  snapshot silently lacks the edits made before the switch. **Save once right
-  after enabling mid-session** — the new snapshot is what the journal then
-  pairs with.
+  document was last loaded from or saved to **only while the document is still
+  that snapshot** (#641). It encodes the document once, without recording it as
+  a save, and compares identities:
+  - **Unchanged** — the journal names that snapshot and pairs with it, as it
+    always did. An older-minor load counts as unchanged: a load whose bytes are
+    not what this build writes re-encodes once and remembers the result.
+  - **Edited since** — the journal names the bytes a save would write *now*.
+    A replay onto the older snapshot is **refused** with
+    `CLAY_ERROR_SNAPSHOT_MISMATCH` (`ValueError` in pyclay) and nothing is
+    applied; through 0.120.1 it was accepted and the recovery silently lacked
+    every edit made before the switch. **Save once right after enabling
+    mid-session** to have a snapshot the journal pairs with.
+  - **Never serialized** — the journal names no snapshot and replay does not
+    check, unchanged.
+
+  The question costs one save's encode, once per enable, on a document that
+  names a snapshot: 2.2 ms on a 1.58 MB voxel document, where it was free. A
+  load at an older minor pays one more encode (1.41 ms → 3.61 ms on the same
+  document); a load of this build's own output pays nothing. One case is
+  refused that could have paired: a document **saved at an older minor** and
+  enabled with no save since, because whether that minor lost anything is not
+  known without loading it back.
 
 A host that needs a boundary can read it: the history records unreversible
 operations as barriers, `undo_depth` stops counting at the nearest one, and the

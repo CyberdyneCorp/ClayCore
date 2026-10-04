@@ -1255,10 +1255,21 @@ clay_result clay_remove_node(clay_document* doc, clay_layer_id layer, clay_node_
  * document holds is the starting state, and a second enable keeps the history
  * it has. clay_document_end_undo_group with no bracket open is a no-op — through
  * 0.120.0 it folded every step since the session began into one, which a host
- * reached by enabling undo mid-gesture. The crash journal a mid-session enable
- * starts is paired with the snapshot the document was last loaded from or saved
- * to; if it was edited since, save once after enabling, or a recovery onto the
- * older snapshot will lack those edits.
+ * reached by enabling undo mid-gesture.
+ *
+ * THE CRASH JOURNAL AN ENABLE STARTS is paired with the snapshot the document
+ * was last loaded from or saved to ONLY WHILE THE DOCUMENT IS STILL IT. Enabling
+ * encodes the document once, unstamped, and compares: unchanged, the journal
+ * names that snapshot; edited since, it names the bytes a save would write now,
+ * so a replay onto the older snapshot is refused with
+ * CLAY_ERROR_SNAPSHOT_MISMATCH instead of accepted and silently lacking the
+ * edits made before the enable (#641; through 0.120.1 it was accepted). Save
+ * once after enabling to have a snapshot the journal pairs with. An unedited
+ * load of an older minor still pairs — the load records what it re-encodes to.
+ * A document saved at an OLDER minor and enabled without a later save does
+ * not: nothing knows whether that minor lost anything. Costs one save's encode,
+ * once, on a document that was loaded or saved; nothing on one that never was,
+ * whose journal names no snapshot, as before.
  *
  * The depths reported by clay_document_undo_state count steps that will
  * actually reverse something, so a host greying a menu item from one never
