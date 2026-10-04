@@ -144,8 +144,12 @@ because none has a proposal yet:
 - #629: a `session::History` undo of a DynamicMesh step leaves a C++-held
   `DynamicSculptor` with a stale index (200 of 6,912 and 2,638 of 49,152 live
   faces unindexed, measured in #617). No C ABI path reaches it.
-- #630: `refit_around_moved_vertices` (#617) finds nothing on any record this
-  library writes. Keep it with a test that can fail, or delete it.
+- #630: `refit_around_moved_vertices` (#617) changes nothing on any record this
+  library writes. Kept: `TopologyDelta::decode` does not check that a record
+  names every face around a moved vertex, so a spilled record edited to drop its
+  face entries replays, and the refit is all that keeps the index right for it.
+  A test now builds that record; without the refit its ball queries miss a face
+  621 times on undo and 198 on redo.
 - #631: the mesh Draw brush's averaged normal tilts 16.8 deg on a symmetric fin
   (#618). Fixed by `weigh-the-stamp-normal-by-area`: one equal vote per vertex
   let the mesher's chiral tetrahedral split outvote one face of the fin; each
