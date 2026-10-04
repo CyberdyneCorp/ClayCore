@@ -1051,6 +1051,38 @@ asks; `LayerExtent` owns one per query, the drag frontier threads one through
 its loop, and an undo step's replay shares one across its commands, clearing it
 after any command but a deformer or colour edit (0.45 and 1.04 ms).
 
+### ...except a relief or incise item, whose edit never leaves its box (#672)
+
+The walk above exists because an edit changes the running value OUTSIDE the
+node's box. A relief or incise ITEM does not: its combine is `a -/+ k * w(b)`,
+and its weight is exactly zero outside its falloff, which its own bound already
+holds -- so there it returns the running value bit for bit, before the edit and
+after it. Every combine after it reads its operands at the same point, so the
+layer's field cannot change outside the item's own bound, at any level.
+`node_reach_bound` takes none of the walk's dilations for such a node (neither
+the later siblings' drag nor an enclosing group's support); it still walks the
+ancestors, so a hidden group hides it and a non-local one keeps its own answer.
+
+What it fixes is every relief and incise STROKE. `clay_layer_apply_stroke`
+authors one node per stamp, and each stamp but the last has the next one after
+it. The #650 term read that stamp's AMPLITUDE -- `blend.k`, which a relief stamp
+sets to `templ.k * strength` in world units -- as a quadratic blend support, and
+widened every earlier stamp by 4k on each side, whatever its radius. A
+four-sample stroke (radius 0.12, strength 0.5, host template k = 1) on a unit
+sphere reported 4.72-wide stamp boxes against 0.72 for the last, and
+`clay_brick_cache_mark_dirty_nodes` over the stroke marked 2,548 bricks against
+48 for one stamp. Both are now 0.72 and 48 (`test_c_relief_stroke_reach.cpp`,
+which also refills a cache over the reported bounds after removing or moving
+each stamp -- at the root, inside a smooth group followed by a smooth sibling,
+and on a mirrored layer -- and compares it brick for brick with one rebuilt
+from nothing).
+
+A relief GROUP is not confined -- it offsets by the weight of its children's
+combined value, which an edit to a child changes beyond the child's box -- and
+keeps the walk. Nor does this narrow the bound of a node BEFORE a relief stroke:
+the sphere a stroke is laid on is the running value the stamps offset, and an
+edit to it still takes their drag, at the cull pad's full-support term.
+
 ### ...and a MOVE of one is bounded by its sweep
 
 The layer-wide answer above is right for the question it answers and ruinous as
