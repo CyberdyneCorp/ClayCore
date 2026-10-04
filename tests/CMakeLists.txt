@@ -253,6 +253,7 @@ add_executable(clay_unit_tests
   unit/test_worker_config.cpp
   unit/test_c_group_resume_rebuilds.cpp
   unit/test_c_mesh_from_quads.cpp
+  unit/test_c_mesh_from_arrays.cpp
   unit/test_c_in_group_dirty_reach.cpp
   unit/test_c_transform_bound.cpp
   unit/test_layer_extent_memo.cpp

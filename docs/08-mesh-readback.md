@@ -129,6 +129,7 @@ form at three target counts, with requested against actual printed for each.
 | a brick subset (incremental) | — | `clay_brick_cache_mesh` | `mesh::mesh_bricks` |
 | a coarse level of the bricks | — | `clay_brick_cache_mesh_lod` | `mesh::mesh_bricks(…, lod)` |
 | triangles you own | `clay.Mesh.from_triangles` | `clay_mesh_from_triangles` | build a `mesh::Mesh` |
+| triangles or quads you own, with normals / colours / uvs | — | `clay_mesh_from_arrays` | build a `mesh::Mesh` |
 
 Whichever produced it, the readback below is identical — a mesh does not
 remember where it came from.
@@ -582,7 +583,7 @@ Three cases, and the middle one is the trap.
 
 | you got the mesh from | you own it | free it with |
 |---|---|---|
-| `clay_document_mesh`, `clay_mesh_load`, `clay_mesh_from_triangles`, `clay_mesh_transform`, `clay_mesh_concat`, `clay_document_mesh_combined`, `clay_voxel_mesh`, `clay_brick_cache_mesh`, `clay_brick_cache_mesh_lod` | yes | `clay_mesh_destroy` |
+| `clay_document_mesh`, `clay_mesh_load`, `clay_mesh_from_triangles`, `clay_mesh_from_quads`, `clay_mesh_from_arrays`, `clay_mesh_transform`, `clay_mesh_concat`, `clay_document_mesh_combined`, `clay_voxel_mesh`, `clay_brick_cache_mesh`, `clay_brick_cache_mesh_lod` | yes | `clay_mesh_destroy` |
 | `clay_document_mesh_layer`, `clay_document_mesh_layer_by_id`, and the `out_mesh` of `clay_document_add_mesh_layer` | **no — the document owns it** | nothing; `clay_mesh_destroy` on it is a silent no-op |
 | Python: any `Mesh` | the interpreter | — |
 
@@ -608,7 +609,8 @@ mesh holds the document alive, so `del doc` while you still hold arrays is fine.
 | `clay_brick_cache_mesh_lod` at `lod = 1` | face normals only | **refused** | no |
 | `clay_voxel_mesh` / `grid.mesh()` | yes | per-face palette colour | no |
 | OBJ / PLY / FBX import | as the file carries | as the file carries | as the file carries |
-| `clay_mesh_from_triangles` | no | no | no |
+| `clay_mesh_from_triangles` / `_from_quads` | no | no | no |
+| `clay_mesh_from_arrays` | as you pass them | as you pass them | as you pass them |
 
 Three consequences worth planning for:
 
@@ -653,8 +655,25 @@ clay_mesh_from_triangles(positions, vertex_count, indices, index_count, &edited)
 
 `clay_mesh_from_triangles` copies, so your buffers may be freed on return, and it
 takes positions and indices only — an edited mesh comes back without normals,
-colours or uvs. `clay_mesh_transform` is the exception worth knowing: it moves
-positions by a transform and rotates normals rather than dropping them.
+colours or uvs. To keep them, rebuild with `clay_mesh_from_arrays` instead
+(ABI 0.124.0): the same copy, plus optional `normals`, `colors` and `uvs`, each
+NULL or vertex-aligned, and either a triangle or a quad index list:
+
+```c
+clay_mesh_arrays in = {0};
+in.struct_size = sizeof in;
+in.positions = positions; in.vertex_count = vertex_count;
+in.uvs = uvs;  /* vertex_count * 2 floats; normals/colors stay NULL */
+in.indices = indices; in.index_count = index_count;
+clay_mesh* edited = NULL;
+clay_mesh_from_arrays(&in, &edited);
+```
+
+The floats come back bit-exactly and survive a mesh-layer attach and a document
+save and load. Attribute lengths cannot be checked through a pointer, so a short
+buffer is read past its end exactly as a short `positions` is.
+`clay_mesh_transform` is the other exception worth knowing: it moves positions
+by a transform and rotates normals rather than dropping them.
 
 **A mesh layer's vertices CAN be moved in place**, by the fixed-topology mesh
 brushes — `mesh::MeshSculptor`, `clay.MeshSculptor`, `clay_mesh_sculptor_*`.
