@@ -4931,8 +4931,14 @@ clay_result clay_mesh_concat(const clay_mesh* const* meshes, size_t count,
  *
  * The attribute-drop rule of clay_mesh_concat applies: the meshed field
  * carries normals, so a mesh layer without them costs the result its normals.
- * A document with no visible mesh layer returns exactly what
- * clay_document_mesh would. Free the result with clay_mesh_destroy. */
+ *
+ * AN EMPTY FIELD CONTRIBUTES NOTHING when a mesh layer is visible: every SDF
+ * layer hidden, none at all, or every surface group hidden, and the result is
+ * the placed mesh layers alone, where clay_document_mesh would refuse. A
+ * document with no visible mesh layer returns exactly what clay_document_mesh
+ * would, its refusals included -- so a document with nothing visible at all is
+ * still CLAY_ERROR_INVALID_ARGUMENT. `params` is validated either way. Free the
+ * result with clay_mesh_destroy. */
 clay_result clay_document_mesh_combined(const clay_document* doc,
                                         const clay_mesh_params* params,
                                         clay_mesh** out_mesh);
