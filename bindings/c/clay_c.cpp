@@ -10678,26 +10678,101 @@ clay_result clay_mesh_load(const char* path, const clay_import_budget* budget,
     return CLAY_OK;
 }
 
+namespace {
+
+// The three caller-array constructors share one path: positions, then one
+// index kind, then (from_arrays only) the optional vertex-aligned attributes.
+
+// Out-parameters rather than return values: these sit inside extern "C",
+// where returning a std::vector is -Wreturn-type-c-linkage.
+void copy_float3s(const float* src, size_t count, std::vector<kernel::cfloat3>* out) {
+    out->reserve(count);
+    for (size_t i = 0; i < count; ++i)
+        out->push_back(kernel::cf3(src[i * 3], src[i * 3 + 1], src[i * 3 + 2]));
+}
+
+void copy_float2s(const float* src, size_t count, std::vector<kernel::cfloat2>* out) {
+    out->reserve(count);
+    for (size_t i = 0; i < count; ++i) out->push_back(kernel::cf2(src[i * 2], src[i * 2 + 1]));
+}
+
+bool indices_in_range(const std::vector<std::uint32_t>& indices, size_t vertex_count) {
+    for (std::uint32_t index : indices)
+        if (index >= vertex_count) return false;
+    return true;
+}
+
+clay_result take_triangles(const uint32_t* indices, size_t index_count, mesh::Mesh* m) {
+    if (!indices) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null indices");
+    if (index_count == 0 || index_count % 3 != 0)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "need a whole number of triangles");
+    m->indices.assign(indices, indices + index_count);
+    if (!indices_in_range(m->indices, m->positions.size()))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "an index points past the vertices");
+    return CLAY_OK;
+}
+
+clay_result take_quads(const uint32_t* quad_indices, size_t quad_index_count, mesh::Mesh* m) {
+    if (!quad_indices) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null quad_indices");
+    if (quad_index_count == 0 || quad_index_count % 4 != 0)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "need a whole number of quads");
+    m->quads.assign(quad_indices, quad_indices + quad_index_count);
+    if (!indices_in_range(m->quads, m->positions.size()))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "a quad corner points past the vertices");
+    // DERIVED, not taken: (a,b,c),(a,c,d) is the expansion mesh_data.h states,
+    // so mesh::quads_consistent holds by construction and the readers that
+    // already answer for a lattice-meshed quad mesh answer for this one too.
+    const size_t quads = quad_index_count / 4;
+    m->indices.resize(quads * 6);
+    for (size_t q = 0; q < quads; ++q) {
+        const std::uint32_t* c = &m->quads[q * 4];
+        std::uint32_t* t = &m->indices[q * 6];
+        t[0] = c[0]; t[1] = c[1]; t[2] = c[2];
+        t[3] = c[0]; t[4] = c[2]; t[5] = c[3];
+    }
+    return CLAY_OK;
+}
+
+// Positions first, so the index helpers can range-check against them.
+clay_result start_mesh(const float* positions, size_t vertex_count,
+                       std::unique_ptr<clay_mesh>* out) {
+    if (!positions) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null positions");
+    if (vertex_count == 0) return fail(CLAY_ERROR_INVALID_ARGUMENT, "need at least one vertex");
+    *out = std::make_unique<clay_mesh>();
+    copy_float3s(positions, vertex_count, &(*out)->data.positions);
+    return CLAY_OK;
+}
+
+// Exactly one index kind; a kind counts as supplied by its pointer OR its
+// count, so a count without its pointer is refused rather than ignored.
+clay_result take_index_kind(const clay_mesh_arrays& in, mesh::Mesh* m) {
+    const bool triangles = in.indices || in.index_count;
+    const bool quads = in.quad_indices || in.quad_index_count;
+    if (triangles == quads)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "supply exactly one of indices or quad_indices");
+    return triangles ? take_triangles(in.indices, in.index_count, m)
+                     : take_quads(in.quad_indices, in.quad_index_count, m);
+}
+
+void take_attributes(const clay_mesh_arrays& in, mesh::Mesh* m) {
+    if (in.normals) copy_float3s(in.normals, in.vertex_count, &m->normals);
+    if (in.colors) copy_float3s(in.colors, in.vertex_count, &m->colors);
+    if (in.uvs) copy_float2s(in.uvs, in.vertex_count, &m->uvs);
+}
+
+}  // namespace
+
 clay_result clay_mesh_from_triangles(const float* positions, size_t vertex_count,
                                      const uint32_t* indices, size_t index_count,
                                      clay_mesh** out_mesh) {
     if (!out_mesh) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_mesh");
     *out_mesh = nullptr;
-    if (!positions || !indices)
-        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null positions or indices");
-    if (vertex_count == 0 || index_count == 0 || index_count % 3 != 0)
-        return fail(CLAY_ERROR_INVALID_ARGUMENT, "need a whole number of triangles");
-    auto built = std::make_unique<clay_mesh>();
-    built->data.positions.reserve(vertex_count);
-    for (size_t i = 0; i < vertex_count; ++i)
-        built->data.positions.push_back(
-            kernel::cf3(positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]));
-    built->data.indices.assign(indices, indices + index_count);
-    for (std::uint32_t index : built->data.indices)
-        if (index >= vertex_count)
-            return fail(CLAY_ERROR_INVALID_ARGUMENT, "an index points past the vertices");
-    *out_mesh = built.release();
-    return CLAY_OK;
+    std::unique_ptr<clay_mesh> built;
+    clay_result r = start_mesh(positions, vertex_count, &built);
+    if (r == CLAY_OK) r = take_triangles(indices, index_count, &built->data);
+    if (r == CLAY_OK) *out_mesh = built.release();
+    return r;
 }
 
 clay_result clay_mesh_from_quads(const float* positions, size_t vertex_count,
@@ -10705,30 +10780,24 @@ clay_result clay_mesh_from_quads(const float* positions, size_t vertex_count,
                                  clay_mesh** out_mesh) {
     if (!out_mesh) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_mesh");
     *out_mesh = nullptr;
-    if (!positions || !quad_indices)
-        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null positions or quad_indices");
-    if (vertex_count == 0 || quad_index_count == 0 || quad_index_count % 4 != 0)
-        return fail(CLAY_ERROR_INVALID_ARGUMENT, "need a whole number of quads");
-    auto built = std::make_unique<clay_mesh>();
-    built->data.positions.reserve(vertex_count);
-    for (size_t i = 0; i < vertex_count; ++i)
-        built->data.positions.push_back(
-            kernel::cf3(positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]));
-    built->data.quads.assign(quad_indices, quad_indices + quad_index_count);
-    for (std::uint32_t index : built->data.quads)
-        if (index >= vertex_count)
-            return fail(CLAY_ERROR_INVALID_ARGUMENT, "a quad corner points past the vertices");
-    // DERIVED, not taken: (a,b,c),(a,c,d) is the expansion mesh_data.h states,
-    // so mesh::quads_consistent holds by construction and the readers that
-    // already answer for a lattice-meshed quad mesh answer for this one too.
-    const size_t quads = quad_index_count / 4;
-    built->data.indices.resize(quads * 6);
-    for (size_t q = 0; q < quads; ++q) {
-        const std::uint32_t* c = &built->data.quads[q * 4];
-        std::uint32_t* t = &built->data.indices[q * 6];
-        t[0] = c[0]; t[1] = c[1]; t[2] = c[2];
-        t[3] = c[0]; t[4] = c[2]; t[5] = c[3];
-    }
+    std::unique_ptr<clay_mesh> built;
+    clay_result r = start_mesh(positions, vertex_count, &built);
+    if (r == CLAY_OK) r = take_quads(quad_indices, quad_index_count, &built->data);
+    if (r == CLAY_OK) *out_mesh = built.release();
+    return r;
+}
+
+clay_result clay_mesh_from_arrays(const clay_mesh_arrays* in, clay_mesh** out_mesh) {
+    if (!in || !out_mesh) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
+    *out_mesh = nullptr;
+    clay_mesh_arrays arrays;
+    clay_result r = read_desc(in, sizeof(clay_mesh_arrays), &arrays);
+    if (r != CLAY_OK) return r;
+    std::unique_ptr<clay_mesh> built;
+    r = start_mesh(arrays.positions, arrays.vertex_count, &built);
+    if (r == CLAY_OK) r = take_index_kind(arrays, &built->data);
+    if (r != CLAY_OK) return r;
+    take_attributes(arrays, &built->data);
     *out_mesh = built.release();
     return CLAY_OK;
 }

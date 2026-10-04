@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 123
+#define CLAY_ABI_MINOR 124
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -4403,6 +4403,53 @@ clay_result clay_mesh_from_triangles(const float* positions, size_t vertex_count
 clay_result clay_mesh_from_quads(const float* positions, size_t vertex_count,
                                  const uint32_t* quad_indices, size_t quad_index_count,
                                  clay_mesh** out_mesh);
+
+/* Build a mesh from caller-owned arrays INCLUDING the optional per-vertex
+ * attributes (issue #661, ABI 0.124.0): normals, colours and uvs a host
+ * computed itself — a retopology laid out by the host's own unwrapper is the
+ * case it exists for. Before this the two constructors above copied positions
+ * and indices only, and the one entry point that attached uvs was the OBJ
+ * reader, so a host wrote `v`/`vn`/`vt` text into memory and read it back
+ * through clay_mesh_load_memory to get them. Everything is copied, so the
+ * caller's buffers may be freed on return.
+ *
+ * THE INVARIANT is the one every reader already keeps: an attribute is either
+ * VERTEX-ALIGNED or ABSENT. normals and colors are vertex_count*3 floats, uvs
+ * vertex_count*2, and NULL means the mesh does not carry that attribute
+ * (clay_mesh_normals / _colors / _uvs then answer NULL). Each is independent;
+ * uvs alone is the common case.
+ *
+ * EXACTLY ONE index kind. `indices` (index_count, a non-zero multiple of three)
+ * is a triangle list taken as given, like clay_mesh_from_triangles.
+ * `quad_indices` (quad_index_count, a non-zero multiple of four) is a quad
+ * list, and the triangles are DERIVED from it by the (a,b,c),(a,c,d) rule
+ * exactly as clay_mesh_from_quads derives them — see there for why. A kind is
+ * "supplied" when its pointer is non-NULL or its count is non-zero, so a count
+ * without its pointer is malformed rather than ignored. Neither, or both, is
+ * CLAY_ERROR_INVALID_ARGUMENT; so is NULL positions, a zero vertex_count, an
+ * index past the vertices, and a struct_size below this layout.
+ *
+ * WHAT THIS DOES NOT VALIDATE, because a pointer cannot say how long it is:
+ * that each non-NULL attribute really holds vertex_count entries (a shorter
+ * buffer is read past its end, as a short `positions` already is), and the
+ * values themselves — normals are not renormalised, colours are not clamped,
+ * uvs are not wrapped, and NaN is copied as given. Nor planarity or convexity
+ * of a quad, for the reason clay_mesh_from_quads states. The floats come back
+ * bit-exactly, and survive a mesh-layer attach and a document save and load. */
+typedef struct clay_mesh_arrays {
+    uint32_t struct_size; /* = sizeof(clay_mesh_arrays); required */
+    const float* positions;
+    size_t vertex_count;
+    const float* normals; /* NULL or vertex_count*3 */
+    const float* colors;  /* NULL or vertex_count*3 */
+    const float* uvs;     /* NULL or vertex_count*2 */
+    const uint32_t* indices;
+    size_t index_count;
+    const uint32_t* quad_indices;
+    size_t quad_index_count;
+} clay_mesh_arrays;
+
+clay_result clay_mesh_from_arrays(const clay_mesh_arrays* in, clay_mesh** out_mesh);
 
 /* Resample a caller-owned per-vertex scalar — a mask, a weight — from one mesh
  * onto another by closest point (add-voxel-remesher, ABI 0.63.0).
