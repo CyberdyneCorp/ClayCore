@@ -1338,3 +1338,80 @@ TEST_CASE("voxel grab: a falloff means the curve it is named after") {
     // centre. Guards against "fix" by making every falloff rigid.
     CHECK(c_lin > h_lin);
 }
+
+// #658: a clone is a GRID, not the source's session. The implicit copy also
+// copies the change sink (the document's undo journal), the open pass capture
+// and the recording flag, so an edit to a plain copy lands in the SOURCE's
+// history. The clone has to carry the cells and leave every channel behind.
+TEST_CASE("a clone carries the cells and none of the source's recording channels") {
+    VoxelGrid src(0.1f);
+    const std::uint8_t red = src.palette_add(cf3(1, 0, 0));
+    const std::uint8_t blue = src.palette_add(cf3(0, 0, 1));
+    src.set({0, 0, 0}, red);
+    src.set({40, 1, -2}, blue);
+    REQUIRE(src.add_level() == 1);
+    REQUIRE(src.set_active_level(1));
+    src.set({7, 7, 7}, blue);
+    src.begin_sculpt_layer("open pass");
+    src.set({3, 3, 3}, red);
+
+    // A gesture in flight on the source: the sink and the capture are live.
+    std::vector<VoxelGrid::SculptChange> sink;
+    VoxelGrid::SculptLayerOp capture;
+    src.set_change_sink(&sink);
+    src.begin_pass_capture(&capture);
+
+    VoxelGrid copy = src.clone();
+    CHECK(copy.change_sink() == nullptr);
+    CHECK_FALSE(copy.recording_sculpt_layer());
+    CHECK(copy.level_count() == 2);
+    CHECK(copy.active_level() == 1);
+    CHECK(copy.palette_size() == src.palette_size());
+    CHECK(copy.sculpt_layer_count() == 1);
+    CHECK(copy.sculpt_layer_cell_count(0) == src.sculpt_layer_cell_count(0));
+    for (std::size_t level = 0; level < 2; ++level)
+        CHECK(copy.level_occupied_count(level) == src.level_occupied_count(level));
+    CHECK(copy.occupied_cells() == src.occupied_cells());
+    // Never displayed, so everything it holds is owed to a host; and no write
+    // has been made to it.
+    CHECK(copy.dirty_chunk_count(0) == copy.occupied_chunk_keys(0).size());
+    CHECK(copy.change_count() == 0);
+
+    // An edit to the clone reaches none of the source's channels.
+    const std::size_t pass_cells = src.sculpt_layer_cell_count(0);
+    copy.set({10, 10, 10}, red);
+    copy.set({3, 3, 3}, 0);
+    CHECK(sink.empty());
+    CHECK(capture.lower_afters.empty());
+    CHECK(src.get({10, 10, 10}) == 0);
+    CHECK(src.get({3, 3, 3}) == red);
+    CHECK(src.sculpt_layer_cell_count(0) == pass_cells);
+
+    src.set_change_sink(nullptr);
+    src.end_pass_capture();
+}
+
+TEST_CASE("occupied_cells reads a level in z, y, x order, inherited cells included") {
+    VoxelGrid g(0.1f);
+    const std::uint8_t a = g.palette_add(cf3(1, 0, 0));
+    g.set({5, 0, 0}, a);
+    g.set({-40, 3, 0}, a);
+    g.set({0, 0, 70}, a);
+    g.set({0, -1, 70}, a);
+    const std::vector<VoxelGrid::OccupiedCell> cells = g.occupied_cells();
+    REQUIRE(cells.size() == 4);
+    // z first, then y: x = -40 comes second because its y is larger.
+    CHECK(cells[0].cell == VoxelCoord{5, 0, 0});
+    CHECK(cells[1].cell == VoxelCoord{-40, 3, 0});
+    CHECK(cells[2].cell == VoxelCoord{0, -1, 70});
+    CHECK(cells[3].cell == VoxelCoord{0, 0, 70});
+    CHECK(cells[0].index == a);
+
+    // A regional level stores only its region; outside it the parent's cells
+    // are this level's too, eight children each.
+    const std::size_t fine = g.add_level(math::Aabb{cf3(0, 0, 0), cf3(0.5f, 0.5f, 0.5f)});
+    REQUIRE_FALSE(g.level_is_whole(fine));
+    CHECK(g.occupied_cells(fine).size() == g.level_occupied_count(fine));
+    CHECK(g.occupied_cells(fine).size() == 4 * 8);
+    CHECK(g.occupied_cells(99).empty());
+}

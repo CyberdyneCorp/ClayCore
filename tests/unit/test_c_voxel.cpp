@@ -1,5 +1,6 @@
 #include <doctest/doctest.h>
 
+#include <array>
 #include <cmath>
 
 #include <cstdio>
@@ -1319,4 +1320,259 @@ TEST_CASE("a voxel grab's steady shares the stroke path's ceiling") {
     CHECK(clay_voxel_grab_set_steady(nullptr, 0.5f) == CLAY_ERROR_INVALID_ARGUMENT);
 
     clay_voxel_grab_destroy(tx);
+}
+
+// -- a clone and a bulk read (issue #658) --------------------------------------
+//
+// A layer's grid was reachable only as a borrow of its document, so a host that
+// wanted to convert it off the interface thread rebuilt it on the worker from a
+// clay_voxel_get per cell of the occupied BOX — empty cells included, the
+// active level only, the sculpt layers lost.
+
+namespace {
+
+using CellRow = std::array<std::int32_t, 4>;  // x, y, z, palette index
+
+// The occupied cells of the active level the only way there was: every cell of
+// the bounding box, in z-major order with x fastest.
+std::vector<CellRow> box_walk(const clay_voxel_grid* grid) {
+    std::vector<CellRow> rows;
+    std::int32_t lo[3] = {0, 0, 0}, hi[3] = {0, 0, 0};
+    std::int32_t has = 0;
+    REQUIRE(clay_voxel_bounds(grid, lo, hi, &has) == CLAY_OK);
+    if (!has) return rows;
+    for (std::int32_t z = lo[2]; z <= hi[2]; ++z)
+        for (std::int32_t y = lo[1]; y <= hi[1]; ++y)
+            for (std::int32_t x = lo[0]; x <= hi[0]; ++x) {
+                const std::int32_t cell[3] = {x, y, z};
+                std::int32_t index = 0;
+                REQUIRE(clay_voxel_get(grid, cell, &index) == CLAY_OK);
+                if (index != 0) rows.push_back({x, y, z, index});
+            }
+    return rows;
+}
+
+std::vector<CellRow> bulk_read(const clay_voxel_grid* grid) {
+    size_t count = 0;
+    REQUIRE(clay_voxel_get_occupied(grid, nullptr, nullptr, 0, &count) == CLAY_OK);
+    std::vector<std::int32_t> xyz(count * 3), index(count);
+    size_t written = 0;
+    REQUIRE(clay_voxel_get_occupied(grid, xyz.data(), index.data(), count, &written) == CLAY_OK);
+    REQUIRE(written == count);
+    std::vector<CellRow> rows(count);
+    for (size_t i = 0; i < count; ++i)
+        rows[i] = {xyz[i * 3], xyz[i * 3 + 1], xyz[i * 3 + 2], index[i]};
+    return rows;
+}
+
+void check_bulk_read_is_the_box_walk(const clay_voxel_grid* grid) {
+    const std::vector<CellRow> walked = box_walk(grid);
+    const std::vector<CellRow> read = bulk_read(grid);
+    size_t occupied = 0;
+    REQUIRE(clay_voxel_occupied_count(grid, &occupied) == CLAY_OK);
+    CHECK(read.size() == occupied);
+    CHECK(walked.size() == occupied);
+    // Same cells, same indices, and the same ORDER: z, then y, then x fastest.
+    CHECK(read == walked);
+}
+
+void set_cell(clay_voxel_grid* grid, std::int32_t x, std::int32_t y, std::int32_t z,
+              std::int32_t index) {
+    const std::int32_t cell[3] = {x, y, z};
+    REQUIRE(clay_voxel_set(grid, cell, index) == CLAY_OK);
+}
+
+std::int32_t cell_of(const clay_voxel_grid* grid, std::int32_t x, std::int32_t y, std::int32_t z) {
+    const std::int32_t cell[3] = {x, y, z};
+    std::int32_t index = -1;
+    REQUIRE(clay_voxel_get(grid, cell, &index) == CLAY_OK);
+    return index;
+}
+
+size_t level_count_of(const clay_voxel_grid* grid, size_t level) {
+    size_t n = 0;
+    REQUIRE(clay_voxel_level_occupied_count(grid, level, &n) == CLAY_OK);
+    return n;
+}
+
+size_t undo_depth(const clay_document* doc) {
+    std::int32_t enabled = 0;
+    size_t depth = 0, redo = 0;
+    REQUIRE(clay_document_undo_state(doc, &enabled, &depth, &redo) == CLAY_OK);
+    REQUIRE(enabled == 1);
+    return depth;
+}
+
+}  // namespace
+
+TEST_CASE("c voxel: a clone of a borrowed layer is the whole grid and none of its document") {
+    clay_document* doc = clay_document_create();
+    REQUIRE(doc != nullptr);
+    REQUIRE(clay_document_enable_undo(doc) == CLAY_OK);
+    clay_layer_id layer = 0;
+    clay_voxel_grid* grid = nullptr;
+    REQUIRE(clay_document_add_voxel_layer(doc, "sculpt", 0.1f, &layer, &grid) == CLAY_OK);
+
+    // A multi-entry palette, material at two levels, the finer one active, and
+    // a sculpt layer left OPEN — everything a host's grid can be holding.
+    const float red[3] = {1.0f, 0.0f, 0.0f}, green[3] = {0.0f, 1.0f, 0.0f},
+                blue[3] = {0.0f, 0.0f, 1.0f};
+    std::int32_t r = 0, g = 0, b = 0;
+    REQUIRE(clay_voxel_palette_add(grid, red, &r) == CLAY_OK);
+    REQUIRE(clay_voxel_palette_add(grid, green, &g) == CLAY_OK);
+    REQUIRE(clay_voxel_palette_add(grid, blue, &b) == CLAY_OK);
+    set_cell(grid, 0, 0, 0, r);
+    set_cell(grid, 1, 0, 0, g);
+    set_cell(grid, 40, 2, -5, b);
+    size_t fine = 0;
+    REQUIRE(clay_voxel_add_level(grid, &fine) == CLAY_OK);
+    REQUIRE(fine == 1);
+    REQUIRE(clay_voxel_set_active_level(grid, fine) == CLAY_OK);
+    set_cell(grid, 9, 9, 9, g);
+    size_t pass = 0;
+    REQUIRE(clay_voxel_begin_sculpt_layer(grid, "open pass", &pass) == CLAY_OK);
+    set_cell(grid, 12, 3, 3, b);
+
+    clay_voxel_grid* copy = nullptr;
+    REQUIRE(clay_voxel_grid_clone(grid, &copy) == CLAY_OK);
+    REQUIRE(copy != nullptr);
+    CHECK(copy != grid);
+
+    // Every level, the active one, and per level the same cells.
+    size_t levels = 0, active = 0;
+    REQUIRE(clay_voxel_level_count(copy, &levels) == CLAY_OK);
+    CHECK(levels == 2);
+    REQUIRE(clay_voxel_active_level(copy, &active) == CLAY_OK);
+    CHECK(active == fine);
+    for (size_t level = 0; level < 2; ++level) {
+        CHECK(level_count_of(copy, level) == level_count_of(grid, level));
+        float want = 0.0f, got = 0.0f;
+        REQUIRE(clay_voxel_level_voxel_size(grid, level, &want) == CLAY_OK);
+        REQUIRE(clay_voxel_level_voxel_size(copy, level, &got) == CLAY_OK);
+        CHECK(got == want);
+    }
+    CHECK(bulk_read(copy) == bulk_read(grid));
+    CHECK(cell_of(copy, 12, 3, 3) == b);
+
+    // The palette, entry for entry.
+    size_t entries = 0, copied_entries = 0;
+    REQUIRE(clay_voxel_palette_size(grid, &entries) == CLAY_OK);
+    REQUIRE(clay_voxel_palette_size(copy, &copied_entries) == CLAY_OK);
+    CHECK(entries == 4);
+    CHECK(copied_entries == entries);
+    for (std::int32_t i = 1; i < static_cast<std::int32_t>(entries); ++i) {
+        float want[3] = {0, 0, 0}, got[3] = {-1, -1, -1};
+        REQUIRE(clay_voxel_palette_color(grid, i, want) == CLAY_OK);
+        REQUIRE(clay_voxel_palette_color(copy, i, got) == CLAY_OK);
+        CHECK(std::memcmp(want, got, sizeof want) == 0);
+    }
+
+    // The sculpt layer travels; the open RECORDING does not. A recording is
+    // the document's session — the next edit belongs to the source's pass.
+    size_t layers = 0, cells = 0;
+    REQUIRE(clay_voxel_sculpt_layer_count(copy, &layers) == CLAY_OK);
+    CHECK(layers == 1);
+    REQUIRE(clay_voxel_sculpt_layer_cell_count(copy, 0, &cells) == CLAY_OK);
+    CHECK(cells == 1);
+    std::int32_t recording = -1;
+    REQUIRE(clay_voxel_recording_sculpt_layer(copy, &recording) == CLAY_OK);
+    CHECK(recording == 0);
+    REQUIRE(clay_voxel_recording_sculpt_layer(grid, &recording) == CLAY_OK);
+    CHECK(recording == 1);
+
+    // The level 0 cells, read through the clone's own level switch — the
+    // source's active level is the document's, and is not changed here.
+    REQUIRE(clay_voxel_set_active_level(copy, 0) == CLAY_OK);
+    CHECK(cell_of(copy, 0, 0, 0) == r);
+    CHECK(cell_of(copy, 1, 0, 0) == g);
+    CHECK(cell_of(copy, 40, 2, -5) == b);
+    REQUIRE(clay_voxel_active_level(grid, &active) == CLAY_OK);
+    CHECK(active == fine);
+
+    // Editing the clone reaches neither the document's grid nor its history.
+    const size_t depth = undo_depth(doc);
+    const size_t source_fine = level_count_of(grid, fine);
+    const size_t source_coarse = level_count_of(grid, 0);
+    size_t source_pass_cells = 0;
+    REQUIRE(clay_voxel_sculpt_layer_cell_count(grid, 0, &source_pass_cells) == CLAY_OK);
+    REQUIRE(clay_voxel_set_active_level(copy, fine) == CLAY_OK);
+    set_cell(copy, 20, 20, 20, r);
+    const std::int32_t lo[3] = {-4, -4, -4}, hi[3] = {-1, -1, -1};
+    REQUIRE(clay_voxel_fill_box(copy, lo, hi, g) == CLAY_OK);
+    const std::int32_t erased[3] = {9, 9, 9};
+    REQUIRE(clay_voxel_erase(copy, erased) == CLAY_OK);
+    CHECK(undo_depth(doc) == depth);
+    CHECK(level_count_of(grid, fine) == source_fine);
+    CHECK(level_count_of(grid, 0) == source_coarse);
+    CHECK(cell_of(grid, 20, 20, 20) == 0);
+    CHECK(cell_of(grid, 9, 9, 9) == g);
+    size_t pass_cells = 0;
+    REQUIRE(clay_voxel_sculpt_layer_cell_count(grid, 0, &pass_cells) == CLAY_OK);
+    CHECK(pass_cells == source_pass_cells);
+
+    // The clone is the caller's; the source stays the document's.
+    CHECK(clay_voxel_grid_destroy(grid) == CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(clay_voxel_grid_destroy(copy) == CLAY_OK);
+    CHECK(cell_of(grid, 9, 9, 9) == g);
+
+    clay_voxel_grid* untouched = grid;
+    CHECK(clay_voxel_grid_clone(nullptr, &untouched) == CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(clay_voxel_grid_clone(grid, nullptr) == CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(untouched == grid);
+
+    clay_document_destroy(doc);
+}
+
+TEST_CASE("c voxel: the bulk read is the box walk, without the box") {
+    CGrid owned(0.1f);
+    clay_voxel_grid* grid = owned.grid;
+    const float rgb[3] = {0.4f, 0.5f, 0.6f}, other[3] = {0.9f, 0.1f, 0.1f};
+    std::int32_t a = 0, b = 0;
+    REQUIRE(clay_voxel_palette_add(grid, rgb, &a) == CLAY_OK);
+    REQUIRE(clay_voxel_palette_add(grid, other, &b) == CLAY_OK);
+
+    // An empty grid reads nothing, and says so through the count.
+    size_t count = 99;
+    REQUIRE(clay_voxel_get_occupied(grid, nullptr, nullptr, 0, &count) == CLAY_OK);
+    CHECK(count == 0);
+
+    // Sparse: four chunks far apart, so the box is mostly empty.
+    set_cell(grid, 0, 0, 0, a);
+    set_cell(grid, 1, 0, 0, b);
+    set_cell(grid, 70, -20, 5, b);
+    set_cell(grid, -33, 5, 40, a);
+    const std::int32_t lo[3] = {2, 2, 2}, hi[3] = {4, 3, 5};
+    REQUIRE(clay_voxel_fill_box(grid, lo, hi, a) == CLAY_OK);
+    check_bulk_read_is_the_box_walk(grid);
+
+    // A short buffer is retryable: the count it needs, and nothing written.
+    REQUIRE(clay_voxel_get_occupied(grid, nullptr, nullptr, 0, &count) == CLAY_OK);
+    REQUIRE(count > 1);
+    std::vector<std::int32_t> xyz(count * 3, -7), index(count, -7);
+    size_t got = 0;
+    CHECK(clay_voxel_get_occupied(grid, xyz.data(), index.data(), count - 1, &got) ==
+          CLAY_ERROR_BUFFER_TOO_SMALL);
+    CHECK(got == count);
+    CHECK(xyz[0] == -7);
+    CHECK(index[0] == -7);
+    // Either buffer alone is a read of that half.
+    REQUIRE(clay_voxel_get_occupied(grid, nullptr, index.data(), count, &got) == CLAY_OK);
+    CHECK(got == count);
+    CHECK(index[0] != -7);
+    CHECK(clay_voxel_get_occupied(grid, xyz.data(), index.data(), count, nullptr) ==
+          CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(clay_voxel_get_occupied(nullptr, nullptr, nullptr, 0, &got) ==
+          CLAY_ERROR_INVALID_ARGUMENT);
+
+    // A partially refined level: outside its region the cells are INHERITED
+    // from the parent, and the bulk read has to report them where they are.
+    const float region_lo[3] = {0.0f, 0.0f, 0.0f}, region_hi[3] = {0.5f, 0.5f, 0.5f};
+    size_t fine = 0;
+    REQUIRE(clay_voxel_add_level_region(grid, region_lo, region_hi, &fine) == CLAY_OK);
+    REQUIRE(clay_voxel_set_active_level(grid, fine) == CLAY_OK);
+    std::int32_t whole = 1;
+    REQUIRE(clay_voxel_level_is_whole(grid, fine, &whole) == CLAY_OK);
+    REQUIRE(whole == 0);
+    set_cell(grid, 5, 5, 5, b);
+    check_bulk_read_is_the_box_walk(grid);
 }

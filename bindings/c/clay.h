@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 122
+#define CLAY_ABI_MINOR 123
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -5395,6 +5395,50 @@ clay_voxel_grid* clay_voxel_grid_create(float voxel_size);
  * document layer is owned by that document: this returns
  * CLAY_ERROR_INVALID_ARGUMENT and leaves the document untouched. */
 clay_result clay_voxel_grid_destroy(clay_voxel_grid* grid);
+/* A deep copy of `src` into a grid the CALLER owns, from an owned or a borrowed
+ * handle alike: every resolution level, the active level, the palette and the
+ * sculpt layers. Free it with clay_voxel_grid_destroy — on the clone that is
+ * obeyed even when the source was a document layer's, whose own destroy is
+ * still refused. Added at ABI 0.123.0 (issue #658).
+ *
+ * This is how a borrowed grid leaves the interface thread. Before it, the only
+ * route was a clay_voxel_get per cell of the occupied BOX — empty cells
+ * included, the active level only, the sculpt layers dropped — rebuilt on the
+ * worker with clay_voxel_set. The clone is one container copy, sized by the
+ * chunks that hold material rather than by the box.
+ *
+ * WHAT IS NOT COPIED, deliberately. The clone is in no document: edits to it
+ * reach neither the source nor the document's undo history, and
+ * clay_document_save does not write it. A sculpt layer that is RECORDING in
+ * the source arrives closed (clay_voxel_recording_sculpt_layer reads 0), since
+ * "the next edit belongs to this pass" describes the source's session rather
+ * than its cells; its record, strength and visibility arrive intact. A dirty
+ * chunk drain in progress on the source handle stays there: the clone's dirty
+ * set is EVERY occupied chunk, as a grid read from a file has, because nothing
+ * has drawn it yet. clay_voxel_change_count starts at 0.
+ *
+ * THREADING. Cloning is a READ of the source, on the footing
+ * clay_mesh_sculptor_create documents: it touches no document state, and
+ * clay_last_error is per-thread. A clone of an OWNED grid may run on any
+ * thread. A clone of a BORROWED grid may run on a worker against a const
+ * document, and is NOT safe concurrently with a mutating clay_document_* /
+ * clay_voxel_* call on that document — the host owes that serialization, and
+ * a grid edited while it is copied produces a copy of neither state rather
+ * than a refused call. Calls on ONE handle must be serialized by the host, as
+ * with every handle here.
+ *
+ * ONE MORE HAZARD, and it is easy to miss: two READERS of the same grid can
+ * race. clay_voxel_bounds (and the raycast and repair calls that read the
+ * bounds) fill a cache on the grid lazily, so a const read on a grid whose
+ * cache is cold WRITES it, and a clone running concurrently copies those
+ * fields while they are written. Before a worker clones a borrowed grid,
+ * either warm the cache — one clay_voxel_bounds on the source, on the thread
+ * that owns the document — after which those reads are pure reads, or keep
+ * every other read of the source off the interface thread until the clone
+ * returns. Cloning on the interface thread itself has neither problem, and at
+ * a copy of the material chunks it is cheap enough to (0.07 ms for 89k
+ * cells). The clone's own cache is cold and belongs to the clone. */
+clay_result clay_voxel_grid_clone(const clay_voxel_grid* src, clay_voxel_grid** out_owned);
 
 /* Adds a voxel layer and borrows its grid. A voxel layer carries no SDF
  * content, so clay_add_item and clay_layer_add_item do not apply to it.
@@ -11428,6 +11472,36 @@ clay_result clay_voxel_repair_fill_voids(clay_voxel_grid* grid, const clay_mask*
 
 clay_result clay_voxel_occupied_count(const clay_voxel_grid* grid, size_t* out_count);
 
+/* Every occupied cell of the ACTIVE level and its palette index — the read
+ * counterpart to clay_voxel_set_many. Added at ABI 0.123.0 (issue #658).
+ *
+ * out_xyz receives count*3 int32 values and out_index count values, in the
+ * same ORDER: ascending z, then y, then x, which is the order a box walk with
+ * x innermost visits them. The order is a promise, so two reads of an
+ * unchanged grid agree element for element.
+ *
+ * Size-query pattern: with both buffers NULL, *out_count receives the count
+ * (clay_voxel_occupied_count's) and no cell is walked. Either buffer may be
+ * NULL on its own to read only that half. `capacity` is in CELLS; a capacity
+ * below the count is CLAY_ERROR_BUFFER_TOO_SMALL with the needed count in
+ * *out_count and nothing written. out_count is required.
+ *
+ * The cost follows the chunks, not the box: it walks the 32^3-cell chunks that
+ * hold material, so two cells far apart are two chunks rather than every empty
+ * cell between them, then sorts into the order above. Measured on an M-series
+ * host, a 3-cell-thick sphere shell: 31k cells in 1.1 ms, 89k in 4.1 ms, about
+ * two thirds of it the sort. A clone of the same 89k-cell grid is 0.07 ms, so
+ * to take a grid OFF the interface thread, clone it there and read the clone
+ * on the worker. On a partially refined level the cells the level
+ * INHERITS from its parent are reported where they are, exactly as
+ * clay_voxel_get reads them. Other levels are not read: switch the active
+ * level, or clone the grid and switch the clone's.
+ *
+ * THREADING as clay_voxel_grid_clone above: a read, safe on a worker while the
+ * document is const, and touching no cache. */
+clay_result clay_voxel_get_occupied(const clay_voxel_grid* grid, int32_t* out_xyz,
+                                    int32_t* out_index, size_t capacity, size_t* out_count);
+
 /* Cell writes that actually CHANGED a cell, since the grid was constructed.
  *
  * Why this exists: an edit that is entirely legal and entirely without effect
@@ -11601,10 +11675,33 @@ clay_result clay_voxel_mesh_quads(const clay_voxel_grid* grid, const clay_quad_p
  * how a caller assembles a sculpt one entry at a time by hand. clay_voxel_to_layer does NOT need that: it converts at index 0, whose
  * volume already carries every entry's colour per sample.
  *
- * Free with clay_item_destroy; placing it copies it, as every item does. */
+ * Free with clay_item_destroy; placing it copies it, as every item does.
+ *
+ * THREADING, on the footing clay_mesh_sculptor_create documents. The
+ * conversion is a READ of the grid and writes nothing but the new item: it
+ * reads cells, never the bounds cache clay_voxel_grid_clone warns about.
+ *  - On an OWNED grid it touches no document, so it may run on any thread.
+ *    This is the shape to use for a responsive grid-to-field crossing:
+ *    clay_voxel_grid_clone on the interface thread, this on a worker against
+ *    the clone, then clay_add_item / clay_layer_add_item back on the interface
+ *    thread. The clone costs a copy of the material chunks; the conversion is
+ *    the expensive half and it is the half that leaves.
+ *  - On a BORROWED grid it is a read of the document: it may run on a worker
+ *    against a const document, and is NOT safe concurrently with a mutating
+ *    clay_document_* / clay_voxel_* call. The host owes that serialization,
+ *    and a grid edited mid-conversion yields a volume of neither state rather
+ *    than a refused call — which is why the clone is the recommended route.
+ * Calls on ONE grid handle must be serialized by the host, as everywhere. */
 clay_result clay_item_volume_from_voxels(const clay_voxel_grid* grid, int32_t blur, int32_t index,
                                          clay_item** out_item);
 
+/* THREADING: this ADDS A LAYER, so it mutates the document and belongs on the
+ * thread that owns it, serialized with every other clay_document_* call. The
+ * grid argument is only read, and may be a clone (clay_voxel_grid_clone): a
+ * host that wants the conversion itself off that thread converts the clone with
+ * clay_item_volume_from_voxels at index 0 on a worker, then on this thread
+ * adds the layer (clay_add_sdf_layer) and places the item, bracketed with
+ * clay_document_begin_undo_group so it stays one undo as this call is. */
 clay_result clay_voxel_to_layer(clay_document* doc, const clay_voxel_grid* grid, const char* name,
                                 int32_t blur, clay_layer_id* out_layer);
 

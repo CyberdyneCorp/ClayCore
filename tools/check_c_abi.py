@@ -864,6 +864,27 @@ def voxel_ownership_exercise(lib, doc) -> list[str]:
     index = ctypes.c_int32(0)
     if lib.clay_voxel_get(grid, cells(1, 2, 3), ctypes.byref(index)) != 0 or index.value != 1:
         errors.append("the refused destroy lost the edit that was already made")
+    errors += voxel_clone_exercise(lib, grid)
+    return errors
+
+
+def voxel_clone_exercise(lib, borrowed) -> list[str]:
+    """A clone of a borrowed grid is the caller's (#658), and the bulk read
+    hands back its one cell through the size-query pattern."""
+    errors = []
+    clone = ctypes.c_void_p(0)
+    if lib.clay_voxel_grid_clone(borrowed, ctypes.byref(clone)) != 0 or not clone.value:
+        return ["clay_voxel_grid_clone failed on a borrowed grid"]
+    count = ctypes.c_size_t(0)
+    if lib.clay_voxel_get_occupied(clone, None, None, 0, ctypes.byref(count)) != 0 \
+            or count.value != 1:
+        errors.append(f"clay_voxel_get_occupied counted {count.value} cells, not 1")
+    xyz, index = (ctypes.c_int32 * 3)(), (ctypes.c_int32 * 1)()
+    if lib.clay_voxel_get_occupied(clone, xyz, index, 1, ctypes.byref(count)) != 0 \
+            or tuple(xyz) != (1, 2, 3) or index[0] != 1:
+        errors.append(f"clay_voxel_get_occupied read {tuple(xyz)} = {index[0]}, not (1, 2, 3) = 1")
+    if lib.clay_voxel_grid_destroy(clone) != 0:
+        errors.append("clay_voxel_grid_destroy refused a clone, which the caller owns")
     return errors
 
 
@@ -1742,6 +1763,9 @@ def ffi_exercise(lib_path: str) -> list[str]:
     lib.clay_voxel_set_brush.argtypes = [ctypes.c_void_p, cell_p, brush_p, ctypes.c_int32]
     lib.clay_voxel_sculpt_smooth.argtypes = [ctypes.c_void_p, cell_p, brush_p]
     lib.clay_voxel_occupied_count.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_size_t)]
+    lib.clay_voxel_grid_clone.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
+    lib.clay_voxel_get_occupied.argtypes = [ctypes.c_void_p, cell_p, cell_p, ctypes.c_size_t,
+                                            ctypes.POINTER(ctypes.c_size_t)]
     lib.clay_voxel_bounds.argtypes = [ctypes.c_void_p, cell_p, cell_p,
                                       ctypes.POINTER(ctypes.c_int32)]
     lib.clay_voxel_flood_select.argtypes = [ctypes.c_void_p, cell_p, ctypes.c_int32, cell_p,
