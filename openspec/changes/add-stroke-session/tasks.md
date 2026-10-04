@@ -22,3 +22,8 @@
 
 ## Docs
 - [x] `docs/07-brushes-and-features.md`: the session, its rule, and the cross-binding table.
+
+## Follow-up before 0.126.0 is tagged
+- [x] `clay_multires_sculptor_apply_stroke_tx` takes a nullable `clay_multires_delta* record`, after `defer_normals` as in `clay_multires_sculptor_apply_stroke_recorded`. Changed in place: 0.126.0 is not tagged, so the ABI line stays 0.126.0. The record is part of the binding, is continued across the gesture's calls (both halves), and is checked, with the report, before the session's stamps are taken.
+- [x] `tests/unit/test_c_multires_delta.cpp`: a session-fed stroke records the whole-path call's record and reverts bit for bit, with and without an active pass; a NULL record stamps the same; the record is part of the binding; a refusal (another pass active, a malformed report) loses no stamps. Mutation check: ignoring the record, checking it after the stamps are taken, dropping it from the binding, and checking the report afterwards each fail a new case.
+- [x] `docs/05`, `docs/07` § 5 and § 8d.

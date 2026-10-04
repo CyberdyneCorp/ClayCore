@@ -1189,6 +1189,15 @@ rebuilt descriptor with the same values matches), is refused. The call after
 gesture is open on its target: a grab's carried region, the deferred normals,
 and — for SDF, voxel and mask targets — the owning document's undo group,
 which is what makes a gesture one undo step.
+The sculptor consumers take the record their whole-path recorded call takes: a
+`clay_mesh_deltas` for a mesh, a `clay_dynamic_delta` for an adaptive surface,
+and a `clay_multires_delta` for a hierarchy. Passing one record to every call of
+the gesture (NULL for none; which one is part of the binding) gives the record
+the whole-path call gives, both of a hierarchy's halves included, so one
+`clay_multires_delta_revert` takes the gesture back on every level. The adaptive
+and multires records are checked before the call takes its stamps: a refusal
+(`CLAY_ERROR_SNAPSHOT_MISMATCH`, e.g. another sculpt pass made active
+mid-gesture) loses none of them.
 The mesh consumers are the same code as their whole-path calls
 (`MeshStrokeGesture`, `MultiresStrokeGesture`, `DynamicStrokeGesture`): a stroke
 per call would re-gather a grab's region at every batch and land elsewhere.
@@ -2464,8 +2473,10 @@ write: the base half (`MultiresDelta`: cage positions at level 0, a level's own
 coefficients above it) and the layer half (`SculptLayerDelta`: one pass's
 coefficients and mask weights).
 
-Three calls capture into it. `clay_multires_sculptor_stamp_recorded` and
-`_apply_stroke_recorded` are the plain sculptor's calls with a record; the plain
+Four calls capture into it. `clay_multires_sculptor_stamp_recorded`,
+`_apply_stroke_recorded` and the stroke-session consumer `_apply_stroke_tx` (§ 5,
+one record continued across every call of the gesture) are the plain sculptor's
+calls with a record; the plain
 sculptor writes the **active pass** when there is one, so the record takes
 whichever half was written and a host does not have to know in advance which.
 `clay_multires_sculpt_layer_stroke_commit_into` closes a layered transaction and

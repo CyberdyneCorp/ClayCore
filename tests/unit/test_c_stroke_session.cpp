@@ -928,7 +928,8 @@ TEST_CASE("c stroke session: a multires gesture is the whole-path gesture") {
             clay_multires_stamp_report report{};
             report.struct_size = sizeof(report);
             REQUIRE(clay_multires_sculptor_apply_stroke_tx(pieces.sculptor, tx, &brush, nullptr,
-                                                           nullptr, 1, &n, &report) == CLAY_OK);
+                                                           nullptr, 1, nullptr, &n,
+                                                           &report) == CLAY_OK);
             CHECK(report.level == 2);
             applied += n;
         });
@@ -1042,28 +1043,29 @@ TEST_CASE("c stroke session: a sculptor's descriptors are part of the binding") 
         clay_stroke_tx* tx = begin(preset);
         REQUIRE(clay_stroke_tx_append(tx, samples.data(), 15, nullptr, nullptr) == CLAY_OK);
         std::size_t n = 0;
-        REQUIRE(clay_multires_sculptor_apply_stroke_tx(h.sculptor, tx, &brush, nullptr, nullptr,
-                                                       1, &n, nullptr) == CLAY_OK);
+        REQUIRE(clay_multires_sculptor_apply_stroke_tx(h.sculptor, tx, &brush, nullptr, nullptr, 1,
+                                                       nullptr, &n, nullptr) == CLAY_OK);
         REQUIRE(n > 0);
         REQUIRE(clay_stroke_tx_append(tx, samples.data() + 15, 15, nullptr, nullptr) == CLAY_OK);
         const std::vector<float> held = h.level();
         clay_mesh_brush_desc stronger = brush;
         stronger.strength = 0.8f;
         n = 7;
-        CHECK(clay_multires_sculptor_apply_stroke_tx(h.sculptor, tx, &stronger, nullptr, nullptr,
-                                                     1, &n, nullptr) ==
-              CLAY_ERROR_INVALID_ARGUMENT);
+        CHECK(clay_multires_sculptor_apply_stroke_tx(h.sculptor, tx, &stronger, nullptr, nullptr, 1,
+                                                     nullptr, &n,
+                                                     nullptr) == CLAY_ERROR_INVALID_ARGUMENT);
         CHECK(n == 0);
         clay_mesh_frame frame{};
         frame.struct_size = sizeof(frame);
         frame.rotation[3] = 1.0f;
         frame.scale = 2.0f;
         CHECK(clay_multires_sculptor_apply_stroke_tx(h.sculptor, tx, &brush, nullptr, &frame, 1,
-                                                     &n, nullptr) == CLAY_ERROR_INVALID_ARGUMENT);
+                                                     nullptr, &n,
+                                                     nullptr) == CLAY_ERROR_INVALID_ARGUMENT);
         CHECK(n == 0);
         CHECK(same_floats(h.level(), held));
-        REQUIRE(clay_multires_sculptor_apply_stroke_tx(h.sculptor, tx, &brush, nullptr, nullptr,
-                                                       1, &n, nullptr) == CLAY_OK);
+        REQUIRE(clay_multires_sculptor_apply_stroke_tx(h.sculptor, tx, &brush, nullptr, nullptr, 1,
+                                                       nullptr, &n, nullptr) == CLAY_OK);
         CHECK(n > 0);
         clay_stroke_tx_destroy(tx);
     }

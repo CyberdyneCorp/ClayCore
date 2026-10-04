@@ -10285,17 +10285,37 @@ clay_result clay_multires_sculptor_apply_stroke(clay_multires_sculptor* sculptor
                                                 int32_t defer_normals, size_t* out_applied,
                                                 clay_multires_stamp_report* out_report);
 
-/* clay_multires_sculptor_apply_stroke, fed by a stroke session (ABI
+/* clay_multires_sculptor_apply_stroke_recorded, fed by a stroke session (ABI
  * 0.126.0). The gesture begins the level record MeshBrush::Layer measures
  * against once, at its first stamp, and carries a grab's region and a
  * snakehook's anchor to the close, as the whole-path call does within one
- * call. `out_report` describes this call. */
+ * call. `out_report` describes this call.
+ *
+ * `record` (a clay_multires_delta, declared below) may be NULL for an
+ * unrecorded gesture, which stamps exactly what a recorded one does. Recorded
+ * or not, and into which record, is part of the binding: a later call naming
+ * another record, or NULL after a record, is CLAY_ERROR_INVALID_ARGUMENT.
+ * Every call of the gesture continues the same record, as consecutive
+ * clay_multires_sculptor_stamp_recorded calls do, so one record across the
+ * gesture is ONE undo step holding both halves -- the base detail and, with an
+ * active sculpt pass, that pass -- and equals the record
+ * clay_multires_sculptor_apply_stroke_recorded makes for the whole path.
+ *
+ * The refusals come BEFORE the session's stamps are taken, so a refused call
+ * loses none of them and the next accepted call applies them: a malformed
+ * report is CLAY_ERROR_INVALID_ARGUMENT, and a record the hierarchy no longer
+ * accepts -- another hierarchy, a changed level structure, or a DIFFERENT
+ * sculpt pass made active mid-gesture while the record holds one -- is
+ * CLAY_ERROR_SNAPSHOT_MISMATCH, with `*out_applied` 0 and nothing stamped. */
+typedef struct clay_multires_delta clay_multires_delta;
 clay_result clay_multires_sculptor_apply_stroke_tx(clay_multires_sculptor* sculptor,
                                                    clay_stroke_tx* tx,
                                                    const clay_mesh_brush_desc* brush,
                                                    const clay_mask* mask,
                                                    const clay_mesh_frame* mesh_to_world,
-                                                   int32_t defer_normals, size_t* out_applied,
+                                                   int32_t defer_normals,
+                                                   clay_multires_delta* record,
+                                                   size_t* out_applied,
                                                    clay_multires_stamp_report* out_report);
 
 /* -- changed-block transport -------------------------------------------------
@@ -10806,8 +10826,9 @@ clay_result clay_multires_sculpt_layer_stroke_cancel(clay_multires_sculpt_layer_
  * same spot record the same entry count and the same encoded bytes.
  *
  * THREE WAYS IN, ONE RECORD:
- *   - clay_multires_sculptor_stamp_recorded and _apply_stroke_recorded: the
- *     plain sculptor. It writes the stack's ACTIVE sculpt pass when there is
+ *   - clay_multires_sculptor_stamp_recorded, _apply_stroke_recorded and the
+ *     stroke-session consumer _apply_stroke_tx (ABI 0.126.0, the record
+ *     continued across every call of the gesture): the plain sculptor. It writes the stack's ACTIVE sculpt pass when there is
  *     one and the base when there is not, and the record takes whichever half
  *     was written -- a host does not have to know in advance;
  *   - clay_multires_sculpt_layer_stroke_commit_into: the transaction's record,
@@ -10867,7 +10888,8 @@ clay_result clay_multires_sculpt_layer_stroke_cancel(clay_multires_sculpt_layer_
  * and a capture into a record is a call on that record too. A replay only
  * READS its record. */
 
-typedef struct clay_multires_delta clay_multires_delta;
+/* typedef struct clay_multires_delta clay_multires_delta; -- declared above
+ * clay_multires_sculptor_apply_stroke_tx, the first call that takes one. */
 
 /* An empty, unbound record. Destroy with clay_multires_delta_destroy; NULL is
  * a no-op. */
