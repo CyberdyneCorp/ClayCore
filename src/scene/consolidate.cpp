@@ -545,7 +545,7 @@ bool patchable_volume(const Node& n, const Layer& layer) {
            n.rounding == 0.0f && !n.gated() && n.repeat.type == kernel::crepeat_none &&
            identity_transform(n.xform) && n.scale_axes.x == 1.0f &&
            n.scale_axes.y == 1.0f && n.scale_axes.z == 1.0f &&
-           (!n.mirror || (layer.mirror_axes == 0 && layer.radial_count < 2));
+           effective_mirror_axes(n, layer) == 0 && (!n.mirror || layer.radial_count < 2);
 }
 
 bool include_local_warps(const Node& n, math::Aabb& core) {

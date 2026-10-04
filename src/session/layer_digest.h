@@ -177,6 +177,7 @@ inline void mix_node(std::uint64_t& h, const scene::SdfContent& content, scene::
     mix_f(h, n->rounding);
     mix_v3(h, n->color);
     mix(h, n->mirror);
+    mix(h, n->own_mirror_axes);
     mix_points(h, n->stroke);
     mix_f(h, n->stroke_blend_k);
     mix(h, n->stroke_closed);

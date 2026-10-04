@@ -1,0 +1,11 @@
+## Implementation
+- [x] `Node::own_mirror_axes` with the `kMirrorAxesInherit` default, and `effective_mirror_axes` as the one definition.
+- [x] Compiler (`emit_item`), bounds (`expand_by_mirror_copies`), cull pad (seam term, `CullPadTerms::own_mirror_axes`, `layer_symmetry_multiplicity`), cull index, picking's selection bound, consolidation's patch test and the layer digest read it.
+- [x] `SetNodeMirrorCmd` with its applier, journal tag, and entry in `command_edited_item`.
+- [x] Scene / container minor 19 -> 20: node byte appended and gated; `layer_blocking_minor` refuses below 20; distinct C ABI refusal message.
+- [x] C ABI 0.120.1 -> 0.121.0: `CLAY_MIRROR_AXES_INHERIT`, `clay_item_set_mirror_axes`, `clay_item_mirror_axes`, `clay_layer_set_node_mirror`, `clay_layer_node_mirror`. Version moved in `CMakeLists.txt`, `bindings/c/clay.h` and `pyproject.toml`.
+- [x] Move / magnify: per-item image sets (`DragImageSets`), `PreparedMove::own_mirror_axes`, `prepared_own_mirror_axes`; reach in `clay_layer_move_surface`, `clay_layer_magnify_surface` and the live move transaction.
+- [x] pyclay: `Layer.add(mirror_axes=)`, `Layer.set_node_mirror`, `Layer.node_mirror`.
+- [x] Tests (`tests/unit/test_item_mirror_axes.cpp`, `test_pyclay.py`): old documents load inheriting and evaluate unchanged, and write 19's bytes; own axes round-trip and block every minor below 20; per-item axes override the layer; switching the layer mirror leaves own-axes items alone; the brick cache sees an own-axes twin; undo/redo of the placed-node setter; refusals; drag images; chain-pad multiplicity.
+- [x] Mutation check: reverting each of `effective_mirror_axes`, the bound, the drag image selection, the node byte and the cull term to the old behaviour fails the matching tests.
+- [x] `docs/05`, `docs/07`, the `clay.h` notes and `brush/move.h` state the rule and the drag behaviour.

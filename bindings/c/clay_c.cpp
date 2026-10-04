@@ -784,6 +784,20 @@ clay_result check_palette_index(std::int32_t index, std::uint8_t* out) {
     return CLAY_OK;
 }
 
+// An item's own mirror axes (#664): CLAY_MIRROR_X|Y|Z OR'd, 0, or the inherit
+// sentinel. Kept apart from check_mirror_axes because the sentinel is only
+// meaningful here, and accepting it for a voxel edit would be a control that
+// means nothing there.
+clay_result check_own_mirror_axes(std::uint8_t axes) {
+    static_assert(CLAY_MIRROR_AXES_INHERIT == scene::kMirrorAxesInherit,
+                  "the C sentinel and the engine's must be one value");
+    constexpr unsigned kAll = CLAY_MIRROR_X | CLAY_MIRROR_Y | CLAY_MIRROR_Z;
+    if (axes == scene::kMirrorAxesInherit || (axes & ~kAll) == 0) return CLAY_OK;
+    return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                "mirror axes outside CLAY_MIRROR_X|Y|Z and not CLAY_MIRROR_AXES_INHERIT: " +
+                    std::to_string(axes));
+}
+
 clay_result check_mirror_axes(std::int32_t axes, std::uint8_t* out) {
     constexpr std::int32_t kAll = CLAY_MIRROR_X | CLAY_MIRROR_Y | CLAY_MIRROR_Z;
     if (axes < 0 || (axes & ~kAll) != 0)
@@ -5337,6 +5351,11 @@ eval::DeviceBuffer brick_slot(const eval::DeviceBuffer& whole, std::size_t at, s
 // SENTENCES: a host reading "a layer carries a composition" about a layer that
 // carries a hierarchy would go and look at the wrong thing.
 std::string minor_refusal(const clay_document* doc, std::uint16_t at, clay_layer_id blocking) {
+    // At 19 the one scene field that blocks is an item's own mirror axes
+    // (#664), which layer_blocking_minor checks first at every minor below 20.
+    if (at < 20 && scene::layer_blocking_minor(doc->doc.document, 19) == blocking)
+        return "an item carries its own mirror axes, which this format minor cannot say: "
+               "writing it there would hand the item the layer's mirror copies instead";
     if (scene::layer_blocking_minor(doc->doc.document, at) == blocking)
         return "a layer carries a composition that this format minor cannot say: writing it "
                "there would turn a cutting layer into a unioning one";
@@ -6256,6 +6275,42 @@ clay_result clay_layer_node_color(const clay_document* doc, clay_layer_id layer,
     return CLAY_OK;
 }
 
+clay_result clay_layer_set_node_mirror(clay_document* doc, clay_layer_id layer,
+                                       clay_node_id node, int32_t mirror, uint8_t axes) {
+    clay_result r = check_own_mirror_axes(axes);
+    if (r != CLAY_OK) return r;
+    // A group's flag is never read by evaluation (emit_item copies items), so
+    // a value there would be a control that does not act. A miss falls
+    // through to apply_edit's NOT_FOUND, as the op/blend setter's does.
+    const scene::Node* target = peek_node(doc, layer, node);
+    if (target && target->is_group)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "a group takes no mirror: set it on the items inside");
+    return apply_edit(doc,
+                      scene::Command{scene::SetNodeMirrorCmd{layer, node, mirror >= 0, axes}},
+                      "node not found");
+}
+
+clay_result clay_layer_node_mirror(const clay_document* doc, clay_layer_id layer,
+                                   clay_node_id node, int32_t* out_mirror, uint8_t* out_axes,
+                                   uint8_t* out_effective_axes) {
+    const scene::Node* n = nullptr;
+    clay_result r = find_node(doc, layer, node, &n);
+    if (r != CLAY_OK) return r;
+    if (n->is_group)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "a group takes no mirror: ask the items inside");
+    if (out_mirror) *out_mirror = n->mirror ? 1 : -1;
+    if (out_axes) *out_axes = n->own_mirror_axes;
+    if (out_effective_axes) {
+        // find_node resolved the layer, so it is there.
+        const scene::Layer* l = doc->doc.document.find_layer(layer);
+        *out_effective_axes = scene::item_is_feathered_replace(*n)
+                                  ? std::uint8_t{0}
+                                  : scene::effective_mirror_axes(*n, *l);
+    }
+    return CLAY_OK;
+}
+
 clay_result clay_layer_node_count(const clay_document* doc, clay_layer_id layer,
                                   size_t* out_count) {
     if (!doc || !out_count) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or count");
@@ -7146,6 +7201,20 @@ clay_result clay_item_set_mirror(clay_item* item, int32_t mirror) {
     // One rule with clay_item_desc.mirror: negative excludes, 0 and 1 both
     // follow the layer's mirror — which is also what a builder starts as.
     item->node.mirror = mirror >= 0;
+    return CLAY_OK;
+}
+
+clay_result clay_item_set_mirror_axes(clay_item* item, uint8_t axes) {
+    if (!item) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null item");
+    clay_result r = check_own_mirror_axes(axes);
+    if (r != CLAY_OK) return r;
+    item->node.own_mirror_axes = axes;
+    return CLAY_OK;
+}
+
+clay_result clay_item_mirror_axes(const clay_item* item, uint8_t* out_axes) {
+    if (!item || !out_axes) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null item or out_axes");
+    *out_axes = item->node.own_mirror_axes;
     return CLAY_OK;
 }
 
@@ -8859,10 +8928,13 @@ clay_result move_surface_impl(clay_document* doc, clay_layer_id layer, const flo
     const float pull = std::sqrt(displacement[0] * displacement[0] +
                                  displacement[1] * displacement[1] +
                                  displacement[2] * displacement[2]);
+    // The dragged items' OWN mirror axes join the layer's (#664): an item that
+    // kept a twin the layer's mirror no longer names moves it too.
     std::vector<math::Aabb> reach;
     for (const brush::DragImage& image :
          brush::drag_images(*l, kernel::cf3(centre[0], centre[1], centre[2]),
-                            kernel::cf3(displacement[0], displacement[1], displacement[2])))
+                            kernel::cf3(displacement[0], displacement[1], displacement[2]),
+                            brush::prepared_own_mirror_axes(prepared)))
         reach.push_back(math::Aabb{image.centre, image.centre}.dilated(radius + pull));
 
     const kernel::cfloat3 world_pull =
@@ -9014,7 +9086,8 @@ clay_result clay_layer_magnify_surface(clay_document* doc, clay_layer_id layer,
     std::vector<math::Aabb> reach;
     for (const brush::DragImage& image :
          brush::drag_images(*l, kernel::cf3(centre[0], centre[1], centre[2]),
-                            kernel::cf3(0.0f, 0.0f, 0.0f)))
+                            kernel::cf3(0.0f, 0.0f, 0.0f),
+                            brush::prepared_own_mirror_axes(prepared)))
         reach.push_back(math::Aabb{image.centre, image.centre}.dilated(radius));
 
     GestureResolver resolver;

@@ -91,6 +91,19 @@ std::optional<Command> apply_one(Document& doc, const SetColorCmd& c) {
         [](Node& n, const SetColorCmd& cc) { n.color = cc.color; });
 }
 
+std::optional<Command> apply_one(Document& doc, const SetNodeMirrorCmd& c) {
+    return apply_field(
+        doc, c,
+        [](SetNodeMirrorCmd& inv, const Node& n) {
+            inv.mirror = n.mirror;
+            inv.own_mirror_axes = n.own_mirror_axes;
+        },
+        [](Node& n, const SetNodeMirrorCmd& cc) {
+            n.mirror = cc.mirror;
+            n.own_mirror_axes = cc.own_mirror_axes;
+        });
+}
+
 std::optional<Command> apply_one(Document& doc, const SetOpBlendCmd& c) {
     return apply_field(
         doc, c,
@@ -514,6 +527,7 @@ EditedItem command_edited_item(const Command& cmd) {
             if constexpr (std::is_same_v<C, SetTransformCmd> ||
                           std::is_same_v<C, SetPrimCmd> || std::is_same_v<C, SetColorCmd> ||
                           std::is_same_v<C, SetOpBlendCmd> ||
+                          std::is_same_v<C, SetNodeMirrorCmd> ||
                           std::is_same_v<C, SetDeformersCmd> ||
                           std::is_same_v<C, AppendStrokeCmd> ||
                           std::is_same_v<C, TrimStrokeCmd> ||
@@ -996,6 +1010,11 @@ void write_node(Writer& w, const Node& n) {
     // the item degrades to its UNIFORM scale — a squashed cylinder comes back
     // round rather than missing, which is the recoverable direction.
     if (w.minor >= 14) w.pod(n.scale_axes);
+    // The item's OWN MIRROR AXES, from minor 20 (#664), appended last for the
+    // same reason. Below 20 there is nothing to drop: serialize_document has
+    // already refused a document holding an item that carries its own axes
+    // (layer_blocking_minor), so every node reaching here inherits.
+    if (w.minor >= 20) w.pod(n.own_mirror_axes);
 }
 
 std::vector<Deformer> read_deformers(Reader& r) {
@@ -1179,6 +1198,10 @@ Node read_node(Reader& r) {
     // exactly what those documents already meant, so an older file's field is
     // unchanged rather than reinterpreted.
     if (r.minor >= 14) n.scale_axes = r.pod<kernel::cfloat3>();
+    // Minor 19 and below had no per-item axes: every item followed the layer,
+    // which is exactly what the inherit default means, so an older document
+    // evaluates as it was saved rather than being reinterpreted.
+    if (r.minor >= 20) n.own_mirror_axes = r.pod<std::uint8_t>();
     return n;
 }
 
@@ -1366,6 +1389,7 @@ enum class Tag : std::uint8_t {
     // value, and inserting one would renumber every tag after it.
     SetLayerRadial,
     SetLayerComposition,
+    SetNodeMirror,
 };
 
 struct SerializeVisitor {
@@ -1411,6 +1435,16 @@ struct SerializeVisitor {
         w.pod(c.layer);
         w.pod(c.node);
         w.pod(c.color);
+    }
+    void operator()(const SetNodeMirrorCmd& c) {
+        // Ungated: a whole new TAG, which a build that predates it refuses in
+        // deserialize's default arm rather than misreads (see
+        // SetLayerComposition below).
+        w.pod(Tag::SetNodeMirror);
+        w.pod(c.layer);
+        w.pod(c.node);
+        w.pod(c.mirror);
+        w.pod(c.own_mirror_axes);
     }
     void operator()(const SetOpBlendCmd& c) {
         w.pod(Tag::SetOpBlend);
@@ -1710,6 +1744,15 @@ std::optional<Command> deserialize(const std::uint8_t* data, std::size_t size) {
             cmd = c;
             break;
         }
+        case Tag::SetNodeMirror: {
+            SetNodeMirrorCmd c;
+            c.layer = r.pod<LayerId>();
+            c.node = r.pod<NodeId>();
+            c.mirror = r.pod<bool>();
+            c.own_mirror_axes = r.pod<std::uint8_t>();
+            cmd = c;
+            break;
+        }
         case Tag::SetLayerName: {
             SetLayerNameCmd c;
             c.id = r.pod<LayerId>();
@@ -1729,7 +1772,30 @@ std::optional<Command> deserialize(const std::uint8_t* data, std::size_t size) {
     return cmd;
 }
 
+namespace {
+
+// Does this layer hold an item carrying its OWN mirror axes — the one node
+// field minor 19 and below cannot say (#664)? Groups are included: a group's
+// flag is not read by evaluation, but it is stored, and a writer that dropped
+// it would load something other than what was saved.
+bool holds_own_mirror_axes(const Layer& l) {
+    if (l.kind != LayerKind::Sdf || !l.sdf) return false;
+    for (const auto& [id, n] : l.sdf->nodes()) {
+        (void)id;
+        if (n.own_mirror_axes != kMirrorAxesInherit) return true;
+    }
+    return false;
+}
+
+}  // namespace
+
 LayerId layer_blocking_minor(const Document& doc, std::uint16_t minor) {
+    if (minor >= 20) return 0;
+    // Minor 20's field first, since it blocks every minor below it; the first
+    // layer in stack order holding one is named, for the reason a composition
+    // names its layer.
+    for (const Layer& l : doc.layers)
+        if (holds_own_mirror_axes(l)) return l.id;
     if (minor >= 18) return 0;
     for (const Layer& l : doc.layers) {
         if (l.kind != LayerKind::Sdf) continue;  // a non-SDF layer carries none

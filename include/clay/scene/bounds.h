@@ -328,7 +328,11 @@ float chain_pad_envelope(BlendProfile profile, std::size_t nodes);
 // count by this over-counts items that opted out of the mirror, groups and
 // feathered replaces, which is safe: the chain-pad envelope is monotone and
 // every per-item term stays clamped at its own support.
-std::size_t layer_symmetry_multiplicity(const Layer& layer);
+//
+// `item_axes` adds the axes items carry as their OWN (issue #664), unioned
+// with the layer's — CullPadTerms::own_mirror_axes is where a caller gets it.
+// Omitting it is only right for a layer no item overrides.
+std::size_t layer_symmetry_multiplicity(const Layer& layer, std::uint8_t item_axes = 0);
 
 // How far this node can drag a CHAIN's running value, which is the quantity the
 // pad below is the maximum of — and NOT the same question as how far the node's
@@ -412,6 +416,11 @@ struct CullPadTerms {
     // so the pre-#335 pad remains derivable from them alone as the ceiling
     // blend_total clamps the seam term to.
     float blend_k_seam = 0.0f;
+    // Union of the mirror axes the layer's items carry as their OWN (#664),
+    // which layer_symmetry_multiplicity adds to the layer's: an item keeping
+    // an X twin on a layer whose mirror is off still doubles its place in the
+    // chain. Raise-only (a union), so an append keeps the incremental contract.
+    std::uint8_t own_mirror_axes = 0;
 
     void raise(const CullPadTerms& o) {
         feather = kernel::cmax(feather, o.feather);
@@ -420,6 +429,7 @@ struct CullPadTerms {
         blend_k_cubic = kernel::cmax(blend_k_cubic, o.blend_k_cubic);
         blend_k_circular = kernel::cmax(blend_k_circular, o.blend_k_circular);
         blend_k_seam = kernel::cmax(blend_k_seam, o.blend_k_seam);
+        own_mirror_axes = static_cast<std::uint8_t>(own_mirror_axes | o.own_mirror_axes);
     }
     // The blend term resolved for a layer whose chain holds `n_eff` EFFECTIVE
     // contributors — node-map size times layer_symmetry_multiplicity, both
