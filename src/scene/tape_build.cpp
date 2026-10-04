@@ -139,6 +139,9 @@ struct Compiler {
     // What cull tests actually intersect against: the caller's region, wider
     // by feather_cull_pad when a feathered replace is present.
     math::Aabb cull_test;
+    // How far inside `cull_test` the samples lie: the caller's band plus the
+    // pad. A squashed item's bound is widened against it (CullSquash).
+    float cull_band_pad_ = 0.0f;
     // Reused across items so a document full of curves does not allocate a
     // fresh vector per item; only ever read between assignment and use.
     std::vector<StrokePoint> scratch_curve;
@@ -165,13 +168,32 @@ struct Compiler {
 
     void begin_cull(const CullRegion* cull_region, float pad) {
         cull = cull_region;
-        if (cull) cull_test = pad > 0.0f ? cull->region.dilated(pad) : cull->region;
+        if (!cull) return;
+        cull_test = pad > 0.0f ? cull->region.dilated(pad) : cull->region;
+        cull_band_pad_ = cull->band + pad;
     }
 
-    bool culled(const math::Aabb& bound) const {
+    // `squash` widens the bound of a placement whose field is not a distance
+    // (issue #649, bounds.h). Widening only ever keeps more, so a caller may
+    // test the plain bound first and pay for the squash only when it drops.
+    //
+    // The plain test runs first and decides every bound it does not drop, so
+    // a document with no squash pays two comparisons per dropped bound.
+    bool culled(const math::Aabb& bound, const CullSquash& squash = CullSquash{}) const {
         if (!cull) return false;
         if (bound.is_infinite()) return false;
-        return !bound.intersects(cull_test);
+        if (bound.intersects(cull_test)) return false;
+        return squash.none() ||
+               !bound.dilated(squash.dilation(cull_band_pad_)).intersects(cull_test);
+    }
+
+    // The item test of `compile_list` off the plan. A similarity -- nearly
+    // every item -- is decided inline, without the call that would only return
+    // a zero squash.
+    bool culled_item(const math::Aabb& geometry, const Node& item, const Layer& layer) const {
+        if (!culled(geometry)) return false;
+        return placed_is_similarity(layer, item) ||
+               culled(geometry, item_cull_squash(item, layer));
     }
 
     // -- emission ------------------------------------------------------------
@@ -1044,6 +1066,16 @@ struct Compiler {
 
     // -- chains --------------------------------------------------------------
 
+    // The group test of `compile_list`, from the entry when a plan supplied one
+    // and from the walk otherwise. The subtree's squash is gathered only for a
+    // group the plain bound would drop.
+    bool culled_group(const CullIndex::Entry* e, const SdfContent& content, const Node& group,
+                      const Layer& layer) const {
+        if (e) return culled(e->bound, e->squash);
+        const math::Aabb bound = node_influence_bound(content, group.id, layer);
+        return culled(bound) && culled(bound, node_cull_squash(content, group.id, layer));
+    }
+
     // Compile an ordered node list. have_acc says whether a running value is
     // already on the stack below; returns whether one is there afterwards.
     bool compile_list(const std::vector<NodeId>& ids, const SdfContent& content,
@@ -1116,16 +1148,18 @@ struct Compiler {
             // which `begin_cull` sets only where there is a region to set it
             // from -- and it is pinned by a test rather than assumed, because
             // it is an invariant of a DIFFERENT function than this one.
-            if (pruned && !(!e->local || e->bound.is_infinite() ||
-                            e->bound.intersects(cull_test))) {
+            //
+            // The squash rides on the entry for the same reason (issue #649):
+            // a squashed placement's bound is widened before it is tested, and
+            // the planned walk must widen it exactly as the unplanned one does.
+            if (pruned && e->local && culled(e->bound, e->squash)) {
                 cull_dropped = true;
                 continue;
             }
             const Node* n = e ? e->node : content.find(ids[at]);
             if (!n || !n->visible) continue;
             if (n->is_group) {
-                if ((!pruned || !cull) &&
-                    culled(e ? e->bound : node_influence_bound(content, n->id, layer))) {
+                if ((!pruned || !cull) && culled_group(e, content, *n, layer)) {
                     cull_dropped = true;
                     continue;
                 }
@@ -1144,7 +1178,8 @@ struct Compiler {
                 // A non-local item has an infinite influence bound and so can
                 // never be culled; item_influence_is_local is the single
                 // definition of that test, shared with item_influence_bound.
-                if (!pruned && cull && item_influence_is_local(*n) && culled(geometry)) {
+                if (!pruned && cull && item_influence_is_local(*n) &&
+                    culled_item(geometry, *n, layer)) {
                     cull_dropped = true;
                     continue;
                 }
@@ -1757,6 +1792,20 @@ LayerId visible_sdf_layer_above(const Document& doc, LayerId layer, std::uint32_
     return lowest;
 }
 
+namespace {
+// A plan prunes nothing without a cull region (it could only mean a pruned
+// whole-document tape) and serves only a region it was planned wide enough
+// for: one whose band is no wider than the plan's own where the document holds
+// a squashed placement, whose widening grows with the band (issue #649). A plan
+// that cannot serve the region is dropped, which costs the walk and never the
+// field.
+const CullPlan* usable_plan(const CullRegion* cull, const CullIndex* index,
+                            const CullPlan* plan) {
+    if (!cull || !index || !plan) return nullptr;
+    return plan->serves_band(cull->band) ? plan : nullptr;
+}
+}  // namespace
+
 Tape compile_document(const Document& doc, const CullRegion* cull, const CullIndex* index,
                       const CullPlan* plan) {
     Compiler c;
@@ -1767,7 +1816,7 @@ Tape compile_document(const Document& doc, const CullRegion* cull, const CullInd
     // caller can want.
     if (index && index->document() != &doc) index = nullptr;
     c.index = index;
-    c.plan = cull && index ? plan : nullptr;
+    c.plan = usable_plan(cull, index, plan);
     c.run(doc, cull);
     c.tape.compile_id = next_compile_id();
     return std::move(c.tape);
@@ -1787,7 +1836,7 @@ Tape compile_document_resumable(const Document& doc, TapeCheckpoint* out_checkpo
     // whole-document tape.
     if (index && index->document() != &doc) index = nullptr;
     c.index = index;
-    c.plan = cull && index ? plan : nullptr;
+    c.plan = usable_plan(cull, index, plan);
     c.run(doc, cull);
     c.tape.compile_id = next_compile_id();
     if (out_checkpoint) *out_checkpoint = c.checkpoint;

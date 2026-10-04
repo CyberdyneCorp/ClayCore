@@ -74,13 +74,24 @@ class CullIndex {
         NodeId id;
         math::Aabb bound;
         bool local;  // false: never culled (item_influence_is_local)
+        // How the cull widens `bound` for a squashed placement (issue #649):
+        // item_cull_squash for items, node_cull_squash for groups. Zero for
+        // every similarity, which is every node of most documents.
+        CullSquash squash;
     };
 
     // One coarse cull for a batch of compiles. `region` MUST contain every
     // cull region the plan is later used with (dilate each by its band
     // first, exactly as the per-brick CullRegion is built); the plan itself
     // applies the feather pad, as the per-brick test does.
-    CullPlan plan(const math::Aabb& region) const;
+    //
+    // `band` is the widest CullRegion::band those regions carry. A squashed
+    // placement's widening grows with it, so the coarse cull widens each chain
+    // that holds one by its widest entry's widening at this band. A compile
+    // handed the plan with a wider band drops the plan and walks (see
+    // CullPlan::serves_band), so a caller that passes too little loses speed
+    // on a squashed document, never an item.
+    CullPlan plan(const math::Aabb& region, float band = 0.0f) const;
 
     // -- extending an index after an append --------------------------------
     //
@@ -142,8 +153,8 @@ class CullIndex {
         // scan: an entry that can never be culled -- non-local, or an infinite
         // bound -- is stored as an infinite box, so the three-clause survive
         // test collapses to one box intersection; and 24 B a piece against the
-        // 40 B Entry lets the scan stream bounds rather than stride over the
-        // node pointers and ids it does not read.
+        // 48 B Entry (40 B when this was measured) lets the scan stream bounds
+        // rather than stride over the node pointers and ids it does not read.
         //
         // Both together are 8x on the scan itself at 50 000 items and 5.3x on
         // `plan` around it, and the gap between those two numbers is the
@@ -160,6 +171,11 @@ class CullIndex {
         // attacking.
         std::vector<math::Aabb> probes;
         bool prunable;               // no feathered volume replace among the items
+        // The widest squash among the entries: the coarse scan widens its test
+        // region by this rather than each probe by its own, which keeps the
+        // packed scan one box test per entry and survival a superset of every
+        // per-brick decision. Zero for a chain with no squashed placement.
+        CullSquash widest;
     };
 
     // One layer's cull pad, kept as its TWO TERMS rather than as the sum, so
@@ -237,10 +253,17 @@ class CullPlan {
         return it == pruned_.end() ? nullptr : &it->second;
     }
 
+    // Whether a per-brick region carrying `band` may use this plan: always,
+    // unless a squashed placement was widened for a narrower band than that
+    // (CullIndex::plan).
+    bool serves_band(float band) const { return !squashed_ || band <= band_; }
+
   private:
     friend class CullIndex;
     std::unordered_map<CullIndex::Key, std::vector<CullIndex::Entry>, CullIndex::KeyHash>
         pruned_;
+    float band_ = 0.0f;
+    bool squashed_ = false;
 };
 
 // The cached-index form of CullIndex::append, and the ONE place the decision
