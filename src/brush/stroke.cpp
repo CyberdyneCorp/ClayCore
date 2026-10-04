@@ -694,7 +694,8 @@ std::size_t apply_to_mesh(mesh::MeshSculptor& sculptor, const std::vector<Stamp>
 std::size_t apply_to_multires(mesh::MultiresSculptor& sculptor, const std::vector<Stamp>& stamps,
                               mesh::MeshBrush verb, const mesh::MeshBrushSettings& settings,
                               const voxel::MaskField* mask, mesh::MultiresDelta* deltas,
-                              const MeshStrokeOptions& options) {
+                              const MeshStrokeOptions& options,
+                              mesh::SculptLayerDelta* layer_deltas) {
     if (stamps.empty() || !sculptor.surface().valid()) return 0;
     if (!mesh::multires_offers(verb)) return 0;
 
@@ -757,7 +758,7 @@ std::size_t apply_to_multires(mesh::MultiresSculptor& sculptor, const std::vecto
         if (options.orient_alpha_by_stamp && settings.has_alpha())
             stamp_settings.alpha_tangent = s.rotation.rotate(kernel::cf3(1, 0, 0));
 
-        if (sculptor.stamp(verb, stamp_settings, mask_gate, deltas) > 0) ++applied;
+        if (sculptor.stamp(verb, stamp_settings, mask_gate, deltas, layer_deltas) > 0) ++applied;
     }
 
     if (options.defer_normals) sculptor.flush_normals();

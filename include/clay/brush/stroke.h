@@ -431,13 +431,20 @@ std::size_t apply_to_mesh(mesh::MeshSculptor& sculptor, const std::vector<Stamp>
 // `deltas` accumulates the whole call into ONE coalesced gesture, exactly as
 // the fixed path's does, so a multiresolution stroke is one undo step.
 //
+// `layer_deltas` is the other half of that step. A stamp writes the stack's
+// ACTIVE sculpt layer when there is one, and then `deltas` stays empty: a caller
+// recording a stroke on a hierarchy that has passes passes both, or its record
+// undoes nothing. Last, and defaulted, so every caller written before it is
+// unchanged.
+//
 // Sculpting at a level while DISPLAYING another is the surface's business and
 // not this one's: a stroke writes wherever `MultiresSurface::sculpt_level` says.
 std::size_t apply_to_multires(mesh::MultiresSculptor& sculptor, const std::vector<Stamp>& stamps,
                               mesh::MeshBrush verb, const mesh::MeshBrushSettings& settings,
                               const voxel::MaskField* mask = nullptr,
                               mesh::MultiresDelta* deltas = nullptr,
-                              const MeshStrokeOptions& options = {});
+                              const MeshStrokeOptions& options = {},
+                              mesh::SculptLayerDelta* layer_deltas = nullptr);
 
 // The same stroke, onto an ADAPTIVE surface (stroke-an-adaptive-surface) — the
 // third mesh representation, and until this the one a stroke could not reach.

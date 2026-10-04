@@ -76,6 +76,17 @@ class MultiresDelta {
     // the record, which is a caller pairing a step with the wrong surface.
     bool revert(MultiresSurface& surface) const;
     bool apply(MultiresSurface& surface) const;
+    // The check both of those make before writing, on its own, for a caller
+    // replaying this record beside another one that must not half-happen.
+    bool matches(const MultiresSurface& surface) const;
+
+    // The two halves `size()` adds up, and the exact length `encode` writes:
+    // 16 + 32 * detail_size() + 28 * base_size().
+    std::size_t detail_size() const { return detail_.size(); }
+    std::size_t base_size() const { return base_vertices_.size(); }
+    std::size_t encoded_size() const {
+        return 16 + 32 * detail_.size() + 28 * base_vertices_.size();
+    }
 
     // -- encoding (survive-a-crash) -------------------------------------------
     // A member for the reason `VertexDeltas::encode` is one: the `after` values

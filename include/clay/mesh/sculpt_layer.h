@@ -552,6 +552,14 @@ class SculptLayerDelta {
     // do not match, which is a caller pairing a step with the wrong surface.
     bool revert(SculptLayerStack& stack) const;
     bool apply(SculptLayerStack& stack) const;
+    // The check both of those make before writing, on its own.
+    bool matches(const SculptLayerStack& stack) const;
+
+    // The two halves `size()` adds up, and the exact length `encode` writes:
+    // 24 + 32 * detail_size() + 16 * mask_size().
+    std::size_t detail_size() const { return detail_.size(); }
+    std::size_t mask_size() const { return mask_.size(); }
+    std::size_t encoded_size() const { return 24 + 32 * detail_.size() + 16 * mask_.size(); }
 
     std::vector<std::uint8_t> encode() const;
     static bool decode(const std::uint8_t* data, std::size_t size, SculptLayerDelta* out);
