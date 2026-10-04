@@ -17,6 +17,7 @@
 
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -559,4 +560,104 @@ TEST_CASE("dynamic replay: a record spills to bytes and replays identically") {
     REQUIRE(DynamicSurface::decode(surface_bytes.data(), surface_bytes.size(), &reloaded));
     DynamicSculptor reloaded_sculptor(reloaded);
     CHECK(reloaded_sculptor.replay(record, ReplayDirection::Revert) == ReplayResult::Mismatch);
+}
+
+namespace {
+
+// A spilled record edited to keep its vertex entries and drop every face entry:
+// the inner delta's face count zeroed and its face block, the last one, cut
+// off. The header epochs are untouched, so the record still replays. Nothing
+// in `decode` relates the two blocks, which is what makes this a record a host
+// can hand back.
+std::vector<std::uint8_t> without_face_entries(const RecordedGesture& record) {
+    std::vector<std::uint8_t> bytes = record.encode();
+    const std::size_t nf = record.delta().face_count();
+    // The face count is the inner header's last u32; 66 bytes per face entry,
+    // the layout the spill test above pins.
+    const std::size_t nf_at = RecordedGesture::kHeaderBytes + 20;
+    std::memset(bytes.data() + nf_at, 0, 4);
+    bytes.resize(bytes.size() - nf * 66);
+    return bytes;
+}
+
+// Faces around a vertex the record moved that a small ball on their own
+// centroid does not find: each one is a face the index's bounds no longer
+// contain. A face is counted once per moved corner, and `checked` is how many
+// such visits the audit made.
+std::size_t faces_the_index_misses(const DynamicSculptor& sculptor, const TopologyDelta& delta,
+                                   std::size_t* checked) {
+    const DynamicSurface& s = sculptor.surface();
+    std::vector<mesh::HalfEdgeId> fan;
+    std::vector<mesh::FaceId> found;
+    std::size_t missed = 0;
+    *checked = 0;
+    for (const auto& e : delta.vertex_entries()) {
+        if (same_bits(e.before.position, e.after.position)) continue;
+        if (!s.outgoing_halfedges(e.after_id, &fan)) continue;
+        for (mesh::HalfEdgeId h : fan) {
+            const mesh::FaceId f = s.face_of(h);
+            mesh::VertexId v[3];
+            if (!s.live(f) || !s.face_vertices(f, v)) continue;
+            const cfloat3 c = (s.position_of(v[0]) + s.position_of(v[1]) + s.position_of(v[2])) *
+                              (1.0f / 3.0f);
+            sculptor.bvh().faces_in_ball(s, c, 1e-3f, &found);
+            ++*checked;
+            if (std::find(found.begin(), found.end(), f) == found.end()) ++missed;
+        }
+    }
+    return missed;
+}
+
+}  // namespace
+
+TEST_CASE("dynamic replay: a record that names moved vertices but not their faces keeps the "
+          "index exact") {
+    // `DynamicSculptor::refit_around_moved_vertices` is the only thing that
+    // refits these faces. A record this library captures names every face
+    // around a moved vertex, but `RecordedGesture::decode` does not enforce
+    // that, so a record that reaches the sculptor from bytes need not. A face
+    // whose leaf bounds no longer contain it is missing from ball queries,
+    // which is how a brush stops reaching part of the surface.
+    //
+    // THE INDEX IS REBUILT BEFORE EACH REPLAY. Leaf bounds only ever grow, so
+    // an index that watched the stroke still holds both of its ends and cannot
+    // miss either way; a rebuild between strokes is what a host does, and it
+    // fits the bounds to the one end the surface is at. Without the refit the
+    // undo below misses a face 621 times and the redo 198.
+    auto surface = DynamicSurface::from_mesh(cube_sphere(16, 1.0f));
+    REQUIRE(surface.has_value());
+    DynamicSculptor sculptor(*surface);
+    // Deformation only: no halfedge or edge entries, and a displacement large
+    // enough to carry faces out of the bounds they were indexed under.
+    const StrokeShape shape{8, 0.6f, 1.0f, 8.0f, cf3(0, 0, 1)};
+    DynamicTopologySettings topo = stroke_topology(shape);
+    topo.enabled = false;
+    RecordedGesture record;
+    for (int i = 0; i < shape.stamps; ++i)
+        REQUIRE(sculptor.stamp_recorded(mesh::MeshBrush::Draw, stroke_brush(shape, i), topo, {},
+                                        record)
+                    ->moved_vertices > 0);
+    REQUIRE(record.delta().halfedge_count() == 0);
+    REQUIRE(record.delta().face_count() > 0);
+
+    const std::vector<std::uint8_t> bytes = without_face_entries(record);
+    RecordedGesture edited;
+    REQUIRE(RecordedGesture::decode(bytes.data(), bytes.size(), &edited) ==
+            mesh::GestureDecode::Ok);
+    REQUIRE(edited.delta().face_count() == 0);
+    REQUIRE(edited.delta().vertex_count() == record.delta().vertex_count());
+
+    std::size_t checked = 0;
+    sculptor.rebuild_index();
+    REQUIRE(sculptor.replay(edited, ReplayDirection::Revert) == ReplayResult::Applied);
+    CHECK(faces_the_index_misses(sculptor, edited.delta(), &checked) == 0);
+    CHECK(checked > 0);
+
+    sculptor.rebuild_index();
+    REQUIRE(sculptor.replay(edited, ReplayDirection::Apply) == ReplayResult::Applied);
+    CHECK(faces_the_index_misses(sculptor, edited.delta(), &checked) == 0);
+    CHECK(checked > 0);
+    const IndexCoverage coverage = index_coverage(sculptor);
+    CHECK(coverage.live_missing == 0);
+    CHECK(coverage.dead_indexed == 0);
 }

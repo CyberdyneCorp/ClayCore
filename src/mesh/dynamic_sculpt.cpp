@@ -841,11 +841,19 @@ bool moved_within(const ElementDelta<DynamicVertex, VertexId>& e) {
 
 }  // namespace
 
-// A face the record does not name can still have a corner that moved. The
-// capture notes every face around a moved vertex, so this finds nothing on a
-// record this library wrote; it is kept because an index whose bounds no longer
-// contain a face answers ball queries wrongly, and it costs one fan walk per
-// moved vertex.
+// A face the record does not name can still have a corner that moved, and an
+// index whose bounds no longer contain a face leaves it out of ball queries.
+//
+// THIS GUARDS RECORDS THAT REACH THE SCULPTOR FROM BYTES. A capture names every
+// face incident to a moved vertex, so on a record this library wrote each face
+// refitted here was already reinserted by its own entry. `TopologyDelta::decode`
+// does not enforce that invariant: it checks the magic, the version and that
+// the counts fit the buffer, never that the vertex and face blocks agree. A
+// spilled record edited to drop its face entries decodes and replays through
+// `clay_dynamic_delta_deserialize`, and this refit is the only thing that keeps
+// the index right for it. "a record that names moved vertices but not their
+// faces keeps the index exact" in test_dynamic_replay.cpp fails without it. The
+// cost is one fan walk per moved vertex.
 void DynamicSculptor::refit_around_moved_vertices(const TopologyDelta& delta, bool to_before) {
     touched_faces_.clear();
     for (const auto& e : delta.vertex_entries()) {
