@@ -1155,7 +1155,8 @@ forward-refuse).
    has had. 0.126.0 adds the opaque `clay_stroke_tx`, its
    `clay_stroke_tx_status` descriptor and twelve entry points (#688): a stroke
    session whose six consumers apply only settled stamps, bit-identical to the
-   whole-path call. Against v0.120.1: 708 -> 740 `clay_*(` symbols; the only
+   whole-path call. #689 amended the untagged multires consumer in place to take a
+   nullable `clay_multires_delta` record, before any tag carried it. Against v0.120.1: 708 -> 740 `clay_*(` symbols; the only
    `-` lines in the `clay.h` diff that are not comments are the
    `CLAY_ABI_MINOR` and `CLAY_ABI_PATCH` defines, and no hunk adds a field to a
    struct that existed before. The three new structs lead with `struct_size`.
