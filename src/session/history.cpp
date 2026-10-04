@@ -6,6 +6,8 @@
 #include <optional>
 #include <utility>
 
+#include "clay/mesh/dynamic_sculpt.h"
+
 namespace clay {
 namespace session {
 
@@ -504,6 +506,17 @@ void History::record_barrier(std::string what) {
     push(std::move(step));
 }
 
+bool History::replay_dynamic(scene::LayerId layer, const mesh::TopologyDelta& delta,
+                             bool forward) {
+    const auto direction = forward ? mesh::ReplayDirection::Apply : mesh::ReplayDirection::Revert;
+    if (mesh::DynamicSculptor* sculptor =
+            dynamic_sculptor_for_ ? dynamic_sculptor_for_(layer) : nullptr)
+        return sculptor->replay_delta(delta, direction);
+    mesh::DynamicSurface* surface = dynamic_for_ ? dynamic_for_(layer) : nullptr;
+    if (!surface) return false;
+    return forward ? delta.apply(*surface) : delta.revert(*surface);
+}
+
 bool History::install_mesh(scene::LayerId layer, mesh::Mesh triangles, const MeshFor& mesh_for) {
     // The installer owns the invalidation signal as well as the assignment, so
     // an owner that keeps a per-layer geometry generation cannot be restored
@@ -558,15 +571,11 @@ bool History::apply_step(const Step& step, bool forward, scene::Document& doc,
             return install_mesh(step.layer, forward ? step.mesh_after : step.mesh_before,
                                 mesh_for);
         }
-        case Step::Kind::DynamicMesh: {
-            mesh::DynamicSurface* surface = dynamic_for_ ? dynamic_for_(step.layer) : nullptr;
-            // Refused rather than skipped, for the reason a missing grid is:
+        case Step::Kind::DynamicMesh:
+            // Refused when nothing resolves, for the reason a missing grid is:
             // skipping would take the step off the stack and leave the next
             // undo reversing something older than the user asked for.
-            if (!surface) return false;
-            return forward ? step.topology_delta.apply(*surface)
-                           : step.topology_delta.revert(*surface);
-        }
+            return replay_dynamic(step.layer, step.topology_delta, forward);
         case Step::Kind::Multires: {
             mesh::MultiresSurface* surface = multires_for_ ? multires_for_(step.layer) : nullptr;
             // Refused rather than skipped, for the reason a missing grid is:
@@ -1095,10 +1104,12 @@ bool History::replay(const std::uint8_t* data, std::size_t size, scene::Document
                 break;
             }
             case JournalEvent::Kind::DynamicMesh: {
-                mesh::DynamicSurface* surface = dynamic_for_ ? dynamic_for_(layer) : nullptr;
+                // Through the sculptor when one is held, by decision (#629): a
+                // recovered journal leaves its index in step exactly as an undo
+                // does, so a host never has to rebuild it to find the replay.
                 mesh::TopologyDelta delta;
-                if (!surface || !mesh::TopologyDelta::decode(body, payload, &delta) ||
-                    !delta.apply(*surface)) {
+                if (!mesh::TopologyDelta::decode(body, payload, &delta) ||
+                    !replay_dynamic(layer, delta, true)) {
                     if (out) *out = result;
                     return false;
                 }

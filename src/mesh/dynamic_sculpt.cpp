@@ -796,15 +796,19 @@ std::optional<DynamicStampResult> DynamicSculptor::stamp_recorded(
 ReplayResult DynamicSculptor::replay(const RecordedGesture& record, ReplayDirection direction) {
     const ReplayResult verdict = record.guard(surface_, direction);
     if (verdict != ReplayResult::Applied) return verdict;
-    const bool to_before = direction == ReplayDirection::Revert;
-    unindex_recorded_faces(record.delta());
-    if (to_before)
-        record.delta().revert(surface_);
-    else
-        record.delta().apply(surface_);
-    surface_.set_mark(to_before ? record.before() : record.after());
-    reindex_recorded_faces(record.delta(), to_before);
+    replay_delta(record.delta(), direction);
+    // After the delta, whose revision bumps move the epoch; the mark is what
+    // tells the record's next replay where the surface is.
+    surface_.set_mark(direction == ReplayDirection::Revert ? record.before() : record.after());
     return ReplayResult::Applied;
+}
+
+bool DynamicSculptor::replay_delta(const TopologyDelta& delta, ReplayDirection direction) {
+    const bool to_before = direction == ReplayDirection::Revert;
+    unindex_recorded_faces(delta);
+    const bool ok = to_before ? delta.revert(surface_) : delta.apply(surface_);
+    reindex_recorded_faces(delta, to_before);
+    return ok;
 }
 
 // BEFORE the restore, and by slot. `DynamicBvh::insert` returns early for a slot

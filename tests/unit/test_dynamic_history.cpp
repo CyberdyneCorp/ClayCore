@@ -5,7 +5,9 @@
 // representation — and every representation added is a chance for that to stop
 // being true. The cases here are the three that would break it: a topology
 // gesture undoing on its own, one bracketed with a scene command undoing as ONE
-// step, and a journal from before this kind existed still replaying.
+// step, and a journal from before this kind existed still replaying. A fourth
+// was added with #629: a sculptor held across the history keeps its index in
+// step through undo, redo and journal replay.
 
 #include <doctest/doctest.h>
 
@@ -16,6 +18,7 @@
 #include "clay/mesh/dynamic_validate.h"
 #include "clay/scene/document.h"
 #include "clay/session/history.h"
+#include "dynamic_index_audit.h"
 
 using namespace clay;
 using namespace clay::kernel;
@@ -245,4 +248,207 @@ TEST_CASE("dynamic history: the step's payload is in the memory report") {
     CHECK(filled.journal > empty.journal);
     // ...and by a real amount rather than the size of an empty Step.
     CHECK(filled.undo - empty.undo > 4096);
+}
+
+// -- a held sculptor across the history (#629) ---------------------------------
+//
+// The cases above hand History a bare surface and drop the sculptor that made
+// the stroke. A C++ host does not: it keeps one sculptor per adaptive layer for
+// the life of the document, and that sculptor's chunked index has to follow
+// every undo, redo and journal replay. Before `set_dynamic_sculptor_resolver`
+// none of them did, and on this fixture one undo left 23 live faces in no
+// chunk and 1,333 dead entries.
+
+namespace {
+
+using clay_test::index_coverage;
+using clay_test::IndexCoverage;
+
+// A 16-stamp Draw arc over the north pole -- the stroke the replay tests use,
+// so the counts in the issue are this fixture's counts.
+mesh::TopologyDelta held_stroke(DynamicSculptor& sculptor) {
+    mesh::TopologyDelta record;
+    DynamicTopologySettings topo;
+    topo.detail_mode = mesh::DynamicDetailMode::BrushRelative;
+    topo.detail_resolution = 8.0f;
+    for (int i = 0; i < 16; ++i) {
+        mesh::MeshBrushSettings s;
+        s.radius = 0.35f;
+        s.strength = 0.3f;
+        const float t = -0.3f + 0.6f * static_cast<float>(i) / 16.0f;
+        s.center = cnormalize(cf3(t, 0.0f, 1.0f));
+        sculptor.stamp(mesh::MeshBrush::Draw, s, topo, {}, &record);
+    }
+    return record;
+}
+
+void check_index_in_step(const DynamicSculptor& sculptor) {
+    const IndexCoverage cov = index_coverage(sculptor);
+    CHECK(cov.live_missing == 0);
+    CHECK(cov.dead_indexed == 0);
+}
+
+}  // namespace
+
+TEST_CASE("dynamic history: an undo through a held sculptor keeps its index in step") {
+    auto surface = DynamicSurface::from_mesh(cube_sphere(24, 1.0f));
+    REQUIRE(surface.has_value());
+    const Mesh before = surface->to_mesh();
+    DynamicSculptor sculptor(*surface);
+
+    scene::Document doc;
+    History history;
+    history.set_enabled(true);
+    history.set_dynamic_resolver([&](scene::LayerId) -> DynamicSurface* { return &*surface; });
+    history.set_dynamic_sculptor_resolver(
+        [&](scene::LayerId) -> DynamicSculptor* { return &sculptor; });
+
+    mesh::TopologyDelta record = held_stroke(sculptor);
+    REQUIRE(record.face_count() > 0);
+    const Mesh first = surface->to_mesh();
+    history.record_dynamic_mesh_step(1, std::move(record));
+
+    sculptor.bvh().clear_dirty();
+    REQUIRE(history.undo(doc, nullptr, nullptr, nullptr));
+    CHECK(same_mesh(surface->to_mesh(), before));
+    CHECK(mesh::validate_dynamic_surface(*surface).ok);
+    // EVERY LIVE FACE IS REACHABLE and nothing dead is indexed. A surface-only
+    // revert read 23 missing and 1,333 dead here.
+    check_index_in_step(sculptor);
+    // ...and the host is told which chunks to re-upload.
+    CHECK_FALSE(sculptor.bvh().dirty_leaves().empty());
+
+    // The same stroke again, on the SAME sculptor, lands where the first did.
+    held_stroke(sculptor);
+    CHECK(same_mesh(surface->to_mesh(), first));
+    check_index_in_step(sculptor);
+}
+
+TEST_CASE("dynamic history: a redo through a held sculptor keeps its index in step") {
+    auto surface = DynamicSurface::from_mesh(cube_sphere(24, 1.0f));
+    REQUIRE(surface.has_value());
+    DynamicSculptor sculptor(*surface);
+
+    scene::Document doc;
+    History history;
+    history.set_enabled(true);
+    history.set_dynamic_resolver([&](scene::LayerId) -> DynamicSurface* { return &*surface; });
+    history.set_dynamic_sculptor_resolver(
+        [&](scene::LayerId) -> DynamicSculptor* { return &sculptor; });
+
+    history.record_dynamic_mesh_step(1, held_stroke(sculptor));
+    const Mesh first = surface->to_mesh();
+
+    REQUIRE(history.undo(doc, nullptr, nullptr, nullptr));
+    check_index_in_step(sculptor);
+    sculptor.bvh().clear_dirty();
+    REQUIRE(history.redo(doc, nullptr, nullptr, nullptr));
+    CHECK(same_mesh(surface->to_mesh(), first));
+    CHECK(mesh::validate_dynamic_surface(*surface).ok);
+    check_index_in_step(sculptor);
+    CHECK_FALSE(sculptor.bvh().dirty_leaves().empty());
+}
+
+TEST_CASE("dynamic history: a journal replayed under a held sculptor leaves its index in step") {
+    // Recovery is the same question as undo: a host that rebuilt its sculptor
+    // before replaying must not have to call `rebuild_index` to find out the
+    // replay moved its surface.
+    auto surface = DynamicSurface::from_mesh(cube_sphere(24, 1.0f));
+    REQUIRE(surface.has_value());
+    DynamicSculptor sculptor(*surface);
+    History history;
+    history.set_enabled(true);
+    history.record_dynamic_mesh_step(1, held_stroke(sculptor));
+    std::size_t now_at = 0;
+    const std::vector<std::uint8_t> journal = history.journal_since(0, &now_at);
+    REQUIRE(!journal.empty());
+
+    auto replayed = DynamicSurface::from_mesh(cube_sphere(24, 1.0f));
+    REQUIRE(replayed.has_value());
+    DynamicSculptor held(*replayed);
+    scene::Document replay_doc;
+    History replay_history;
+    replay_history.set_enabled(true);
+    replay_history.set_dynamic_resolver(
+        [&](scene::LayerId) -> DynamicSurface* { return &*replayed; });
+    replay_history.set_dynamic_sculptor_resolver(
+        [&](scene::LayerId) -> DynamicSculptor* { return &held; });
+    session::History::ReplayResult result;
+    REQUIRE(replay_history.replay(journal.data(), journal.size(), replay_doc, nullptr, nullptr,
+                                  &result));
+    CHECK(same_mesh(replayed->to_mesh(), surface->to_mesh()));
+    CHECK(mesh::validate_dynamic_surface(*replayed).ok);
+    check_index_in_step(held);
+
+    // The next stroke on the held sculptor lands where one on a freshly indexed
+    // copy of the recovered surface does. Compared against that, not against
+    // the original session: a replay rebuilds the pools' free lists rather than
+    // restoring them (see `restore_kind`), so a recovered surface hands out
+    // different slots and a stroke on it is not bit-identical to the original
+    // session's -- with or without an index, measured.
+    auto reference = DynamicSurface::from_mesh(cube_sphere(24, 1.0f));
+    REQUIRE(reference.has_value());
+    History reference_history;
+    reference_history.set_enabled(true);
+    reference_history.set_dynamic_resolver(
+        [&](scene::LayerId) -> DynamicSurface* { return &*reference; });
+    scene::Document reference_doc;
+    REQUIRE(reference_history.replay(journal.data(), journal.size(), reference_doc, nullptr,
+                                     nullptr, &result));
+    DynamicSculptor fresh(*reference);
+    held_stroke(fresh);
+    held_stroke(held);
+    CHECK(same_mesh(replayed->to_mesh(), reference->to_mesh()));
+    check_index_in_step(held);
+}
+
+TEST_CASE("dynamic history: with no sculptor for the layer, the surface path still undoes") {
+    // A sculptor resolver that does not know the layer falls through to the
+    // surface resolver, exactly as a host that never set one does. Keeping the
+    // index is then the host's job, and `rebuild_index` is how it does it.
+    auto surface = DynamicSurface::from_mesh(cube_sphere(24, 1.0f));
+    REQUIRE(surface.has_value());
+    const Mesh before = surface->to_mesh();
+    DynamicSculptor sculptor(*surface);
+
+    scene::Document doc;
+    History history;
+    history.set_enabled(true);
+    history.set_dynamic_resolver([&](scene::LayerId) -> DynamicSurface* { return &*surface; });
+    history.set_dynamic_sculptor_resolver(
+        [](scene::LayerId) -> DynamicSculptor* { return nullptr; });
+
+    history.record_dynamic_mesh_step(1, held_stroke(sculptor));
+    const Mesh first = surface->to_mesh();
+    REQUIRE(history.undo(doc, nullptr, nullptr, nullptr));
+    CHECK(same_mesh(surface->to_mesh(), before));
+    CHECK(mesh::validate_dynamic_surface(*surface).ok);
+    sculptor.rebuild_index();
+    check_index_in_step(sculptor);
+    REQUIRE(history.redo(doc, nullptr, nullptr, nullptr));
+    CHECK(same_mesh(surface->to_mesh(), first));
+}
+
+TEST_CASE("dynamic history: the sculptor resolver alone is enough") {
+    // The sculptor names its surface, so a host holding one per layer does not
+    // have to register the surface a second time.
+    auto surface = DynamicSurface::from_mesh(cube_sphere(12, 1.0f));
+    REQUIRE(surface.has_value());
+    const Mesh before = surface->to_mesh();
+    DynamicSculptor sculptor(*surface);
+
+    scene::Document doc;
+    History history;
+    history.set_enabled(true);
+    history.set_dynamic_sculptor_resolver(
+        [&](scene::LayerId) -> DynamicSculptor* { return &sculptor; });
+
+    history.record_dynamic_mesh_step(1, held_stroke(sculptor));
+    const Mesh first = surface->to_mesh();
+    REQUIRE(history.undo(doc, nullptr, nullptr, nullptr));
+    CHECK(same_mesh(surface->to_mesh(), before));
+    check_index_in_step(sculptor);
+    REQUIRE(history.redo(doc, nullptr, nullptr, nullptr));
+    CHECK(same_mesh(surface->to_mesh(), first));
+    check_index_in_step(sculptor);
 }

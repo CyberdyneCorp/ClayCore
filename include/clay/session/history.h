@@ -57,6 +57,10 @@
 #include "clay/voxel/mask.h"
 
 namespace clay {
+namespace mesh {
+// Named by a resolver only; history.cpp includes the definition.
+class DynamicSculptor;
+}  // namespace mesh
 namespace session {
 
 // One step, whatever made it. Exactly one payload is meaningful, chosen by
@@ -226,6 +230,33 @@ class History {
     // names.
     using DynamicMeshFor = std::function<mesh::DynamicSurface*(scene::LayerId)>;
     void set_dynamic_resolver(DynamicMeshFor resolver) { dynamic_for_ = std::move(resolver); }
+    // The SCULPTOR holding that surface, by the same layer, or null if none is
+    // alive. Set once, for the reason `DynamicMeshFor` gives.
+    //
+    // It exists because the surface alone is not enough to undo onto: the
+    // sculptor owns the chunked index and the dirty-chunk stream, and a delta
+    // replayed on the surface tells neither. Measured on a cube_sphere(24)
+    // before this resolver existed: one history undo of a 16-stamp Draw stroke
+    // left 23 live faces in no chunk and 1,333 dead entries, marked no chunk
+    // dirty, and the same stroke stamped again produced a different surface;
+    // a journal replayed under a held sculptor left 1,201 and 155 (#629).
+    //
+    // So a DynamicMesh step -- undo, redo AND journal replay -- goes through
+    // `DynamicSculptor::replay_delta` whenever this resolves the layer, and
+    // through the surface `DynamicMeshFor` resolves only when it does not.
+    // Routing a recovered journal through the sculptor is a decision, not a
+    // gap: a host that rebuilt its sculptor before replaying must not be left
+    // calling `rebuild_index` to discover the replay moved its surface.
+    //
+    // NOT PROMISED: the surface's `SurfaceMark` is not restored to a
+    // `RecordedGesture`'s end, because a step holds a bare `TopologyDelta` and
+    // no marks. The delta bumps the revisions, so a record captured before the
+    // undo is refused by its guard afterwards -- the safe direction. Ordering
+    // is the stack's: `replay_delta` does no LIFO check of its own.
+    using DynamicSculptorFor = std::function<mesh::DynamicSculptor*(scene::LayerId)>;
+    void set_dynamic_sculptor_resolver(DynamicSculptorFor resolver) {
+        dynamic_sculptor_for_ = std::move(resolver);
+    }
     // A subdivision hierarchy, by the layer that holds it. Set once, for the
     // reason `DynamicMeshFor` gives: adding a fifth parameter to undo, redo and
     // replay would break every host compiled against this header to serve a
@@ -615,6 +646,11 @@ class History {
     // the resolver when it did not; either way no wholesale restore anywhere in
     // this file reaches a `mesh::Mesh*` and writes through it directly.
     bool install_mesh(scene::LayerId layer, mesh::Mesh triangles, const MeshFor& mesh_for);
+    // The ONE place a step or a journal event replays a topology delta. Through
+    // the layer's sculptor when one resolves, so its index and dirty chunks
+    // follow (#629); onto the bare surface when only that resolves; false when
+    // neither does.
+    bool replay_dynamic(scene::LayerId layer, const mesh::TopologyDelta& delta, bool forward);
     // One VoxelLayerProperty journal event, replayed forward and recorded.
     // Apart from replay() so the event's decode-apply-record reads as one unit.
     bool replay_voxel_layer_op(scene::LayerId layer, const std::uint8_t* body, std::size_t size,
@@ -649,6 +685,7 @@ class History {
     bool mask_open_ = false;
     GroupsFor groups_for_;
     DynamicMeshFor dynamic_for_;
+    DynamicSculptorFor dynamic_sculptor_for_;
     MultiresFor multires_for_;
     MeshInstaller mesh_installer_;
     bool group_open_ = false;

@@ -1715,6 +1715,24 @@ recorded identical entry counts and encoded bytes with and without the fix, on
 34,655 and on 138,162 faces, because those faces were already noted by the
 remesh operations around them.
 
+**The C++ history goes through the sculptor too (#629).** A C++ host that
+records adaptive strokes into `session::History` with `record_dynamic_mesh_step`
+and keeps its `DynamicSculptor` alive registers it with
+`History::set_dynamic_sculptor_resolver`. Undo, redo and journal replay of a
+`DynamicMesh` step then go through `DynamicSculptor::replay_delta`, which does
+the erase, restore and re-insert above without the mark guard, because the
+history's own stack supplies the order. Before this resolver, one history undo
+of a 16-stamp Draw stroke on a `cube_sphere(24)` left 23 live faces in no chunk
+and 1,333 dead entries, marked no chunk dirty, and the same stroke stamped again
+did not reproduce the first. A journal replayed under a held sculptor left 1,201
+missing and 155 dead. With the resolver all four counts are zero. Where no
+sculptor resolves the layer, the history falls back to the surface from
+`set_dynamic_resolver`, as before, and the host rebuilds the index itself. A
+recovered journal is not slot-identical to the session it came from, because
+replay rebuilds the pools' free lists, so the next stroke after recovery matches
+a freshly indexed copy of the recovered surface and not the original session.
+No C ABI path is affected, since `clay_document` has no dynamic layer.
+
 What the calls do not promise, and the header says so beside them:
 `clay_dynamic_surface_serialize` bytes differ after an undo, because slots stay
 allocated and `dead_slots` grows. A record replays only onto the surface handle
