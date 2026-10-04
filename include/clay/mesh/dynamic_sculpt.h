@@ -325,7 +325,7 @@ class DynamicSculptor {
     kernel::cfloat3 automask_reference(const MeshBrushSettings& brush);
     // The two answers `compose_workset` cannot work out for itself. Function
     // pointers with a `this` context, for the reason `WorkItemReader` gives.
-    static kernel::cfloat3 normal_of_item(const void* context, WorkItemId item);
+    static kernel::cfloat3 normal_of_item(const void* context, WorkItemId item, float* area);
     static float mask_of_item(const void* context, WorkItemId item);
     void build_neighbors(bool want_normals, bool want_colors);
     SculptSnapshot snapshot_of() const;
@@ -421,6 +421,11 @@ class DynamicSculptor {
     std::vector<FaceId> ball_faces_;
     std::vector<VertexId> ring_scratch_;
     std::vector<HalfEdgeId> fan_scratch_;
+    // `normal_of_item`'s fan. Its own, and mutable, because the reader is
+    // handed a const context and runs inside the composition — a scratch it
+    // shared with the automask's topology adapter would be one reordering of
+    // `compose_workset` away from being walked twice at once.
+    mutable std::vector<HalfEdgeId> area_fan_;
     memory::PeakTelemetry* telemetry_ = nullptr;
     void count_remesh(const RemeshStats& stats);
 

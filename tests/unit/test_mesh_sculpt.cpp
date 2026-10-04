@@ -15,6 +15,7 @@
 
 #include "clay/brush/stroke.h"
 #include "clay/mesh/adjacency.h"
+#include "clay/mesh/dynamic_sculpt.h"
 #include "clay/mesh/marching.h"
 #include "clay/mesh/quad_mesh.h"
 #include "clay/mesh/sculpt.h"
@@ -2198,4 +2199,113 @@ TEST_CASE("adjacency over a mesh whose indices point past its vertices reads not
     CHECK(count == 2);
     adj.ring(adj.class_of(0), &count);
     CHECK(count == 2);
+}
+
+// -- the stamp's averaged normal (#631) ----------------------------------------
+
+namespace {
+
+// The angle, in degrees, between the averaged normal one Draw stamp at `at`
+// resolves on `tape` meshed over `region` at voxel 0.01 and the normal the
+// surface's symmetry says it must have. The radius is the reach #618 measured
+// with (region 0.15 + rounding 0.15 + blend 0.15).
+float draw_frame_tilt(const scene::Tape& tape, const math::Aabb& region, cfloat3 at,
+                      cfloat3 expected) {
+    Mesh m = mesh::mesh_tape(tape, region, 0.01f);
+    REQUIRE(m.triangle_count() > 0);
+    MeshSculptor sculptor(m);
+    sculptor.stamp(MeshBrush::Draw, centred(at, 0.45f, 0.0f));
+    REQUIRE(sculptor.workset().size() > 1000);
+    const float c = std::clamp(cdot(sculptor.workset().average_normal, expected), -1.0f, 1.0f);
+    return std::acos(c) * 57.2957795f;
+}
+
+// The fin of `test_relief.cpp`: 0.1 thick and 1.0 tall (y in [-0.5, 0.5]),
+// long in z, standing on a slab. Mirror-symmetric about x = 0, so a stamp
+// centred on its ridge must resolve a normal of exactly +y.
+scene::Tape fin_on_slab() {
+    static scene::Document doc;
+    doc = scene::Document{};
+    scene::Layer& l = doc.add_sdf_layer("fin");
+    l.sdf->insert(item(scene::Prim::box(cf3(0.05f, 0.5f, 1.0f)), cf3(0, 0, 0)));
+    l.sdf->insert(item(scene::Prim::box(cf3(1.0f, 0.1f, 1.0f)), cf3(0, -0.6f, 0)));
+    return scene::compile_document(doc);
+}
+
+}  // namespace
+
+TEST_CASE("REGRESSION: a stamp on a symmetric ridge resolves the ridge's own normal (#631)") {
+    // The averaged normal is a sum of per-vertex votes. On a ridge narrower
+    // than the stamp the two faces' normals are +x and -x and nearly cancel;
+    // what survives the cancellation is a few percent of the sum, so any
+    // imbalance between the faces is amplified into a large tilt.
+    //
+    // The mesher supplies the imbalance. Its tetrahedral split of each cell is
+    // chiral (every cell is split along the same diagonals), so the mirror
+    // image of the fin is NOT triangulated as the mirror image of its
+    // triangulation: where the lattice passes through the faces one ridge
+    // corner stays sharp and the other is chamfered, and the chamfered side
+    // carries more vertices, tilted toward +y. With one equal vote per vertex
+    // the averaged normal was 11.5 deg off +y here (16.8 deg on the lattice
+    // #618 happened to use), and 1.4 deg where the lattice falls between them.
+    //
+    // Weighting each vote by the surface area its vertex stands for makes the
+    // sum a discretisation of the falloff-weighted integral of the normal over
+    // the surface, which depends on where the surface is and not on how it
+    // was cut into triangles.
+    const scene::Tape fin = fin_on_slab();
+    const cfloat3 ridge = cf3(0, 0.5f, 0);
+
+    SUBCASE("lattice through the faces") {
+        const math::Aabb region{cf3(-0.6f, -0.1f, -0.6f), cf3(0.6f, 0.6f, 0.6f)};
+        const float tilt = draw_frame_tilt(fin, region, ridge, cf3(0, 1, 0));
+        MESSAGE("fin, lattice through the faces: " << tilt << " deg");
+        CHECK(tilt < 0.5f);
+    }
+    SUBCASE("lattice between the faces") {
+        const math::Aabb region{cf3(-0.605f, -0.105f, -0.605f), cf3(0.605f, 0.605f, 0.605f)};
+        const float tilt = draw_frame_tilt(fin, region, ridge, cf3(0, 1, 0));
+        MESSAGE("fin, lattice between the faces: " << tilt << " deg");
+        CHECK(tilt < 0.5f);
+    }
+    SUBCASE("the adaptive surface resolves it the same way") {
+        // The frame is resolved once, in `compose_workset`, for all three
+        // representations, so the adaptive surface has to hand over the same
+        // area its vertices stand for. It was 1.4 deg off on this mesh too.
+        const math::Aabb region{cf3(-0.605f, -0.105f, -0.605f), cf3(0.605f, 0.605f, 0.605f)};
+        const Mesh m = mesh::mesh_tape(fin, region, 0.01f);
+        auto surface = mesh::DynamicSurface::from_mesh(m);
+        REQUIRE(surface.has_value());
+        mesh::DynamicSculptor sculptor(*surface);
+        mesh::DynamicTopologySettings fixed_topology;
+        fixed_topology.enabled = false;
+        sculptor.stamp(MeshBrush::Draw, centred(ridge, 0.45f, 0.0f), fixed_topology);
+        REQUIRE(sculptor.workset().size() > 1000);
+        const float c = std::clamp(sculptor.workset().average_normal.y, -1.0f, 1.0f);
+        const float tilt = std::acos(c) * 57.2957795f;
+        MESSAGE("fin on the adaptive surface: " << tilt << " deg");
+        CHECK(tilt < 0.5f);
+    }
+}
+
+TEST_CASE("the averaged normal holds on a convex pole and a saddle (#631)") {
+    // The two smooth fixtures #618 measured beside the fin. Neither has a
+    // cancellation to amplify an imbalance, so the equal vote was already
+    // within a few degrees here; the area-weighted vote must be closer.
+    SUBCASE("unit sphere, at its pole") {
+        const math::Aabb region{cf3(-0.6f, 0.5f, -0.6f), cf3(0.6f, 1.1f, 0.6f)};
+        const float tilt = draw_frame_tilt(sphere_tape(1.0f), region, cf3(0, 1, 0), cf3(0, 1, 0));
+        MESSAGE("sphere pole: " << tilt << " deg");
+        CHECK(tilt < 0.25f);
+    }
+    SUBCASE("torus R = 1, r = 0.4, on its inner equator") {
+        static scene::Document doc;
+        doc = scene::Document{};
+        doc.add_sdf_layer("t").sdf->insert(item(scene::Prim::torus(1.0f, 0.4f), cf3(0, 0, 0)));
+        const math::Aabb region{cf3(0.1f, -0.5f, -0.5f), cf3(1.1f, 0.5f, 0.5f)};
+        const float tilt = draw_frame_tilt(scene::compile_document(doc), region, cf3(0.6f, 0, 0),
+                                           cf3(-1, 0, 0));
+        MESSAGE("torus inner equator: " << tilt << " deg");
+        CHECK(tilt < 0.25f);
+    }
 }

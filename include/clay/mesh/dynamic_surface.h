@@ -342,6 +342,10 @@ class DynamicSurface {
     // Over a BORROWED fan, for the reason `one_ring`'s overload gives: this
     // runs once per vertex of every face a stamp touched.
     kernel::cfloat3 compute_vertex_normal(VertexId v, std::vector<HalfEdgeId>* fan) const;
+    // The surface area `v` stands for: one third of each incident face's area,
+    // over a BORROWED fan. Zero for a vertex whose fan cannot be walked. What a
+    // stamp's averaged normal weighs this vertex's vote by (#631).
+    float vertex_area(VertexId v, std::vector<HalfEdgeId>* fan) const;
 
     // The borrowed buffers a local normal refresh needs. Owned by whoever is
     // driving the stamp, so a stroke allocates on its first dab and never

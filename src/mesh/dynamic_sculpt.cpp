@@ -211,9 +211,11 @@ void DynamicSculptor::geodesic_region(kernel::cfloat3 centre, float radius, Vert
 
 // -- what the composition cannot answer for itself ----------------------------
 
-kernel::cfloat3 DynamicSculptor::normal_of_item(const void* context, WorkItemId item) {
+kernel::cfloat3 DynamicSculptor::normal_of_item(const void* context, WorkItemId item,
+                                                float* area) {
     const DynamicSculptor* self = static_cast<const DynamicSculptor*>(context);
     const DynamicVertex* rec = self->surface_.vertex(item.as_surface_vertex());
+    *area = rec ? self->surface_.vertex_area(item.as_surface_vertex(), &self->area_fan_) : 0.0f;
     return rec ? rec->normal : kernel::cf3(0, 1, 0);
 }
 

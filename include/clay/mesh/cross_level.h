@@ -156,8 +156,13 @@ struct CrossLevelNeighborhood {
     // further out than the first ring; the one reader of that is polish's
     // per-neighbour normal, and a subset there is a shading weight rather than a
     // stored value.
+    //
+    // `twice_area`, when given, is ADDED to: twice the area of every derived
+    // triangle `joined` is a corner of, the part of a rim class's area its
+    // level does not store (#631).
     kernel::cfloat3 normal_contribution(const std::vector<kernel::cfloat3>& own,
-                                        std::uint32_t joined) const;
+                                        std::uint32_t joined,
+                                        float* twice_area = nullptr) const;
 
     // How many DERIVED triangles have both `a` and `b` among their corners:
     // exactly the count `is_boundary_class`'s own shared-triangle count is

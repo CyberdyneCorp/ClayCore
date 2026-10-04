@@ -129,7 +129,8 @@ void build_incidences(CrossLevelNeighborhood* out) {
 }  // namespace
 
 cfloat3 CrossLevelNeighborhood::normal_contribution(const std::vector<cfloat3>& own,
-                                                    std::uint32_t joined) const {
+                                                    std::uint32_t joined,
+                                                    float* twice_area) const {
     std::size_t count = 0;
     const std::uint32_t* incident = faces_of(joined, &count);
     cfloat3 sum = kernel::cf3(0, 0, 0);
@@ -139,12 +140,15 @@ cfloat3 CrossLevelNeighborhood::normal_contribution(const std::vector<cfloat3>& 
             const cfloat3 p0 = position(own, q[tri[0]]);
             const cfloat3 p1 = position(own, q[tri[1]]);
             const cfloat3 p2 = position(own, q[tri[2]]);
-            const cfloat3 face = safe_normalize(face_normal(p0, p1, p2), kernel::cf3(0, 0, 0));
+            const cfloat3 cross_product = face_normal(p0, p1, p2);
+            const cfloat3 face = safe_normalize(cross_product, kernel::cf3(0, 0, 0));
             const cfloat3 p[3] = {p0, p1, p2};
-            for (int corner = 0; corner < 3; ++corner)
-                if (q[tri[corner]] == joined)
-                    sum = sum + face * corner_angle(p[corner], p[(corner + 1) % 3],
-                                                    p[(corner + 2) % 3]);
+            for (int corner = 0; corner < 3; ++corner) {
+                if (q[tri[corner]] != joined) continue;
+                sum = sum + face * corner_angle(p[corner], p[(corner + 1) % 3],
+                                                p[(corner + 2) % 3]);
+                if (twice_area) *twice_area += kernel::clength(cross_product);
+            }
         }
     }
     return sum;

@@ -63,23 +63,33 @@ float corner_angle(const Mesh& m, std::uint32_t tri, int corner) {
 // an Inflate stamp on a region rim finishes a thousandth of a unit from where
 // the uniform hierarchy finishes it without this, and within float rounding of
 // it with.
+//
+// `area`, when asked for, receives the surface area the class stands for: one
+// third of every triangle it is a corner of, the derived ones included. It is
+// read off the same cross products the normal already takes, which is why the
+// two are one pass; the stamp's frame weighs each normal's vote by it (#631).
 kernel::cfloat3 class_normal(const Mesh& m, const Adjacency& adj, std::uint32_t cls,
-                             const CrossLevelNeighborhood* cross) {
+                             const CrossLevelNeighborhood* cross, float* area = nullptr) {
     std::size_t n = 0;
     const std::uint32_t* tris = adj.triangles_of(cls, &n);
     kernel::cfloat3 sum = kernel::cf3(0, 0, 0);
+    float twice_area = 0.0f;
     for (std::size_t i = 0; i < n; ++i) {
-        const kernel::cfloat3 face = safe_normalize(face_normal(m, tris[i]), kernel::cf3(0, 0, 0));
-        for (int corner = 0; corner < 3; ++corner)
-            if (adj.class_of(m.indices[tris[i] * 3 + corner]) == cls)
-                sum = sum + face * corner_angle(m, tris[i], corner);
+        const kernel::cfloat3 cross_product = face_normal(m, tris[i]);
+        const kernel::cfloat3 face = safe_normalize(cross_product, kernel::cf3(0, 0, 0));
+        for (int corner = 0; corner < 3; ++corner) {
+            if (adj.class_of(m.indices[tris[i] * 3 + corner]) != cls) continue;
+            sum = sum + face * corner_angle(m, tris[i], corner);
+            twice_area += kernel::clength(cross_product);
+        }
     }
     if (cross && !cross->empty()) {
         std::size_t mc = 0;
         const std::uint32_t* members = adj.members(cls, &mc);
         for (std::size_t k = 0; k < mc; ++k)
-            sum = sum + cross->normal_contribution(m.positions, members[k]);
+            sum = sum + cross->normal_contribution(m.positions, members[k], &twice_area);
     }
+    if (area) *area = twice_area * (1.0f / 6.0f);
     return safe_normalize(sum, kernel::cf3(0, 1, 0));
 }
 
@@ -648,9 +658,9 @@ void MeshSculptor::publish_chunks(bool normals_changed, bool attributes_changed)
 // answer for itself. Free functions with a `this` context rather than lambdas,
 // because `WorkItemReader` holds function pointers — see the note there on why
 // it is not a `std::function`.
-kernel::cfloat3 MeshSculptor::normal_of_item(const void* context, WorkItemId item) {
+kernel::cfloat3 MeshSculptor::normal_of_item(const void* context, WorkItemId item, float* area) {
     const MeshSculptor* self = static_cast<const MeshSculptor*>(context);
-    return class_normal(self->mesh_, self->adjacency_, item.as_weld_class(), self->cross_);
+    return class_normal(self->mesh_, self->adjacency_, item.as_weld_class(), self->cross_, area);
 }
 
 // THE WALK: everything the brush REACHES, with the distance each was reached
