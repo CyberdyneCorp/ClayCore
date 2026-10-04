@@ -46,6 +46,22 @@ std::vector<StrokeSample> steady_path(const std::vector<StrokeSample>& samples, 
     return out;
 }
 
+// The two tapers as the fractions of the stroke they actually cover.
+struct Tapers {
+    float start = 0.0f;
+    float end = 0.0f;
+};
+
+Tapers tapers_of(const StrokePreset& p) {
+    Tapers t{std::clamp(p.taper_start, 0.0f, 1.0f), std::clamp(p.taper_end, 0.0f, 1.0f)};
+    if (t.start + t.end > 1.0f) {  // overlapping tapers: split the stroke between them
+        float total = t.start + t.end;
+        t.start /= total;
+        t.end /= total;
+    }
+    return t;
+}
+
 // Radius before jitter: base, scaled by pressure and by the end tapers.
 float stamp_radius(const StrokePreset& p, float pressure, float along) {
     float r = p.radius;
@@ -53,13 +69,9 @@ float stamp_radius(const StrokePreset& p, float pressure, float along) {
         float shaped = std::pow(std::clamp(pressure, 0.0f, 1.0f), std::max(p.pressure.curve, 1e-3f));
         r *= 1.0f - p.pressure.size + p.pressure.size * shaped;
     }
-    float start = std::clamp(p.taper_start, 0.0f, 1.0f);
-    float end = std::clamp(p.taper_end, 0.0f, 1.0f);
-    if (start + end > 1.0f) {  // overlapping tapers: split the stroke between them
-        float total = start + end;
-        start /= total;
-        end /= total;
-    }
+    const Tapers t = tapers_of(p);
+    const float start = t.start;
+    const float end = t.end;
     if (start > 0.0f && along < start) r *= along / start;
     if (end > 0.0f && along > 1.0f - end) r *= (1.0f - along) / end;
     return std::max(r, 0.0f);
@@ -108,13 +120,22 @@ float lerp_angle(float a, float b, float t) {
     return std::atan2(y, x);
 }
 
+// `segment` is where the search for `d`'s segment starts, and is left where
+// it ended. Stations are visited in increasing `d` and `cumulative` never
+// falls, so the segment never moves backwards and resuming from the last one
+// finds exactly the segment a search from the start would. Searching from the
+// start every time made a resolve cost stations x samples, which a stroke
+// session -- re-resolving the whole path on every append (#670) -- paid on
+// every frame: 216 us per append ten seconds into a 240 Hz stroke, rising
+// with the square of its length.
 PathPoint sample_path(const std::vector<StrokeSample>& path, const std::vector<float>& cumulative,
-                      float d) {
+                      float d, std::size_t* segment) {
     if (path.size() == 1)
         return {path[0].position, kernel::cf3(1, 0, 0), path[0].pressure, path[0].azimuth,
                 path[0].velocity};
-    std::size_t i = 1;
+    std::size_t i = std::max<std::size_t>(*segment, 1);
     while (i + 1 < path.size() && cumulative[i] < d) ++i;
+    *segment = i;
     float span = cumulative[i] - cumulative[i - 1];
     float t = span > 1e-9f ? std::clamp((d - cumulative[i - 1]) / span, 0.0f, 1.0f) : 0.0f;
     cfloat3 a = path[i - 1].position, b = path[i].position;
@@ -275,11 +296,105 @@ std::optional<StrokePreset> StrokePreset::deserialize(const std::uint8_t* data, 
     return p;
 }
 
+// -- the settle rule (#670) ---------------------------------------------------
+//
+// Which stations a LONGER path would resolve identically, in everything a
+// consumer reads. See StrokeTransaction in the header for the reasoning; each
+// condition here is one bullet there.
+
+namespace {
+
+struct SettleRule {
+    bool possible = false;  // a direction exists and no start taper is pending
+    float length = 0.0f;    // the path received so far
+    float end = 0.0f;       // the end taper's fraction, after overlap splitting
+};
+
+SettleRule settle_rule(const StrokePreset& preset, std::size_t path_size, float length) {
+    const Tapers t = tapers_of(preset);
+    return {path_size >= 2 && !(t.start > 0.0f), length, t.end};
+}
+
+bool station_settled(const SettleRule& rule, float d, float along) {
+    if (!rule.possible || d > rule.length) return false;
+    // The same comparison stamp_radius makes. `along` only falls as the path
+    // grows (d is fixed, the length only rises), so a station outside the end
+    // taper now is outside it for good.
+    return !(rule.end > 0.0f && along > 1.0f - rule.end);
+}
+
+// -- one station's stamp --------------------------------------------------------
+
+// Speed, in the same shape pressure already modulates. Signed on purpose: a
+// fast stroke is WIDER for a dry brush and THINNER for an ink pen, and both
+// are things artists ask for.
+void respond_to_speed(const VelocityResponse& vr, float velocity, Stamp* s) {
+    if (!(vr.reference > 0.0f) || (vr.size == 0.0f && vr.strength == 0.0f)) return;
+    const float speed = std::clamp(velocity / vr.reference, 0.0f, 1.0f);
+    if (vr.size != 0.0f) s->radius = std::max(s->radius * (1.0f + vr.size * speed), 0.0f);
+    if (vr.strength != 0.0f) {
+        s->strength = std::clamp(s->strength * (1.0f + vr.strength * speed), 0.0f, 1.0f);
+        s->deposit = std::clamp(s->deposit * (1.0f + vr.strength * speed), 0.0f, 1.0f);
+    }
+}
+
+// The barrel wins over the path where both are asked for: a caller that set
+// rotate_to_azimuth meant the barrel, and a stamp cannot face two ways.
+math::Quat facing(const StrokePreset& preset, const PathPoint& at) {
+    if (preset.rotate_to_azimuth)
+        return align_x_to(kernel::cf3(std::cos(at.azimuth), 0.0f, std::sin(at.azimuth)));
+    if (preset.rotate_along_stroke) return align_x_to(at.direction);
+    return math::Quat::identity();
+}
+
+// Deterministic jitter: a hash of the station index and the seed, so a stroke
+// jitters identically however its samples were batched.
+void jitter(const StrokePreset& preset, std::uint32_t index, cfloat3 direction, Stamp* s) {
+    if (preset.jitter_position > 0.0f) {
+        float amp = preset.jitter_position * preset.radius;
+        s->position = s->position + kernel::cf3(stamp_signed_noise(index, preset.seed, 0) * amp,
+                                                stamp_signed_noise(index, preset.seed, 1) * amp,
+                                                stamp_signed_noise(index, preset.seed, 2) * amp);
+    }
+    if (preset.jitter_size > 0.0f)
+        s->radius = std::max(
+            s->radius * (1.0f + stamp_signed_noise(index, preset.seed, 3) * preset.jitter_size),
+            0.0f);
+    if (preset.jitter_rotation > 0.0f) {
+        float angle = stamp_signed_noise(index, preset.seed, 4) * preset.jitter_rotation;
+        math::Quat spin = math::Quat::from_axis_angle(direction, angle);
+        s->rotation = spin * s->rotation;
+    }
+}
+
+// The stamp at one arc-length station, before the zero-radius drop.
+Stamp station_stamp(const StrokePreset& preset, const PathPoint& at, float along,
+                    std::uint32_t index) {
+    Stamp s;
+    s.along = along;
+    s.position = at.position;
+    s.radius = stamp_radius(preset, at.pressure, along);
+    s.strength = stamp_strength(preset, at.pressure);
+    s.deposit = std::clamp(shaped_strength(preset, at.pressure), 0.0f, 1.0f);
+    respond_to_speed(preset.velocity_response, at.velocity, &s);
+    s.rotation = facing(preset, at);
+    jitter(preset, index, at.direction, &s);
+    return s;
+}
+
+}  // namespace
+
 // -- resolution --------------------------------------------------------------
 
 std::vector<Stamp> resolve_stroke(const std::vector<StrokeSample>& samples,
                                   const StrokePreset& preset) {
+    return resolve_stroke_settled(samples, preset, nullptr);
+}
+
+std::vector<Stamp> resolve_stroke_settled(const std::vector<StrokeSample>& samples,
+                                          const StrokePreset& preset, std::size_t* settled) {
     std::vector<Stamp> stamps;
+    if (settled) *settled = 0;
     if (samples.empty() || !(preset.radius > 0.0f)) return stamps;
 
     std::vector<StrokeSample> path = steady_path(samples, preset.steady);
@@ -304,56 +419,20 @@ std::vector<Stamp> resolve_stroke(const std::vector<StrokeSample>& samples,
         length < step ? 1 : static_cast<int>(std::floor(length / step + 1e-3f)) + 1;
 
     stamps.reserve(static_cast<std::size_t>(count));
+    const SettleRule settle = settle_rule(preset, path.size(), length);
+    bool settling = true;
+    std::size_t segment = 1;
     for (int i = 0; i < count; ++i) {
         float d = static_cast<float>(i) * step;
-        PathPoint at = sample_path(path, cumulative, d);
+        PathPoint at = sample_path(path, cumulative, d, &segment);
         float along = length > 1e-9f ? std::clamp(d / length, 0.0f, 1.0f) : 0.0f;
 
-        Stamp s;
-        s.along = along;
-        s.position = at.position;
-        s.radius = stamp_radius(preset, at.pressure, along);
-        s.strength = stamp_strength(preset, at.pressure);
-        s.deposit = std::clamp(shaped_strength(preset, at.pressure), 0.0f, 1.0f);
-
-        // Speed, in the same shape pressure already modulates. Signed on
-        // purpose: a fast stroke is WIDER for a dry brush and THINNER for an
-        // ink pen, and both are things artists ask for.
-        const VelocityResponse& vr = preset.velocity_response;
-        if (vr.reference > 0.0f && (vr.size != 0.0f || vr.strength != 0.0f)) {
-            const float speed = std::clamp(at.velocity / vr.reference, 0.0f, 1.0f);
-            if (vr.size != 0.0f) s.radius = std::max(s.radius * (1.0f + vr.size * speed), 0.0f);
-            if (vr.strength != 0.0f) {
-                s.strength = std::clamp(s.strength * (1.0f + vr.strength * speed), 0.0f, 1.0f);
-                s.deposit = std::clamp(s.deposit * (1.0f + vr.strength * speed), 0.0f, 1.0f);
-            }
+        const Stamp s = station_stamp(preset, at, along, static_cast<std::uint32_t>(i));
+        settling = settling && station_settled(settle, d, along);
+        if (s.radius > 0.0f) {
+            stamps.push_back(s);
+            if (settling && settled) *settled = stamps.size();
         }
-
-        // The barrel wins over the path where both are asked for: a caller that
-        // set rotate_to_azimuth meant the barrel, and a stamp cannot face two
-        // ways.
-        if (preset.rotate_to_azimuth)
-            s.rotation = align_x_to(kernel::cf3(std::cos(at.azimuth), 0.0f, std::sin(at.azimuth)));
-        else if (preset.rotate_along_stroke)
-            s.rotation = align_x_to(at.direction);
-
-        auto index = static_cast<std::uint32_t>(i);
-        if (preset.jitter_position > 0.0f) {
-            float amp = preset.jitter_position * preset.radius;
-            s.position = s.position + kernel::cf3(stamp_signed_noise(index, preset.seed, 0) * amp,
-                                                  stamp_signed_noise(index, preset.seed, 1) * amp,
-                                                  stamp_signed_noise(index, preset.seed, 2) * amp);
-        }
-        if (preset.jitter_size > 0.0f)
-            s.radius = std::max(
-                s.radius * (1.0f + stamp_signed_noise(index, preset.seed, 3) * preset.jitter_size),
-                0.0f);
-        if (preset.jitter_rotation > 0.0f) {
-            float angle = stamp_signed_noise(index, preset.seed, 4) * preset.jitter_rotation;
-            math::Quat spin = math::Quat::from_axis_angle(at.direction, angle);
-            s.rotation = spin * s.rotation;
-        }
-        if (s.radius > 0.0f) stamps.push_back(s);
     }
     return stamps;
 }
@@ -362,7 +441,8 @@ std::vector<Stamp> resolve_stroke(const std::vector<StrokeSample>& samples,
 
 std::size_t apply_to_grid(voxel::VoxelGrid& grid, const std::vector<Stamp>& stamps,
                           std::uint8_t index, voxel::BrushShape shape,
-                          voxel::BrushFalloff falloff, const voxel::MaskField* mask) {
+                          voxel::BrushFalloff falloff, const voxel::MaskField* mask,
+                          std::size_t first_index) {
     const float cell = grid.voxel_size();
     std::size_t applied = 0;
     for (std::size_t i = 0; i < stamps.size(); ++i) {
@@ -377,7 +457,9 @@ std::size_t apply_to_grid(voxel::VoxelGrid& grid, const std::vector<Stamp>& stam
         p.shape = shape;
         p.falloff = falloff;
         p.strength = s.strength;
-        p.seed = static_cast<std::uint32_t>(i);  // per-stamp, so a stroke is not banded
+        // Per-stamp, so a stroke is not banded: the stamp's index in the
+        // STROKE, so a stroke applied in pieces dithers as it would whole.
+        p.seed = static_cast<std::uint32_t>(first_index + i);
         voxel::VoxelCoord at{static_cast<std::int32_t>(std::floor(s.position.x / cell)),
                              static_cast<std::int32_t>(std::floor(s.position.y / cell)),
                              static_cast<std::int32_t>(std::floor(s.position.z / cell))};
@@ -415,11 +497,45 @@ void StrokeTransaction::clear() {
     samples_.clear();
     stamps_.clear();
     emitted_ = 0;
+    settled_ = 0;
+    revised_from_ = 0;
+    finished_ = false;
 }
 
+namespace {
+
+// Whether two resolutions of one station differ in anything a consumer reads.
+// `along` is left out on purpose: it is a fraction of the whole path and
+// moves on every append.
+bool stamp_revised(const Stamp& a, const Stamp& b) {
+    return a.position.x != b.position.x || a.position.y != b.position.y ||
+           a.position.z != b.position.z || a.radius != b.radius || a.strength != b.strength ||
+           a.deposit != b.deposit || a.rotation.x != b.rotation.x ||
+           a.rotation.y != b.rotation.y || a.rotation.z != b.rotation.z ||
+           a.rotation.w != b.rotation.w;
+}
+
+// The first index at which `after` differs from `before`, starting from
+// `from` (everything before it is settled and cannot differ).
+std::size_t first_revision(const std::vector<Stamp>& before, const std::vector<Stamp>& after,
+                           std::size_t from) {
+    const std::size_t common = std::min(before.size(), after.size());
+    for (std::size_t i = from; i < common; ++i)
+        if (stamp_revised(before[i], after[i])) return i;
+    return common;
+}
+
+}  // namespace
+
 std::vector<Stamp> StrokeTransaction::append(const std::vector<StrokeSample>& samples) {
+    if (finished_) return {};
     samples_.insert(samples_.end(), samples.begin(), samples.end());
-    stamps_ = resolve_stroke(samples_, preset_);
+    // Compared from what was settled BEFORE this append: a stamp that settles
+    // now may have been revised on the way (an end taper it has just left).
+    const std::size_t was_settled = std::min(settled_, stamps_.size());
+    std::vector<Stamp> before = std::move(stamps_);
+    stamps_ = resolve_stroke_settled(samples_, preset_, &settled_);
+    revised_from_ = first_revision(before, stamps_, was_settled);
     // A re-resolve can in principle produce FEWER stamps than a previous one —
     // the steady-stroke filter trails the cursor, so a path that doubles back
     // can shorten. Clamping rather than subtracting keeps the tail well defined
@@ -428,6 +544,15 @@ std::vector<Stamp> StrokeTransaction::append(const std::vector<StrokeSample>& sa
     std::vector<Stamp> tail(stamps_.begin() + static_cast<std::ptrdiff_t>(start), stamps_.end());
     emitted_ = stamps_.size();
     return tail;
+}
+
+std::vector<Stamp> StampCursor::take(const StrokeTransaction& tx) {
+    const std::size_t settled = tx.settled();
+    if (settled <= taken_) return {};
+    std::vector<Stamp> out(tx.stamps().begin() + static_cast<std::ptrdiff_t>(taken_),
+                           tx.stamps().begin() + static_cast<std::ptrdiff_t>(settled));
+    taken_ = settled;
+    return out;
 }
 
 namespace {
@@ -585,28 +710,52 @@ mesh::MeshBrushSettings mesh_stamp_settings(const mesh::MeshBrushSettings& setti
 
 }  // namespace
 
-std::size_t apply_to_mesh(mesh::MeshSculptor& sculptor, const std::vector<Stamp>& stamps,
-                          mesh::MeshBrush verb, const mesh::MeshBrushSettings& settings,
-                          const voxel::MaskField* mask, mesh::VertexDeltas* deltas,
-                          const MeshStrokeOptions& options) {
-    if (stamps.empty() || !sculptor.valid()) return 0;
+// -- the fixed-topology consumer, as a gesture --------------------------------
 
+struct MeshStrokeGesture::State {
+    State(mesh::MeshSculptor& sculptor_, mesh::MeshBrush verb_,
+          const mesh::MeshBrushSettings& settings_, const voxel::MaskField* mask_,
+          const MeshStrokeOptions& options_)
+        : sculptor(sculptor_), verb(verb_), settings(settings_), mask(mask_), options(options_) {}
+
+    mesh::MeshSculptor& sculptor;
+    mesh::MeshBrush verb;
+    mesh::MeshBrushSettings settings;
+    const voxel::MaskField* mask;
+    MeshStrokeOptions options;
+
+    // Set up by the first stamp, held to `finish`.
+    bool begun = false;
+    bool done = false;
+    field::MaskGate mask_gate;
+    bool was_deferring = false;
+    MeshStrokeDrag drag;
+    std::optional<CarriedRegionScope<mesh::MeshSculptor>> carry;
+    kernel::cfloat3 first = kernel::cf3(0, 0, 0);
+    kernel::cfloat3 previous = kernel::cf3(0, 0, 0);
+
+    void begin(const Stamp& front);
+    bool stamp(const Stamp& s, mesh::VertexDeltas* deltas);
+};
+
+void MeshStrokeGesture::State::begin(const Stamp& front) {
+    begun = true;
     // The mask reaches every verb here and nowhere else, and the automask
     // factors `mesh` cannot reach on its own are wired here because this is the
     // one module that can see all three vocabularies. Both are built ONCE for
     // the stroke — they hold `std::function`s, and rebuilding them per stamp
     // would allocate on every dab — and both are shared with the
     // multiresolution consumer below.
-    const field::MaskGate mask_gate = mesh_mask_gate(mask, options);
+    mask_gate = mesh_mask_gate(mask, options);
     mesh::AutomaskInputs automask;
     if (mesh_automask_inputs(options, &automask)) sculptor.set_automask_inputs(std::move(automask));
 
-    const bool was_deferring = sculptor.defer_normals();
+    was_deferring = sculptor.defer_normals();
     sculptor.set_defer_normals(options.defer_normals);
 
-    MeshStrokeDrag drag = drag_of(verb);
+    drag = drag_of(verb);
     // ONE GATHER FOR THE GESTURE. See `MeshSculptor`'s carried-region block.
-    const CarriedRegionScope<mesh::MeshSculptor> carry(sculptor, verb);
+    carry.emplace(sculptor, verb);
 
     // SNAKEHOOK re-anchors ON THE SURFACE IT IS DRAGGING, not on the cursor.
     //
@@ -622,88 +771,152 @@ std::size_t apply_to_mesh(mesh::MeshSculptor& sculptor, const std::vector<Stamp>
         drag.anchor = settings.seed_class;
         // One linear scan per stroke when the caller had no pick to hand over.
         if (drag.anchor >= sculptor.adjacency().class_count())
-            drag.anchor = sculptor.nearest_class(stamps.front().position);
+            drag.anchor = sculptor.nearest_class(front.position);
     }
+    first = front.position;
+    previous = front.position;
+}
 
-    std::size_t applied = 0;
-    kernel::cfloat3 previous = stamps.front().position;
-    for (std::size_t i = 0; i < stamps.size(); ++i) {
-        Stamp s = stamps[i];
-        // The same early-out apply_to_grid takes, and for the same reason: a
-        // stamp whose centre is frozen costs nothing rather than gathering a
-        // region it is not allowed to move. Partially masked stamps still run,
-        // and their vertices are weighed one by one below.
-        if (mask && mask->sample(options.mesh_to_world.apply(s.position)) >= 1.0f) {
-            previous = s.position;
-            continue;
-        }
-
-        // THE ANCHOR IS ONLY ASKED FOR WHEN THERE IS ONE. `drag.anchor` is
-        // `kNoClass` for every verb but Snakehook, and `class_position` indexes
-        // its offset array with what it is given — so evaluating this eagerly
-        // is a read past the end whose result is then discarded, which is
-        // exactly the shape that survives every test until a sanitizer or an
-        // unlucky allocation finds it.
-        const kernel::cfloat3 anchor_position =
-            (drag.dragging && !drag.anchored) ? sculptor.class_position(drag.anchor)
-                                              : kernel::cf3(0, 0, 0);
-        mesh::MeshBrushSettings stamp_settings = mesh_stamp_settings(
-            settings, s, drag, previous, stamps.front().position, anchor_position);
+bool MeshStrokeGesture::State::stamp(const Stamp& s, mesh::VertexDeltas* deltas) {
+    // The same early-out apply_to_grid takes, and for the same reason: a
+    // stamp whose centre is frozen costs nothing rather than gathering a
+    // region it is not allowed to move. Partially masked stamps still run,
+    // and their vertices are weighed one by one below.
+    if (mask && mask->sample(options.mesh_to_world.apply(s.position)) >= 1.0f) {
         previous = s.position;
-
-        // THE STAMP'S ORIENTATION REACHES THE ALPHA, which is what makes a rake
-        // or a chisel expressible on a mesh layer at all.
-        //
-        // `resolve_stroke` has put rotate-along-stroke and the stylus azimuth
-        // into `Stamp::rotation` since they shipped, and `stamps_to_nodes`
-        // applies it to an SDF item's transform — but this consumer dropped it,
-        // so a mesh stamp faced the same way however the artist turned the
-        // stylus. A rotationally symmetric brush is unaffected either way,
-        // which is why the gap survived: it is only visible through an alpha.
-        //
-        // The rotation takes +X onto the direction the stamp faces (see
-        // `align_x_to`), so that image is the alpha's u axis. `calpha_frame`
-        // re-orthogonalises it against the stamp's own normal, so a tangent
-        // that is not already in the stamp plane is corrected rather than
-        // refused.
-        //
-        // OPTED INTO, not inferred from the quaternion, and the difference is
-        // a defect rather than a preference. The obvious rule — consume the
-        // rotation when it is not the identity — is DISCONTINUOUS at zero:
-        // `align_x_to` returns the identity for an azimuth of exactly 0, so
-        // that stamp would keep `calpha_frame`'s derived tangent, which for an
-        // upward direction is (0, 0, -1), while an azimuth of one
-        // ten-thousandth would take (1, 0, 0). The stamp would snap through 90
-        // degrees as the stylus crossed straight ahead.
-        //
-        // An explicit switch has neither problem: a caller that does not set it
-        // keeps its own `alpha_tangent` exactly, including the derived default,
-        // and a caller that does gets a tangent that turns continuously with
-        // the stamp.
-        if (options.orient_alpha_by_stamp && settings.has_alpha())
-            stamp_settings.alpha_tangent = s.rotation.rotate(kernel::cf3(1, 0, 0));
-
-        if (sculptor.stamp(verb, stamp_settings, mask_gate, deltas) > 0) ++applied;
+        return false;
     }
 
-    if (options.defer_normals) sculptor.flush_normals(deltas);
-    sculptor.set_defer_normals(was_deferring);
+    // THE ANCHOR IS ONLY ASKED FOR WHEN THERE IS ONE. `drag.anchor` is
+    // `kNoClass` for every verb but Snakehook, and `class_position` indexes
+    // its offset array with what it is given — so evaluating this eagerly
+    // is a read past the end whose result is then discarded, which is
+    // exactly the shape that survives every test until a sanitizer or an
+    // unlucky allocation finds it.
+    const kernel::cfloat3 anchor_position = (drag.dragging && !drag.anchored)
+                                                ? sculptor.class_position(drag.anchor)
+                                                : kernel::cf3(0, 0, 0);
+    mesh::MeshBrushSettings stamp_settings =
+        mesh_stamp_settings(settings, s, drag, previous, first, anchor_position);
+    previous = s.position;
+
+    // THE STAMP'S ORIENTATION REACHES THE ALPHA, which is what makes a rake
+    // or a chisel expressible on a mesh layer at all.
+    //
+    // `resolve_stroke` has put rotate-along-stroke and the stylus azimuth
+    // into `Stamp::rotation` since they shipped, and `stamps_to_nodes`
+    // applies it to an SDF item's transform — but this consumer dropped it,
+    // so a mesh stamp faced the same way however the artist turned the
+    // stylus. A rotationally symmetric brush is unaffected either way,
+    // which is why the gap survived: it is only visible through an alpha.
+    //
+    // The rotation takes +X onto the direction the stamp faces (see
+    // `align_x_to`), so that image is the alpha's u axis. `calpha_frame`
+    // re-orthogonalises it against the stamp's own normal, so a tangent
+    // that is not already in the stamp plane is corrected rather than
+    // refused.
+    //
+    // OPTED INTO, not inferred from the quaternion, and the difference is
+    // a defect rather than a preference. The obvious rule — consume the
+    // rotation when it is not the identity — is DISCONTINUOUS at zero:
+    // `align_x_to` returns the identity for an azimuth of exactly 0, so
+    // that stamp would keep `calpha_frame`'s derived tangent, which for an
+    // upward direction is (0, 0, -1), while an azimuth of one
+    // ten-thousandth would take (1, 0, 0). The stamp would snap through 90
+    // degrees as the stylus crossed straight ahead.
+    //
+    // An explicit switch has neither problem: a caller that does not set it
+    // keeps its own `alpha_tangent` exactly, including the derived default,
+    // and a caller that does gets a tangent that turns continuously with
+    // the stamp.
+    if (options.orient_alpha_by_stamp && settings.has_alpha())
+        stamp_settings.alpha_tangent = s.rotation.rotate(kernel::cf3(1, 0, 0));
+
+    return sculptor.stamp(verb, stamp_settings, mask_gate, deltas) > 0;
+}
+
+MeshStrokeGesture::MeshStrokeGesture(mesh::MeshSculptor& sculptor, mesh::MeshBrush verb,
+                                     const mesh::MeshBrushSettings& settings,
+                                     const voxel::MaskField* mask,
+                                     const MeshStrokeOptions& options)
+    : state_(std::make_unique<State>(sculptor, verb, settings, mask, options)) {}
+
+MeshStrokeGesture::~MeshStrokeGesture() { finish(nullptr); }
+
+std::size_t MeshStrokeGesture::apply(const std::vector<Stamp>& stamps,
+                                     mesh::VertexDeltas* deltas) {
+    State& g = *state_;
+    if (stamps.empty() || g.done) return 0;
+    if (!g.begun) {
+        // Nothing to sculpt: the gesture is over before it began, and the
+        // sculptor is left exactly as it was.
+        if (!g.sculptor.valid()) {
+            g.done = true;
+            return 0;
+        }
+        g.begin(stamps.front());
+    }
+    std::size_t applied = 0;
+    for (const Stamp& s : stamps)
+        if (g.stamp(s, deltas)) ++applied;
     return applied;
 }
 
-std::size_t apply_to_multires(mesh::MultiresSculptor& sculptor, const std::vector<Stamp>& stamps,
-                              mesh::MeshBrush verb, const mesh::MeshBrushSettings& settings,
-                              const voxel::MaskField* mask, mesh::MultiresDelta* deltas,
-                              const MeshStrokeOptions& options,
-                              mesh::SculptLayerDelta* layer_deltas) {
-    if (stamps.empty() || !sculptor.surface().valid()) return 0;
-    if (!mesh::multires_offers(verb)) return 0;
+void MeshStrokeGesture::finish(mesh::VertexDeltas* deltas) {
+    State& g = *state_;
+    if (g.done) return;
+    g.done = true;
+    if (!g.begun) return;
+    if (g.options.defer_normals) g.sculptor.flush_normals(deltas);
+    g.sculptor.set_defer_normals(g.was_deferring);
+    g.carry.reset();
+}
 
-    const field::MaskGate mask_gate = mesh_mask_gate(mask, options);
+std::size_t apply_to_mesh(mesh::MeshSculptor& sculptor, const std::vector<Stamp>& stamps,
+                          mesh::MeshBrush verb, const mesh::MeshBrushSettings& settings,
+                          const voxel::MaskField* mask, mesh::VertexDeltas* deltas,
+                          const MeshStrokeOptions& options) {
+    MeshStrokeGesture gesture(sculptor, verb, settings, mask, options);
+    const std::size_t applied = gesture.apply(stamps, deltas);
+    gesture.finish(deltas);
+    return applied;
+}
+
+// -- the multiresolution consumer, as a gesture -------------------------------
+
+struct MultiresStrokeGesture::State {
+    State(mesh::MultiresSculptor& sculptor_, mesh::MeshBrush verb_,
+          const mesh::MeshBrushSettings& settings_, const voxel::MaskField* mask_,
+          const MeshStrokeOptions& options_)
+        : sculptor(sculptor_), verb(verb_), settings(settings_), mask(mask_), options(options_) {}
+
+    mesh::MultiresSculptor& sculptor;
+    mesh::MeshBrush verb;
+    mesh::MeshBrushSettings settings;
+    const voxel::MaskField* mask;
+    MeshStrokeOptions options;
+
+    bool begun = false;
+    bool done = false;
+    field::MaskGate mask_gate;
+    bool was_deferring = false;
+    MeshStrokeDrag drag;
+    std::optional<CarriedRegionScope<mesh::MultiresSculptor>> carry;
+    std::uint64_t capture = 0;
+    kernel::cfloat3 origin = kernel::cf3(0, 0, 0);
+    kernel::cfloat3 previous = kernel::cf3(0, 0, 0);
+
+    bool begin(const Stamp& front);
+    bool stamp(const Stamp& s, mesh::MultiresDelta* deltas, mesh::SculptLayerDelta* layer_deltas);
+};
+
+bool MultiresStrokeGesture::State::begin(const Stamp& front) {
+    begun = true;
+    mask_gate = mesh_mask_gate(mask, options);
     mesh::AutomaskInputs automask;
     if (mesh_automask_inputs(options, &automask)) sculptor.set_automask_inputs(std::move(automask));
 
-    const bool was_deferring = sculptor.defer_normals();
+    was_deferring = sculptor.defer_normals();
     sculptor.set_defer_normals(options.defer_normals);
     // ONE GESTURE. The level record `MeshBrush::Layer` measures its ceiling
     // against starts here rather than carrying over from whatever the caller
@@ -711,58 +924,105 @@ std::size_t apply_to_multires(mesh::MultiresSculptor& sculptor, const std::vecto
     // from the surface as EACH found it.
     sculptor.begin_stroke();
 
-    MeshStrokeDrag drag = drag_of(verb);
+    drag = drag_of(verb);
     mesh::MeshSculptor* level = sculptor.level_sculptor();
-    if (!level) return 0;
+    // No level to sculpt. The whole-stroke call has always returned here
+    // without restoring the deferral, and the gesture keeps that exactly.
+    if (!level) return false;
     if (verb == mesh::MeshBrush::Snakehook) {
         drag.anchor = settings.seed_class;
         if (drag.anchor >= level->adjacency().class_count())
-            drag.anchor = level->nearest_class(stamps.front().position);
+            drag.anchor = level->nearest_class(front.position);
     }
     // ONE GATHER FOR THE GESTURE, on whichever level sculptor is bound. The
     // hierarchy owns the capture because it can REPLACE that sculptor
     // mid-stroke; see `MultiresSculptor`'s carried-region block.
-    const CarriedRegionScope<mesh::MultiresSculptor> carry(sculptor, verb);
-    std::uint64_t capture = sculptor.capture_generation();
-
-    std::size_t applied = 0;
+    carry.emplace(sculptor, verb);
+    capture = sculptor.capture_generation();
     // WHERE THE GESTURE IS MEASURED FROM. The stroke's first sample, until a
     // rebind takes a fresh capture from where the surface now is — after which
     // the remaining drag is measured from THAT stamp, because the region it
     // captured has already taken everything before it.
-    kernel::cfloat3 origin = stamps.front().position;
-    kernel::cfloat3 previous = stamps.front().position;
-    for (const Stamp& s : stamps) {
-        // The same early-out the other consumers take: a stamp whose centre is
-        // frozen costs nothing rather than gathering a region it may not move.
-        if (mask && mask->sample(options.mesh_to_world.apply(s.position)) >= 1.0f) {
-            previous = s.position;
-            continue;
-        }
-        // RE-READ THE LEVEL SCULPTOR EVERY STAMP. A stamp can rebuild the
-        // level's cache — and a host is allowed to move the sculpt level
-        // mid-stroke — so the anchor's position has to come from whatever is
-        // bound NOW rather than from a pointer taken before the loop.
-        level = sculptor.level_sculptor();
-        if (carry.open() && sculptor.capture_generation() != capture) {
-            capture = sculptor.capture_generation();
-            origin = s.position;
-        }
-        const kernel::cfloat3 anchor_position =
-            (drag.dragging && !drag.anchored && level) ? level->class_position(drag.anchor)
-                                                       : kernel::cf3(0, 0, 0);
-        mesh::MeshBrushSettings stamp_settings =
-            mesh_stamp_settings(settings, s, drag, previous, origin, anchor_position);
+    origin = front.position;
+    previous = front.position;
+    return true;
+}
+
+bool MultiresStrokeGesture::State::stamp(const Stamp& s, mesh::MultiresDelta* deltas,
+                                         mesh::SculptLayerDelta* layer_deltas) {
+    // The same early-out the other consumers take: a stamp whose centre is
+    // frozen costs nothing rather than gathering a region it may not move.
+    if (mask && mask->sample(options.mesh_to_world.apply(s.position)) >= 1.0f) {
         previous = s.position;
-
-        if (options.orient_alpha_by_stamp && settings.has_alpha())
-            stamp_settings.alpha_tangent = s.rotation.rotate(kernel::cf3(1, 0, 0));
-
-        if (sculptor.stamp(verb, stamp_settings, mask_gate, deltas, layer_deltas) > 0) ++applied;
+        return false;
     }
+    // RE-READ THE LEVEL SCULPTOR EVERY STAMP. A stamp can rebuild the
+    // level's cache — and a host is allowed to move the sculpt level
+    // mid-stroke — so the anchor's position has to come from whatever is
+    // bound NOW rather than from a pointer taken before the loop.
+    mesh::MeshSculptor* level = sculptor.level_sculptor();
+    if (carry->open() && sculptor.capture_generation() != capture) {
+        capture = sculptor.capture_generation();
+        origin = s.position;
+    }
+    const kernel::cfloat3 anchor_position = (drag.dragging && !drag.anchored && level)
+                                                ? level->class_position(drag.anchor)
+                                                : kernel::cf3(0, 0, 0);
+    mesh::MeshBrushSettings stamp_settings =
+        mesh_stamp_settings(settings, s, drag, previous, origin, anchor_position);
+    previous = s.position;
 
-    if (options.defer_normals) sculptor.flush_normals();
-    sculptor.set_defer_normals(was_deferring);
+    if (options.orient_alpha_by_stamp && settings.has_alpha())
+        stamp_settings.alpha_tangent = s.rotation.rotate(kernel::cf3(1, 0, 0));
+
+    return sculptor.stamp(verb, stamp_settings, mask_gate, deltas, layer_deltas) > 0;
+}
+
+MultiresStrokeGesture::MultiresStrokeGesture(mesh::MultiresSculptor& sculptor,
+                                             mesh::MeshBrush verb,
+                                             const mesh::MeshBrushSettings& settings,
+                                             const voxel::MaskField* mask,
+                                             const MeshStrokeOptions& options)
+    : state_(std::make_unique<State>(sculptor, verb, settings, mask, options)) {}
+
+MultiresStrokeGesture::~MultiresStrokeGesture() { finish(); }
+
+std::size_t MultiresStrokeGesture::apply(const std::vector<Stamp>& stamps,
+                                         mesh::MultiresDelta* deltas,
+                                         mesh::SculptLayerDelta* layer_deltas) {
+    State& g = *state_;
+    if (stamps.empty() || g.done) return 0;
+    if (!g.begun) {
+        const bool can_sculpt = g.sculptor.surface().valid() && mesh::multires_offers(g.verb);
+        if (!can_sculpt || !g.begin(stamps.front())) {
+            g.done = true;
+            return 0;
+        }
+    }
+    std::size_t applied = 0;
+    for (const Stamp& s : stamps)
+        if (g.stamp(s, deltas, layer_deltas)) ++applied;
+    return applied;
+}
+
+void MultiresStrokeGesture::finish() {
+    State& g = *state_;
+    if (g.done) return;
+    g.done = true;
+    if (!g.begun) return;
+    if (g.options.defer_normals) g.sculptor.flush_normals();
+    g.sculptor.set_defer_normals(g.was_deferring);
+    g.carry.reset();
+}
+
+std::size_t apply_to_multires(mesh::MultiresSculptor& sculptor, const std::vector<Stamp>& stamps,
+                              mesh::MeshBrush verb, const mesh::MeshBrushSettings& settings,
+                              const voxel::MaskField* mask, mesh::MultiresDelta* deltas,
+                              const MeshStrokeOptions& options,
+                              mesh::SculptLayerDelta* layer_deltas) {
+    MultiresStrokeGesture gesture(sculptor, verb, settings, mask, options);
+    const std::size_t applied = gesture.apply(stamps, deltas, layer_deltas);
+    gesture.finish();
     return applied;
 }
 
@@ -806,12 +1066,6 @@ void accumulate_dynamic(const mesh::DynamicStampResult& r, mesh::DynamicStampRes
     out->attribute_revision = r.attribute_revision;
 }
 
-// What the adaptive consumer refuses outright, before anything is touched.
-bool dynamic_stroke_refused(const std::vector<Stamp>& stamps, mesh::MeshBrush verb,
-                            const MeshStrokeOptions& options) {
-    return stamps.empty() || !mesh::dynamic_offers(verb) || options.defer_normals;
-}
-
 // The summary a stroke starts from: no counts, and the surface's revisions as
 // they are now, so a stroke that applies nothing still reports current ones.
 void reset_dynamic_summary(const mesh::DynamicSculptor& sculptor,
@@ -851,66 +1105,154 @@ mesh::MeshBrushSettings dynamic_stamp_settings(const mesh::DynamicSculptor& scul
 
 }  // namespace
 
+// -- the adaptive consumer, as a gesture --------------------------------------
+
+struct DynamicStrokeGesture::State {
+    State(mesh::DynamicSculptor& sculptor_, mesh::MeshBrush verb_,
+          const mesh::MeshBrushSettings& settings_,
+          const mesh::DynamicTopologySettings& topology_, const voxel::MaskField* mask_,
+          const MeshStrokeOptions& options_)
+        : sculptor(sculptor_),
+          verb(verb_),
+          settings(settings_),
+          topology(topology_),
+          mask(mask_),
+          options(options_) {}
+
+    mesh::DynamicSculptor& sculptor;
+    mesh::MeshBrush verb;
+    mesh::MeshBrushSettings settings;
+    mesh::DynamicTopologySettings topology;
+    const voxel::MaskField* mask;
+    MeshStrokeOptions options;
+
+    bool begun = false;
+    bool done = false;
+    field::MaskGate mask_gate;
+    MeshStrokeDrag drag;
+    kernel::cfloat3 first = kernel::cf3(0, 0, 0);
+    kernel::cfloat3 previous = kernel::cf3(0, 0, 0);
+    mesh::VertexId anchor;
+    std::optional<CarriedRegionScope<mesh::DynamicSculptor>> carry;
+
+    // The stroke's own refusals, which no stamp can change.
+    bool refused() const { return !mesh::dynamic_offers(verb) || options.defer_normals; }
+    void begin(const Stamp& front);
+    void stamp(const Stamp& s, mesh::TopologyDelta* record, std::size_t* applied,
+               mesh::DynamicStampResult* summary);
+};
+
+void DynamicStrokeGesture::State::begin(const Stamp& front) {
+    begun = true;
+    // Built once for the stroke and shared with the other two consumers, for
+    // the reasons given at `apply_to_mesh`.
+    mask_gate = mesh_mask_gate(mask, options);
+    mesh::AutomaskInputs automask;
+    if (mesh_automask_inputs(options, &automask)) sculptor.set_automask_inputs(std::move(automask));
+
+    drag = drag_of(verb);
+    first = front.position;
+    previous = first;
+    if (drag.dragging && !drag.anchored) anchor = sculptor.nearest_vertex(first);
+
+    // ONE GATHER FOR THE GESTURE, and the remesh maintains what it captured.
+    // See `DynamicSculptor`'s carried-region block.
+    carry.emplace(sculptor, verb);
+}
+
+void DynamicStrokeGesture::State::stamp(const Stamp& s, mesh::TopologyDelta* record,
+                                        std::size_t* applied,
+                                        mesh::DynamicStampResult* summary) {
+    if (dynamic_stamp_frozen(mask, options, s)) {
+        previous = s.position;
+        return;
+    }
+    mesh::MeshBrushSettings stamp_settings =
+        dynamic_stamp_settings(sculptor, settings, s, drag, previous, first, options, &anchor);
+    previous = s.position;
+    // THE GRAB REMESH FOLLOWS THE STAMP, once there is a captured region to
+    // maintain. A ball left at the gesture's first sample never reaches a
+    // tip five brush radii away, so the tip keeps the edges the drag
+    // stretched: measured after a 1.5 drag, the longest edge within a brush
+    // radius of the tip is 0.1450 anchored against 0.0487 following, and 25
+    // vertices are there against 65.
+    //
+    // NOT the surface-wide longest edge, which cannot see this rule: that
+    // maximum lives in the neck behind the tip either way and reads 0.1450
+    // anchored against 0.1466 following. The anchored arm also does 40% MORE
+    // topology work (1381 splits against 980). What the rule buys is the tip
+    // and the work, and the 1.12-against-0.36 figure this comment used to
+    // carry was measured on an UNMAINTAINED carried region, before the rules
+    // below existed.
+    //
+    // Only once the region HAS been captured. The capturing stamp's own
+    // remesh belongs where the gather is, which is the anchor — and on that
+    // stamp the two are the same point anyway unless a mask held the stroke
+    // back first.
+    if (carry->open() && sculptor.carrying()) stamp_settings.center = s.position;
+
+    const mesh::DynamicStampResult r =
+        sculptor.stamp(verb, stamp_settings, topology, mask_gate, record);
+    if (r.changed()) ++*applied;
+    if (summary != nullptr) accumulate_dynamic(r, summary);
+}
+
+DynamicStrokeGesture::DynamicStrokeGesture(mesh::DynamicSculptor& sculptor, mesh::MeshBrush verb,
+                                           const mesh::MeshBrushSettings& settings,
+                                           const mesh::DynamicTopologySettings& topology,
+                                           const voxel::MaskField* mask,
+                                           const MeshStrokeOptions& options)
+    : state_(std::make_unique<State>(sculptor, verb, settings, topology, mask, options)) {}
+
+DynamicStrokeGesture::~DynamicStrokeGesture() { finish(); }
+
+std::size_t DynamicStrokeGesture::apply(const std::vector<Stamp>& stamps,
+                                        mesh::TopologyDelta* record,
+                                        mesh::DynamicStampResult* summary) {
+    State& g = *state_;
+    if (summary != nullptr) reset_dynamic_summary(g.sculptor, summary);
+    if (stamps.empty() || g.done || g.refused()) return 0;
+    if (!g.begun) g.begin(stamps.front());
+    std::size_t applied = 0;
+    for (const Stamp& s : stamps) g.stamp(s, record, &applied, summary);
+    return applied;
+}
+
+std::optional<std::size_t> DynamicStrokeGesture::apply_recorded(
+    const std::vector<Stamp>& stamps, mesh::RecordedGesture& record,
+    mesh::DynamicStampResult* summary) {
+    State& g = *state_;
+    if (summary != nullptr) reset_dynamic_summary(g.sculptor, summary);
+    // Refusals before the mark, so a malformed stroke is never a mismatch and
+    // never re-binds an empty record.
+    if (stamps.empty() || g.done || g.refused()) return 0;
+    // Once per call: inside it only `stamp` writes the surface, into this
+    // record. A later call continues the record the way consecutive
+    // `stamp_recorded` calls do, and is refused if anything moved the surface
+    // in between.
+    if (!record.can_capture_on(g.sculptor.surface())) return std::nullopt;
+    record.begin_capture(g.sculptor.surface());
+    const std::size_t applied = apply(stamps, &record.delta_mutable(), summary);
+    record.end_capture(g.sculptor.surface());
+    return applied;
+}
+
+void DynamicStrokeGesture::finish() {
+    State& g = *state_;
+    if (g.done) return;
+    g.done = true;
+    g.carry.reset();
+}
+
 std::size_t apply_to_dynamic(mesh::DynamicSculptor& sculptor, const std::vector<Stamp>& stamps,
                              mesh::MeshBrush verb, const mesh::MeshBrushSettings& settings,
                              const mesh::DynamicTopologySettings& topology,
                              const voxel::MaskField* mask, mesh::TopologyDelta* record,
                              const MeshStrokeOptions& options,
                              mesh::DynamicStampResult* summary) {
-    if (summary != nullptr) reset_dynamic_summary(sculptor, summary);
-    if (dynamic_stroke_refused(stamps, verb, options)) return 0;
-
-    // Built once for the stroke and shared with the other two consumers, for
-    // the reasons given at `apply_to_mesh`.
-    const field::MaskGate mask_gate = mesh_mask_gate(mask, options);
-    mesh::AutomaskInputs automask;
-    if (mesh_automask_inputs(options, &automask)) sculptor.set_automask_inputs(std::move(automask));
-
-    const MeshStrokeDrag drag = drag_of(verb);
-    const kernel::cfloat3 first = stamps.front().position;
-    mesh::VertexId anchor;
-    if (drag.dragging && !drag.anchored) anchor = sculptor.nearest_vertex(first);
-
-    // ONE GATHER FOR THE GESTURE, and the remesh maintains what it captured.
-    // See `DynamicSculptor`'s carried-region block.
-    const CarriedRegionScope<mesh::DynamicSculptor> carry(sculptor, verb);
-
-    std::size_t applied = 0;
-    kernel::cfloat3 previous = first;
-    for (const Stamp& s : stamps) {
-        if (dynamic_stamp_frozen(mask, options, s)) {
-            previous = s.position;
-            continue;
-        }
-        mesh::MeshBrushSettings stamp_settings =
-            dynamic_stamp_settings(sculptor, settings, s, drag, previous, first, options, &anchor);
-        previous = s.position;
-        // THE GRAB REMESH FOLLOWS THE STAMP, once there is a captured region to
-        // maintain. A ball left at the gesture's first sample never reaches a
-        // tip five brush radii away, so the tip keeps the edges the drag
-        // stretched: measured after a 1.5 drag, the longest edge within a brush
-        // radius of the tip is 0.1450 anchored against 0.0487 following, and 25
-        // vertices are there against 65.
-        //
-        // NOT the surface-wide longest edge, which cannot see this rule: that
-        // maximum lives in the neck behind the tip either way and reads 0.1450
-        // anchored against 0.1466 following. The anchored arm also does 40% MORE
-        // topology work (1381 splits against 980). What the rule buys is the tip
-        // and the work, and the 1.12-against-0.36 figure this comment used to
-        // carry was measured on an UNMAINTAINED carried region, before the rules
-        // below existed.
-        //
-        // Only once the region HAS been captured. The capturing stamp's own
-        // remesh belongs where the gather is, which is the anchor — and on that
-        // stamp the two are the same point anyway unless a mask held the stroke
-        // back first.
-        if (carry.open() && sculptor.carrying()) stamp_settings.center = s.position;
-
-        const mesh::DynamicStampResult r =
-            sculptor.stamp(verb, stamp_settings, topology, mask_gate, record);
-        if (r.changed()) ++applied;
-        if (summary != nullptr) accumulate_dynamic(r, summary);
-    }
+    DynamicStrokeGesture gesture(sculptor, verb, settings, topology, mask, options);
+    const std::size_t applied = gesture.apply(stamps, record, summary);
+    gesture.finish();
     return applied;
 }
 
@@ -919,16 +1261,9 @@ std::optional<std::size_t> apply_to_dynamic_recorded(
     const mesh::MeshBrushSettings& settings, const mesh::DynamicTopologySettings& topology,
     const voxel::MaskField* mask, mesh::RecordedGesture& record, const MeshStrokeOptions& options,
     mesh::DynamicStampResult* summary) {
-    if (summary != nullptr) reset_dynamic_summary(sculptor, summary);
-    // Refusals before the mark, so a malformed stroke is never a mismatch and
-    // never re-binds an empty record.
-    if (dynamic_stroke_refused(stamps, verb, options)) return 0;
-    // Once: inside the stroke only `stamp` writes the surface, into this record.
-    if (!record.can_capture_on(sculptor.surface())) return std::nullopt;
-    record.begin_capture(sculptor.surface());
-    const std::size_t applied = apply_to_dynamic(sculptor, stamps, verb, settings, topology, mask,
-                                                 &record.delta_mutable(), options, summary);
-    record.end_capture(sculptor.surface());
+    DynamicStrokeGesture gesture(sculptor, verb, settings, topology, mask, options);
+    const std::optional<std::size_t> applied = gesture.apply_recorded(stamps, record, summary);
+    gesture.finish();
     return applied;
 }
 

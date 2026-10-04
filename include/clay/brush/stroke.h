@@ -22,6 +22,7 @@
 // landing in a frozen region is simply not emitted.
 
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <vector>
 
@@ -214,22 +215,62 @@ std::vector<Stamp> resolve_stroke(const std::vector<StrokeSample>& samples,
 // final length and would be wrong on every stroke that is still moving. So a
 // stamp already emitted may be REVISED by a later append — `stamps()` is always
 // the truth, and the return of `append` is the new tail. A host drawing a live
-// preview redraws from `stamps()`; one that only ever adds geometry can use the
-// tail and accept that a tapered stroke's last few stamps settle when the
-// finger lifts.
+// preview redraws from `stamps()`. One that only ever adds geometry must NOT
+// apply the tail as it comes: a stamp it applied cannot be revised, and the
+// tail of a tapered stroke is still tapering. It applies the settled stamps
+// instead, through a `StampCursor`.
+//
+// SETTLED STAMPS ARE THE ONES A CONSUMER MAY APPLY (#670). `settled()` counts
+// the leading stamps no later append can change in anything a consumer reads —
+// position, radius, strength, deposit, rotation. `along` is excluded: it is a
+// fraction of the whole path and moves on every append, and no consumer reads
+// it. A stamp is settled when:
+//   - the path has at least two samples (a lone sample has no direction yet,
+//     and its azimuth has not been through the interpolation every later
+//     resolve puts it through);
+//   - its arc-length station lies on the path already received, so a longer
+//     path finds the same segment and the same interpolation — the station
+//     the count's epsilon admits just past the end does not;
+//   - it is outside the END taper at the current length. Growth only moves a
+//     station out of that zone, never back in;
+//   - and the preset has NO START taper. `taper_start` is a fraction of the
+//     whole stroke too, so as the stroke grows every station is eventually
+//     inside it: nothing of such a stroke is final before `finish()`.
+// Everything else a stamp depends on is causal — spacing, steady (a lag over
+// samples already received), pressure, tilt, azimuth and velocity
+// (interpolated within a received segment), and jitter (a hash of the station
+// index). After `finish()` every stamp is settled.
+//
+// So a consumer that applies exactly the settled stamps, as they settle,
+// applies the stamps of the whole path — bit for bit — however the samples
+// were batched, and holds back the taper tail until the stroke ends.
 class StrokeTransaction {
    public:
     explicit StrokeTransaction(const StrokePreset& preset) : preset_(preset) {}
 
     // Add samples and resolve. Returns the stamps beyond the ones previous
-    // calls already returned.
+    // calls already returned. A finished transaction takes no more samples:
+    // the call returns nothing and changes nothing.
     std::vector<Stamp> append(const std::vector<StrokeSample>& samples);
+
+    // The stroke has ended: no sample will follow, so every stamp is settled,
+    // the end taper included. Idempotent.
+    void finish() { finished_ = true; }
+    bool finished() const { return finished_; }
 
     // Every stamp of the stroke as it now stands, including any earlier ones a
     // later append revised.
     const std::vector<Stamp>& stamps() const { return stamps_; }
     const std::vector<StrokeSample>& samples() const { return samples_; }
     const StrokePreset& preset() const { return preset_; }
+
+    // How many leading stamps are final; see the class comment.
+    std::size_t settled() const { return finished_ ? stamps_.size() : settled_; }
+
+    // The first stamp the last append changed in anything but `along`, or the
+    // stamp count before it when it only added stamps. A preview redraws from
+    // here. Never below what was settled before that append.
+    std::size_t revised_from() const { return revised_from_; }
 
     // Start again, keeping the preset.
     void clear();
@@ -239,6 +280,33 @@ class StrokeTransaction {
     std::vector<StrokeSample> samples_;
     std::vector<Stamp> stamps_;
     std::size_t emitted_ = 0;
+    std::size_t settled_ = 0;
+    std::size_t revised_from_ = 0;
+    bool finished_ = false;
+};
+
+// The pure resolver, also reporting how many leading stamps are settled in the
+// sense StrokeTransaction documents. `resolve_stroke` is this with the count
+// dropped.
+std::vector<Stamp> resolve_stroke_settled(const std::vector<StrokeSample>& samples,
+                                          const StrokePreset& preset, std::size_t* settled);
+
+// Hands a consumer each SETTLED stamp of a transaction exactly once, in order.
+// The cursor is the consumer's, not the transaction's, so two consumers of one
+// stroke each see every stamp.
+class StampCursor {
+   public:
+    // The settled stamps not taken before. Empty when nothing new settled.
+    std::vector<Stamp> take(const StrokeTransaction& tx);
+    // How many stamps have been taken: the stroke index of the next one.
+    std::size_t taken() const { return taken_; }
+    // Every stamp of a finished transaction has been taken.
+    bool drained(const StrokeTransaction& tx) const {
+        return tx.finished() && taken_ >= tx.stamps().size();
+    }
+
+   private:
+    std::size_t taken_ = 0;
 };
 
 // -- consumers ----------------------------------------------------------------
@@ -249,10 +317,15 @@ class StrokeTransaction {
 // Apply stamps to a voxel grid as ordinary brush stamps. `shape` and `falloff`
 // are the footprint; `index` is the palette entry to set, or 0 to erase.
 // Returns the number of stamps that actually ran (masked ones do not).
+//
+// Each stamp dithers with its index IN THE STROKE as the seed, so a stroke is
+// not banded. `first_index` is the stroke index of `stamps[0]`: 0 for a whole
+// stroke, and the count already applied for a stroke applied in pieces, which
+// is what keeps the pieces bit-identical to the whole.
 std::size_t apply_to_grid(voxel::VoxelGrid& grid, const std::vector<Stamp>& stamps,
                           std::uint8_t index, voxel::BrushShape shape = voxel::BrushShape::Sphere,
                           voxel::BrushFalloff falloff = voxel::BrushFalloff::Smooth,
-                          const voxel::MaskField* mask = nullptr);
+                          const voxel::MaskField* mask = nullptr, std::size_t first_index = 0);
 
 // Paint a mask from the same stamps. The third consumer, and the one that makes
 // masking a GESTURE rather than a data structure: spacing, pressure, taper,
@@ -556,6 +629,97 @@ std::optional<std::size_t> apply_to_dynamic_recorded(
     const mesh::MeshBrushSettings& settings, const mesh::DynamicTopologySettings& topology,
     const voxel::MaskField* mask, mesh::RecordedGesture& record,
     const MeshStrokeOptions& options = {}, mesh::DynamicStampResult* summary = nullptr);
+
+// -- a mesh stroke applied in pieces (#670) ------------------------------------
+//
+// The three mesh consumers above take a WHOLE stroke, and a stroke under a
+// finger arrives in pieces. Applying each piece as a stroke of its own is not
+// the same gesture: a grab would re-gather its region at every piece, a
+// snakehook would re-find its anchor, a multiresolution stroke would restart
+// the record `MeshBrush::Layer` measures against, and deferred normals would be
+// flushed mid-gesture.
+//
+// So each consumer is a GESTURE that holds what a stroke carries between its
+// stamps — the carried region, the anchor, the first and previous stamp, the
+// deferral — and takes its stamps in as many `apply` calls as the host likes.
+// The whole-stroke functions above are exactly one gesture fed once, so the
+// two cannot drift: a stroke applied in pieces is bit-identical to the same
+// stamps applied whole.
+//
+// THE SCULPTOR IS BORROWED FOR THE GESTURE. Between the first `apply` and
+// `finish` it may hold an open carried region and a deferred-normal flag, so
+// nothing else may stamp it, and it must outlive the gesture. Destroying an
+// unfinished gesture finishes it without a record to flush normals into.
+
+class MeshStrokeGesture {
+   public:
+    MeshStrokeGesture(mesh::MeshSculptor& sculptor, mesh::MeshBrush verb,
+                      const mesh::MeshBrushSettings& settings,
+                      const voxel::MaskField* mask = nullptr,
+                      const MeshStrokeOptions& options = {});
+    ~MeshStrokeGesture();
+    MeshStrokeGesture(const MeshStrokeGesture&) = delete;
+    MeshStrokeGesture& operator=(const MeshStrokeGesture&) = delete;
+
+    // The next stamps of the gesture. Returns how many moved a vertex.
+    std::size_t apply(const std::vector<Stamp>& stamps, mesh::VertexDeltas* deltas = nullptr);
+    // Flush deferred normals into `deltas`, restore the deferral the sculptor
+    // had and release the carried region. Idempotent.
+    void finish(mesh::VertexDeltas* deltas = nullptr);
+
+   private:
+    struct State;
+    std::unique_ptr<State> state_;
+};
+
+class MultiresStrokeGesture {
+   public:
+    MultiresStrokeGesture(mesh::MultiresSculptor& sculptor, mesh::MeshBrush verb,
+                          const mesh::MeshBrushSettings& settings,
+                          const voxel::MaskField* mask = nullptr,
+                          const MeshStrokeOptions& options = {});
+    ~MultiresStrokeGesture();
+    MultiresStrokeGesture(const MultiresStrokeGesture&) = delete;
+    MultiresStrokeGesture& operator=(const MultiresStrokeGesture&) = delete;
+
+    // `layer_deltas` is `apply_to_multires`'s: the half of the record a stamp
+    // writes when the stack has an active sculpt layer.
+    std::size_t apply(const std::vector<Stamp>& stamps, mesh::MultiresDelta* deltas = nullptr,
+                      mesh::SculptLayerDelta* layer_deltas = nullptr);
+    void finish();
+
+   private:
+    struct State;
+    std::unique_ptr<State> state_;
+};
+
+class DynamicStrokeGesture {
+   public:
+    DynamicStrokeGesture(mesh::DynamicSculptor& sculptor, mesh::MeshBrush verb,
+                         const mesh::MeshBrushSettings& settings,
+                         const mesh::DynamicTopologySettings& topology,
+                         const voxel::MaskField* mask = nullptr,
+                         const MeshStrokeOptions& options = {});
+    ~DynamicStrokeGesture();
+    DynamicStrokeGesture(const DynamicStrokeGesture&) = delete;
+    DynamicStrokeGesture& operator=(const DynamicStrokeGesture&) = delete;
+
+    // `summary` is reset and describes THIS call's stamps only.
+    std::size_t apply(const std::vector<Stamp>& stamps, mesh::TopologyDelta* record = nullptr,
+                      mesh::DynamicStampResult* summary = nullptr);
+    // Each call is checked and captured into `record` as its own capture, the
+    // way consecutive `stamp_recorded` calls continue one record: nullopt,
+    // having stamped nothing, when the surface is no longer where the record
+    // left it.
+    std::optional<std::size_t> apply_recorded(const std::vector<Stamp>& stamps,
+                                              mesh::RecordedGesture& record,
+                                              mesh::DynamicStampResult* summary = nullptr);
+    void finish();
+
+   private:
+    struct State;
+    std::unique_ptr<State> state_;
+};
 
 // -- snakehook ----------------------------------------------------------------
 //
