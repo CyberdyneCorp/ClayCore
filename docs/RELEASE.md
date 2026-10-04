@@ -1139,6 +1139,114 @@ forward-refuse).
    without a bump, and ship here. The bump is the release branch's own commit,
    `7f6cf38f`.
 
+   **0.121.0 through 0.126.0 are additive at the ABI: 32 functions added, none
+   removed, and no existing struct re-laid out or appended to.** 0.121.0 adds
+   per-item mirror axes (#673): `clay_item_set_mirror_axes`,
+   `clay_item_mirror_axes`, `clay_layer_set_node_mirror` (one undo step) and
+   `clay_layer_node_mirror`, with `CLAY_MIRROR_AXES_INHERIT`. 0.122.0 adds
+   `clay_item_volume_move_topological_from` (#681), a topological move sampled
+   straight from a document. 0.123.0 adds `clay_voxel_grid_clone` and
+   `clay_voxel_get_occupied` (#682), so grid-to-field can leave the interface
+   thread, and writes the voxel reads' threading down. 0.124.0 adds
+   `clay_mesh_from_arrays` and its `clay_mesh_arrays` descriptor (#685), keeping
+   a host's uvs, normals and colours. 0.125.0 adds the opaque
+   `clay_multires_delta`, its `clay_multires_delta_stats` descriptor and twelve
+   entry points (#687), the first undo record a host holding a `clay_multires`
+   has had. 0.126.0 adds the opaque `clay_stroke_tx`, its
+   `clay_stroke_tx_status` descriptor and twelve entry points (#688): a stroke
+   session whose six consumers apply only settled stamps, bit-identical to the
+   whole-path call. Against v0.120.1: 708 -> 740 `clay_*(` symbols; the only
+   `-` lines in the `clay.h` diff that are not comments are the
+   `CLAY_ABI_MINOR` and `CLAY_ABI_PATCH` defines, and no hunk adds a field to a
+   struct that existed before. The three new structs lead with `struct_size`.
+
+   **AND IT IS A RELEASE A CALLER OBSERVES WITHOUT CALLING ANYTHING NEW**, in
+   the format and in entry points it already calls, none announced by a version
+   gate.
+
+   **The scene and `.clayspace` format minor moves 19 -> 20** (#673): one byte
+   per node record. A default save writes minor 20; minor 19 is still writable,
+   byte for byte, when no item carries its own axes, and refused with the
+   blocking layer named when one does. Older documents load with every item
+   inheriting and evaluate as saved. The crash journal gains the
+   `SetNodeMirrorCmd` event, so a v0.126.0 journal carrying one is not
+   replayable by an older build.
+
+   **A crash journal started by a mid-session enable is refused against a
+   snapshot the document was edited away from** (#675 -- issue #641). It was
+   accepted and replayed without the pre-enable edits: load, set (0,0,0),
+   enable, set (1,0,0), replay onto the snapshot gave `CLAY_OK` with (0,0,0)
+   missing; now `CLAY_ERROR_SNAPSHOT_MISMATCH`, applied 0. The cost is one
+   encode at enable (2.16 ms on a 1.58 MB voxel document) and a one-time
+   re-encode when loading an older minor (1.41 -> 3.61 ms at minor 19), which is
+   every file v0.120.1 wrote (pyclay, `cpu-only` Release, median of 15, host
+   model not named).
+
+   **A squashed placement is no longer culled out of bricks its field reaches**
+   (#680 -- part of issue #649, which stays open). The cull widens a
+   per-axis-scaled item's bound by `(q - 1)(band + pad + w)`, exactly 0 for a
+   similarity, so unsquashed documents make identical decisions. Item or layer
+   scaled (4, 1, 1): **652 in-band samples off, worst 0.11 -> 0**; the issue's
+   rich sweep **35 documents, worst 0.0825 -> 9, worst 0.0170** (Release, Apple
+   M-series). Unsquashed cull and refill benchmarks cost 1.1-4.0% (same host).
+   **#649's mechanism A, the chain-pad envelope below 75 contributors, is NOT
+   fixed** -- the PR and its proposal say so -- and #649 stays open on it.
+
+   **A region edit after an append no longer serves the pre-append field**
+   (#668 -- issue #665): 1,171 stale surface bricks -> 192, bit-identical to a
+   rebuild. A seed an append reached is walked in full rather than resumed; the
+   first far region edit after 200 / 1,000 / 3,000 dabs costs 0.52 / 0.89 /
+   1.27 ms against 0.21-0.30 ms for the unsound rule (no host named).
+
+   **`clay_layer_set_transform_bound` pads an intersect operand by the combines
+   after it** (#676 -- issue #666), as a sum of their supports: 1,152 -> **256**
+   delta bricks at ten times the extent, and the box WIDENS where smooth
+   combines follow the operand, because the old one left 35 stale bricks there.
+   **`clay_layer_node_influence_bound` and `clay_brick_cache_mark_dirty_nodes`
+   report a relief or incise item's own bound** (#683 -- issue #672): a
+   4-sample stroke 2,548 -> **48** bricks. Both are deterministic counts.
+
+   **A Move drag on a mirror plane is applied once** (#669 -- issue #663): lift
+   0.2309 -> **0.1458**, the unmirrored value, and
+   `clay_sdf_move_preview_grab_count` reads 1 where it read 2 (4 on a radial
+   axis), and 3 for an oblique drag where it read 2.
+   **`clay_item_volume_move_topological` sub-steps a drag past half its reach**
+   (#681 -- issue #657): anchor height 0.939 -> 1.116 on the issue's probe; a
+   one-slice drag is bit-identical. **Mask extrude reaches the requested
+   thickness** (#667 -- issue #660): a 0.6 wall stopped near 0.11. **The six
+   mesh frame verbs move along an area-weighted normal** (#677 -- issue #631):
+   fin tilt 11.47 -> 0.15 degrees, the adaptive stamp 1-8% dearer (arm64
+   macOS, `cpu-only` Release).
+
+   **`clay_voxel_to_layer` is one undo step** (#679 -- issue #656), not two.
+   **The five consolidation calls return `CLAY_ERROR_UNSUPPORTED` for a voxel
+   or mesh layer** (#684 -- issue #659), where they said "nothing to
+   consolidate", and `clay_layer_plan_region_merge` fails where it returned an
+   empty plan. **`clay_document_mesh_combined` exports a document whose only
+   visible geometry is mesh layers** (#686 -- issue #662), where it refused.
+   C++ only: `session::History` keeps a held `DynamicSculptor`'s index in step
+   (#674 -- issue #629), and a mesh cage drag sums only the dragged points
+   (#655), ~1.7 s -> ~11 ms per 32^3 preview frame in ClaySpace (the host's
+   numbers). #678 is tests and comments only.
+
+   **None of 0.121.0, 0.122.0, 0.123.0, 0.124.0 or 0.125.0 was ever tagged on
+   its own.** Each merged with its feature -- #673, #681, #682, #685 and #687
+   respectively, and #688 for 0.126.0 -- and v0.126.0 is the tag cut at
+   whatever the line had reached, exactly as v0.120.0 covered 0.117.0-0.120.0.
+   No minor in this range was skipped, and nothing was bumped at release time.
+
+   **Four merges carry the already-released 0.120.1 version line and are NOT in
+   v0.120.1**: #655, #667, #668 and #669 merged after the tag and before #673's
+   bump, and ship here. The other merges carry the line they landed on: #674-#680
+   0.121.0, #683 and #684 0.123.0, #686 0.124.0.
+
+   **The device gate for 0.126.0 has not run**; it is pending with the iPad
+   team, and `tests/device/last-gate.json` is still v0.120.1's (`7f6cf38f`). The
+   four hardware gates are carried as waivers at `4401b354`: the only
+   kernel-relevant change since `59e42ccf` is `include/clay/eval/bake_volume.h`
+   (#680, `8d015258`), which passes the band into the per-brick cull and
+   changes no kernel arithmetic, and `tests/unit/test_parity.cpp` is unchanged.
+
    **0.113.0 stops decimation breaking a manifold it was given** (#567).
    meshoptimizer chooses its own collapses and does not apply the link condition
    collapse_edge refuses on, so clay_document_mesh -- documented as the
