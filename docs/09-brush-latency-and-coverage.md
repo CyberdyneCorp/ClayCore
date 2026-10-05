@@ -157,7 +157,7 @@ representation, `s` the SDF one, `m` a mesh layer's own triangles.
 | Surface Noise | Noise | `noise` deformer | s | `noise_detail` | 0.1623 | gesture |
 | Mask | Mask | mask fields + stroke engine | s v | `mask_paint` | 0.003504 | interactive |
 | Mask (freeze effect) | Mask | mask-gated verbs | s v | `mask_freeze` | 0.007822 | interactive |
-| Extract | Split / Extract | `brush::mask_extrude` | s v | `mask_extrude` | 4040 ‡ | operation |
+| Extract | Split / Extract | `brush::mask_extrude` | s v | `mask_extrude` | 5436 ‡ | operation |
 | ZSpheres | — | `Prim::armature` | s | `armature_edit` | 0.0005808 | gesture |
 | Alphas | Alphas | `sculpt_carve_alpha` | v | `voxel_carve_alpha` | 0.001006 | interactive |
 | — | Paint | `voxel_paint_brush` | v | `voxel_paint` | 0.002541 | interactive |
