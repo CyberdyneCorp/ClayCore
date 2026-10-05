@@ -21,14 +21,32 @@ of idle iPad before you start. Raise the cooldown and it grows from there.
 iPads attached and only the reference device is accepted — a run from any other
 model or OS is *refused*, not scored, after a ~10-minute rebuild.
 
-- Reference device: **iPad15,5 (iPad Air 13-inch, M3) on iOS 27.0 (24A437)**,
+- Reference device: **iPad15,5 (iPad Air 13-inch, M3) on iOS 27.0.1 (24A446)**,
   listed locally as `iPad (52)`, UDID `00008122-000410410A6B801C`. It moved from
-  26.5.2 on 2026-09-18 and was re-baselined in PR #625. `check_device_bench.py`
-  refuses a run whose `osVersion` differs from the baseline, so **an OS update
-  on this iPad means a re-baseline before anything can be scored again** — and
-  the release that re-baselines has no `REGRESSION` coverage, because a baseline
-  written from a run is compared against itself. `BUDGET` and `GROWTH` still
-  gate; regression coverage returns with the next same-OS run.
+  26.5.2 to 27.0 on 2026-09-18 (re-baselined in PR #625) and from 27.0 to
+  27.0.1 by 2026-10-04 (re-baselined in PR #690). `check_device_bench.py`
+  refuses a run whose `osVersion` differs from the baseline, **and the match is
+  the exact string `Version 27.0.1 (Build 24A446)`, so a point release
+  invalidates the baseline exactly as a major one does.** Before committing to
+  a three-hour run, compare the device against the baseline — it takes a
+  second and the refusal otherwise arrives after the last session:
+
+  ```sh
+  xcrun devicectl device info details --device <udid> | grep -E "OS Version|OS Build"
+  grep osVersion tests/device/baseline.json
+  ```
+
+  **Re-baseline from the previous release's engine, not from the release
+  being gated.** A baseline written from the release's own run is compared
+  against itself, so that release ships with no `REGRESSION` coverage (v0.120.0
+  did; only `BUDGET` and `GROWTH`, which are absolute, still gate). The recipe
+  that keeps the before/after comparison is two runs: check out the previous
+  release's gate commit (the `claycoreCommit` in `last-gate.json`) in a
+  separate `git worktree`, run the full gate there on the new OS, write the
+  baseline with `--update`, merge that baseline to `main` in its own PR, rebase
+  the release branch onto it, and only then gate the release without
+  `--update`. `tests/` is not a device-relevant path, so the baseline PR does
+  not stale the release's `device` row.
 - Confirm it is above the `== Devices Offline ==` line:
   `xcrun xctrace list devices`
 
@@ -52,6 +70,41 @@ fix is an interactive Xcode sign-in, which an agent cannot do: ask. Then
 uninstall the stale host, which was signed by the dead identity:
 
 ```sh
+xcrun devicectl device uninstall app --device <udid> com.cyberdyne.claycore.devicehost
+```
+
+**The keychain check is not enough: Xcode also needs a signed-in account.**
+On 2026-10-04 `security find-identity -v` listed a valid identity and the run
+still failed every target in session 1/7 with "No Accounts: Add a new account
+in Accounts settings", "No profiles for 'com.cyberdyne.claycore.devicehost'
+were found" and "Signing certificate ... is not valid for code signing. It may
+have been revoked or expired" — for a certificate issued five days earlier.
+Xcode's account had been signed out (an Xcode update does this), so
+`-allowProvisioningUpdates` could not regenerate the bundle's profile and the
+certificate could not be validated against the team. Same fix as expiry: an
+interactive sign-in in Xcode > Settings > Accounts, which an agent cannot do.
+Check before building: `defaults read com.apple.dt.Xcode
+DVTDeveloperAccountManagerAppleIDLists` prints an empty list when nobody is
+signed in, and the devicehost profile is absent from
+`~/Library/Developer/Xcode/UserData/Provisioning Profiles` (it is recreated on
+the first signed run).
+
+**Check the iPad's free storage, not just the Mac's.** The same day, with
+signing fixed, session 1/7 died at install: "Not enough space for ...
+PromiseStaging ... 62401330 bytes needed, 6060104 bytes available (0 free,
+6060104 purgable). Insufficient storage." The host is ~60 MB. The reading
+that matters is `AmountDataAvailable` from
+`ideviceinfo -u <udid> -q com.apple.disk_usage` — `TotalDataAvailable` in the
+same output read 92 GB while the install failed, so do not trust it. Freeing
+apps on the iPad is the fix; an agent should ask rather than delete.
+
+**The cheapest preflight for both is a direct install of the last built host**,
+which takes seconds and fails the same way a session would, before the ~10
+minute xcframework rebuild:
+
+```sh
+APP=$(ls -d ~/Library/Developer/Xcode/DerivedData/ClayCoreDevice-*/Build/Products/Debug-iphoneos/ClayCoreDeviceHost.app | head -1)
+xcrun devicectl device install app --device <udid> "$APP"
 xcrun devicectl device uninstall app --device <udid> com.cyberdyne.claycore.devicehost
 ```
 
@@ -200,14 +253,27 @@ idevicediagnostics -u <udid> ioregentry AppleSmartBattery   # had Temperature, c
 ```
 
 On iOS 26.5.2 this returned `Temperature` (centi-degC). **Since the move to iOS
-27.0 (24A437) it returns no `Temperature` key on this device**, with
-libimobiledevice 1.4.0's `idevicediagnostics`. Whether iOS 27 removed the key
-or the tool fell behind the OS is **UNVERIFIED**. The untried alternative is
-`pymobiledevice3`, whose diagnostics commands include an IORegistry query —
-nobody here has run it, so take the exact invocation from its `--help` rather
-than from this file. Try it before concluding the reading is gone for good, and correct this section with what it says. Until
-then, what is left is the console filter below, which only reports the
-transition, and cooldowns long enough that you do not need the number.
+27.0 (24A437) it returns no `Temperature` key on this device**, and on 27.0.1
+(24A446) it still does not. **VERIFIED on 2026-10-04 that iOS removed the key,
+not that the tool fell behind:** `pymobiledevice3` (installed with
+`uv tool install pymobiledevice3`) reads the same IORegistry entry through its
+own implementation and agrees with libimobiledevice 1.4.0:
+
+```sh
+pymobiledevice3 diagnostics ioregistry --udid <udid> --ioclass AppleSmartBattery
+pymobiledevice3 diagnostics battery single --udid <udid>
+```
+
+Both return the full `AppleSmartBattery` entry (210 keys) with no live
+temperature in it. The only temperature-named keys, `AverageBattSkinTemp` and
+`AverageBattVirtualTemp`, sit under `DeadBatteryBootData/GeneralPayload` and
+read 0 — a boot record, not a reading. The thermistor itself is still listed
+(`--ioclass IOHIDEventService` shows `AppleTMP103`, `temperature,tmp103`) but
+publishes no value through the lockdown diagnostics service. So what is left is
+the console filter below, which only reports the transition, and cooldowns
+long enough that you do not need the number. Both tools have to be installed
+first — neither was on this Mac on 2026-10-04 (`brew install libimobiledevice`
+for `idevicesyslog`; the crash-report and diagnostics commands come with it).
 
 What the reading meant when it worked, kept for when it works again:
 `Temperature = 3350` is 33.50 °C. On the reference iPad: lifetime average 24 °C,
@@ -215,6 +281,35 @@ lifetime maximum 37.9 °C, ~30 °C idle, and it fell from a session's heat back 
 30 °C in about twelve minutes. A gate run that stays under ~33 °C completes.
 Parse it with `/usr/bin/python3`, not Homebrew's — the brewed 3.14 has a broken
 `pyexpat` and `plistlib` cannot load.
+
+**On iOS 27.0.1 the console is not reachable from the Mac either.** Checked
+2026-10-04: `idevicesyslog -u <udid>` prints `[connected]` then
+`[disconnected]` and nothing else, and `pymobiledevice3 syslog live` returns
+no lines without a privileged tunnel (`sudo pymobiledevice3 remote tunneld`),
+which an agent cannot start. So the filter below captures nothing on this OS;
+keep it for when it works again, and do not read an empty `gate.thermal` as
+"no thermal event".
+
+**What does work is asking the harness.** `VerbLatencyTests
+.testEveryVerbOnDevice` samples `ProcessInfo.thermalState` at both ends of
+its first case and fails within ~14 s with `thermal state serious -> serious`
+on a hot device, or passes in the same 14 s on a cool one. Run only that case
+against the already-generated project — no xcframework rebuild — and the
+answer costs under a minute of light work, which does not heat the device
+enough to matter:
+
+```sh
+xcodebuild test -project tests/device/ClayCoreDevice.xcodeproj -scheme ClayCoreDevice \
+  -destination "platform=iOS,id=<udid>" -allowProvisioningUpdates DEVELOPMENT_TEAM=2C69VJZSNR \
+  -only-testing:ClayCoreDeviceVerbTests/VerbLatencyTests/testEveryVerbOnDevice 2>&1 \
+  | grep -E "thermal state|Test Case .* (passed|failed)"
+```
+
+On 2026-10-04 the device read `serious` at 17:20 after an afternoon of OS
+update, app deletions and an Xcode launch, with no gate session having run,
+and `nominal` at 17:52 after thirty idle minutes with the screen off. Probe
+before the run rather than discovering the refusal after the ten-minute
+rebuild, and probe between attempts rather than guessing a cooldown.
 
 **Do NOT redirect a full `idevicesyslog` into a file for a long run.** It writes
 ~1.1 GB an hour, and on 2026-09-05 that filled the disk and killed the gallery
@@ -247,6 +342,34 @@ Reading the probe (iOS 26.5.2): the temperature is nested under the `IORegistry`
 the top level — `plistlib.loads(out)['IORegistry']['Temperature']`. A top-level
 read returns `None`, which looks like an unsupported device rather than a wrong
 key.
+
+**After an OS update the iPad heats itself, and no cooldown fixes that.** On
+2026-10-04/05, the day the reference iPad moved to 27.0.1, four attempts were
+heat-killed (the `signal kill` / no JetsamEvent / no crash report signature
+above) 36–80 s into a session, each after a 15–30 minute cooldown and a
+`nominal` probe, at 18:09, 19:22, 21:29 and 01:02; the heavy-verb bundle
+passed exactly once, at 20:58. What the device was doing in between:
+`xcrun devicectl device info processes` listed four
+`TGOnDeviceInferenceProviderService`, two `ANECompilerService`, two
+`AlchemistInferenceProvider`, plus `photoanalysisd`, `mediaanalysisd`,
+`siriinferenced` and `knowledgeconstructiond` — Apple Intelligence and photo
+analysis on the Neural Engine — and the iPad wrote three JetsamEvents of its
+own (20:00, 21:51, 23:38) with nothing of ours running, with
+`ANECompilerService` killed on `per-process-limit`. That load keeps the skin
+temperature near the `hot condition` Warn threshold, so a session's own work
+crosses it inside a minute while `ProcessInfo.thermalState` still says
+`nominal`. Check for it before a post-update gate:
+
+```sh
+xcrun devicectl device info processes --device <udid> \
+  | grep -ciE "InferenceProvider|ANECompiler|photoanalysisd|mediaanalysisd"
+idevicecrashreport -u <udid> -e /tmp/crash && ls /tmp/crash | grep JetsamEvent
+```
+
+If it is there, the options are to wait for the indexing to finish (it ran for
+more than 15 hours here), to turn Wi-Fi off and pause Apple Intelligence on
+the device for the run, or both. Low Power Mode is not one: it changes the
+clocks and the run would measure a different device.
 
 **The fix is cooling, not splitting.** This device took ~12 minutes to fall from
 `Warn` to level 0 after one session. Give it a genuinely cold start, raise
