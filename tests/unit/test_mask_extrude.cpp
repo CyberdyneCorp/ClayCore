@@ -6,8 +6,12 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
+#include <functional>
+#include <string>
 #include <vector>
 
+#include "../../src/brush/mask_extrude_internal.h"
 #include "clay/brush/mask_extrude.h"
 #include "clay/field/volume.h"
 #include "clay/voxel/grid.h"
@@ -596,3 +600,312 @@ TEST_CASE("mask extrude: border_smooth rounds the rim it is asked to round") {
         last = v;
     }
 }
+
+// -- the projection is paid only where the mask can matter --------------------
+//
+// #667 reads the mask at each sample's projection onto the source, and its
+// six-tap gradient cost six more source calls a sample. That took the device
+// gate's mask_extrude from 51.6 to 288.3 ms at 10 stamps. The extrude now takes
+// the gradient from the lattice it already sampled, and projects only where the
+// region can change a stored value. These hold it to that: skipping is
+// BIT-IDENTICAL to projecting every sample, the halo stays seamless, and the
+// source is called about once a sample. #667's own tests above hold the wall
+// to its requested thickness.
+
+namespace {
+
+// The device gate's mask_extrude fixture, on the host: a 0.8 shell, 24 dabs on
+// it at the gate's stamp spread, a 0.05 wall at a 0.04 cell.
+constexpr float kShellRadius = 0.8f;
+
+cfloat3 stamp_direction(int i) {
+    const double m[3] = {0.4142135624, 0.7320508076, 0.2360679775};
+    float c[3];
+    for (int a = 0; a < 3; ++a) {
+        const double frac = std::fmod(static_cast<double>(i) * m[a], 1.0);
+        c[a] = static_cast<float>(frac) * 1.6f - 0.8f;
+    }
+    const cfloat3 p = cf3(c[0], c[1], c[2]);
+    return p / std::max(kernel::clength(p), 1e-6f);
+}
+
+MaskField dabbed_shell_mask(float cell = 0.04f) {
+    MaskField m(cell);
+    voxel::BrushParams b;
+    b.size = 6;
+    b.shape = voxel::BrushShape::Sphere;
+    b.falloff = voxel::BrushFalloff::Smooth;
+    b.strength = 1.0f;
+    b.seed = 1;
+    for (int i = 0; i < 24; ++i) m.paint(stamp_direction(i) * kShellRadius, b, 1.0f);
+    return m;
+}
+
+// A mask along one edge of a box: the source's gradient turns a corner under it.
+MaskField box_edge_mask(float half, float cell = 0.02f) {
+    MaskField m(cell);
+    const auto to_cell = [cell](float w) { return static_cast<std::int32_t>(std::floor(w / cell)); };
+    for (std::int32_t z = to_cell(-0.3f); z <= to_cell(0.3f); ++z)
+        for (std::int32_t y = to_cell(half - 0.15f); y <= to_cell(half + 0.15f); ++y)
+            for (std::int32_t x = to_cell(half - 0.15f); x <= to_cell(half + 0.15f); ++x)
+                m.set({x, y, z}, 1.0f);
+    return m;
+}
+
+auto box_field(float half) {
+    return [half](cfloat3 p) {
+        const cfloat3 q = cf3(std::abs(p.x) - half, std::abs(p.y) - half, std::abs(p.z) - half);
+        const cfloat3 out = cf3(std::max(q.x, 0.0f), std::max(q.y, 0.0f), std::max(q.z, 0.0f));
+        return kernel::clength(out) + std::min(std::max(q.x, std::max(q.y, q.z)), 0.0f);
+    };
+}
+
+// Every sample the lattice visits, stored or not: bricks times samples a brick.
+double lattice_samples(const FieldVolume& v) {
+    double bricks = 1.0;
+    for (int a = 0; a < 3; ++a)
+        bricks *= static_cast<double>((v.sample_extent(a) - 1) / field::kBrickDim);
+    return bricks * static_cast<double>(field::kBrickSamples);
+}
+
+bool same_bits(const std::vector<float>& a, const std::vector<float>& b) {
+    return a.size() == b.size() &&
+           (a.empty() || std::memcmp(a.data(), b.data(), a.size() * sizeof(float)) == 0);
+}
+
+struct Case {
+    const char* name;
+    std::function<float(cfloat3)> source;
+    MaskField mask;
+    MaskExtrudeSettings settings;
+};
+
+MaskExtrudeSettings with(float thickness, ExtrudeSide side, float round, float cell = 0.0f) {
+    MaskExtrudeSettings s;
+    s.thickness = thickness;
+    s.side = side;
+    s.border_round = round;
+    s.cell_size = cell;
+    return s;
+}
+
+// A fixture tight on the bound's REACH. The bound must cover every point the
+// projection can land on, |distance| from the sample; one that looked only half
+// as far would pass most fixtures. This one has a masked volume BURIED under
+// the surface: it starts `top` below it, runs to near the centre under a
+// 0.6-radius column, and nothing is painted on the surface above it. A sample
+// D deep in an inward wall of thickness t (shell D - t once D > t/2) sits
+// inside that volume. Everything within D/2 of it reads as masked once
+// 1.5 D > t + top, so a half-reach bound skips it. But its projection lands on
+// the unmasked surface D above, where the region decides the stored value. A
+// small cap painted on the surface elsewhere keeps the extrude from being
+// refused.
+//
+// Catching the half-reach error at all depends on lattice alignment. The
+// pyramid reads up to twice the span it is asked for, which absorbs most of a
+// halved reach. A quarter reach fails on most variants; a half reach fails on
+// some. The two variants in identity_cases are ones measured to fail at half
+// reach.
+constexpr float kBuriedRadius = 1.2f;
+
+MaskField buried_mask(float top, float cell) {
+    MaskField m(cell);
+    // The column runs along +Y, a lattice axis: the bound reads an axis-aligned
+    // box, and a diagonal column would let the box's corners reach the
+    // unmasked surface early and hide the defect this fixture exists for.
+    const cfloat3 column = cf3(0.0f, 1.0f, 0.0f);
+    const cfloat3 cap_pole = cf3(-1.0f, 0.0f, 0.0f) * kBuriedRadius;
+    const auto to_cell = [cell](float w) { return static_cast<std::int32_t>(std::floor(w / cell)); };
+    const std::int32_t n = to_cell(kBuriedRadius) + 2;
+    for (std::int32_t z = -n; z <= n; ++z)
+        for (std::int32_t y = -n; y <= n; ++y)
+            for (std::int32_t x = -n; x <= n; ++x) {
+                const cfloat3 c = cf3(static_cast<float>(x) + 0.5f, static_cast<float>(y) + 0.5f,
+                                      static_cast<float>(z) + 0.5f) *
+                                  cell;
+                const float depth = kBuriedRadius - kernel::clength(c);
+                const float along = kernel::cdot(c, column);
+                const float lateral = kernel::clength(c - column * along);
+                const bool buried = depth >= top && depth <= 1.15f && along > 0.0f && lateral <= 0.6f;
+                const bool cap = kernel::clength(c - cap_pole) <= 0.25f && std::abs(depth) <= 0.06f;
+                if (buried || cap) m.set({x, y, z}, 1.0f);
+            }
+    return m;
+}
+
+std::vector<Case> identity_cases() {
+    std::vector<Case> cases;
+    const MaskField cap = cap_mask();
+    for (const ExtrudeSide side : {ExtrudeSide::Outward, ExtrudeSide::Inward, ExtrudeSide::Centred})
+        for (const float round : {0.0f, 0.06f})
+            cases.push_back({"sphere cap", sphere_field(), cap, with(0.12f, side, round)});
+    // #660's walls: the requested thickness beyond the painted mask.
+    cases.push_back({"#660 0.05", sphere_field(), cap, with(0.05f, ExtrudeSide::Outward, 0.0f, 0.01f)});
+    cases.push_back({"#660 0.1", sphere_field(), cap, with(0.1f, ExtrudeSide::Outward, 0.0f, 0.01f)});
+    cases.push_back({"#660 0.6", sphere_field(), cap, with(0.6f, ExtrudeSide::Outward, 0.0f, 0.03f)});
+    cases.push_back({"#660 0.6 rounded inward", sphere_field(), cap,
+                     with(0.6f, ExtrudeSide::Inward, 0.05f, 0.03f)});
+    for (const ExtrudeSide side : {ExtrudeSide::Outward, ExtrudeSide::Centred})
+        for (const float round : {0.0f, 0.04f})
+            cases.push_back({"box edge", box_field(0.4f), box_edge_mask(0.4f),
+                             with(0.08f, side, round, 0.02f)});
+    MaskExtrudeSettings smoothed = with(0.09f, ExtrudeSide::Outward, 0.03f, 0.03f);
+    smoothed.border_smooth = 2;
+    cases.push_back({"serrated, smoothed", sphere_field(), serrated_cap(9), smoothed});
+    cases.push_back({"device shell", sphere_field(kShellRadius), dabbed_shell_mask(),
+                     with(0.05f, ExtrudeSide::Outward, 0.0f, 0.04f)});
+    cases.push_back({"device shell rounded inward", sphere_field(kShellRadius),
+                     dabbed_shell_mask(), with(0.05f, ExtrudeSide::Inward, 0.02f, 0.04f)});
+    cases.push_back({"buried mask, 0.6 inward wall", sphere_field(kBuriedRadius),
+                     buried_mask(0.06f, 0.02f), with(0.6f, ExtrudeSide::Inward, 0.0f, 0.02f)});
+    cases.push_back({"buried mask, 0.45 inward wall", sphere_field(kBuriedRadius),
+                     buried_mask(0.06f, 0.04f), with(0.45f, ExtrudeSide::Inward, 0.0f, 0.04f)});
+    return cases;
+}
+
+}  // namespace
+
+TEST_CASE("mask extrude: skipping the projection changes no stored bit") {
+    for (const Case& c : identity_cases()) {
+        const std::string name = c.name;
+        CAPTURE(name);
+        CAPTURE(static_cast<int>(c.settings.side));
+        CAPTURE(c.settings.border_round);
+        const std::optional<FieldVolume> fast = brush::mask_extrude(c.source, c.mask, c.settings);
+        const std::optional<FieldVolume> reference =
+            brush::detail::mask_extrude_field(c.source, c.mask, c.settings, false);
+        REQUIRE(fast.has_value() == reference.has_value());
+        if (!fast) continue;
+        // The whole serialized volume: lattice, index, far bounds, every stored
+        // sample and the measured Lipschitz, compared as bits.
+        CHECK(fast->brick_count() > 0);
+        CHECK(same_bits(fast->to_blob(), reference->to_blob()));
+    }
+}
+
+TEST_CASE("mask extrude: the skip fires where it is meant to") {
+    // The skip is exact, so a volume cannot show whether it ran; a skip that
+    // silently stopped firing would cost the device gate and pass every
+    // identity test. The tally says what the fill did, and the unculled
+    // reference must report no skips of either kind.
+    using brush::detail::MaskExtrudeTally;
+    const auto tally = [](const std::function<float(cfloat3)>& source, const MaskField& mask,
+                          const MaskExtrudeSettings& s, bool cull) {
+        MaskExtrudeTally t;
+        REQUIRE(brush::detail::mask_extrude_field(source, mask, s, cull, &t).has_value());
+        return t;
+    };
+
+    SUBCASE("bricks wholly beyond the band, on the device fixture") {
+        // The device's dabs are small, so its interior is thin and almost all
+        // of what is skipped there is whole bricks far from the wall.
+        const MaskField mask = dabbed_shell_mask();
+        const MaskExtrudeSettings s = with(0.05f, ExtrudeSide::Outward, 0.0f, 0.04f);
+        const MaskExtrudeTally culled = tally(sphere_field(kShellRadius), mask, s, true);
+        const MaskExtrudeTally unculled = tally(sphere_field(kShellRadius), mask, s, false);
+        CAPTURE(culled.samples);
+        CAPTURE(culled.bricks_beyond_band);
+        CAPTURE(culled.projected);
+        CHECK(culled.bricks_beyond_band > 0);
+        // Most of the lattice never projects: that is where the time went back.
+        CHECK(static_cast<double>(culled.projected) < 0.6 * static_cast<double>(culled.samples));
+        CHECK(unculled.bricks_beyond_band == 0);
+        CHECK(unculled.projected == unculled.samples);
+        CHECK(culled.samples == unculled.samples);
+    }
+
+    SUBCASE("stored samples under the painted interior, on the sphere cap") {
+        // A wide painted cap: inside the wall and well in from the rim, the
+        // mask reads deeply inside everywhere the projection could land, so
+        // the shell beats the bound on samples the volume STORES.
+        const MaskField mask = cap_mask();
+        const MaskExtrudeSettings s = with(0.12f, ExtrudeSide::Outward, 0.0f);
+        const MaskExtrudeTally culled = tally(sphere_field(), mask, s, true);
+        const MaskExtrudeTally unculled = tally(sphere_field(), mask, s, false);
+        CAPTURE(culled.bound_skips);
+        CAPTURE(culled.bound_skips_in_band);
+        CAPTURE(culled.projected);
+        // 631 here when written; an order of magnitude under it, so a change to
+        // the bound's slack does not trip it and a bound that stopped firing does.
+        CHECK(culled.bound_skips_in_band > 60);
+        CHECK(unculled.bound_skips == 0);
+    }
+}
+
+TEST_CASE("mask extrude: neighbouring bricks agree on every sample they share") {
+    // The projection's gradient is a lattice difference, and a sample on a brick
+    // face takes its outside neighbour from the source rather than from the
+    // brick. Both bricks must still store the same bits there, or the halo that
+    // makes a brick self-contained becomes a seam.
+    for (const Case& c : identity_cases()) {
+        const std::string name = c.name;
+        CAPTURE(name);
+        const std::optional<FieldVolume> v = brush::mask_extrude(c.source, c.mask, c.settings);
+        REQUIRE(v.has_value());
+        const std::vector<float> blob = v->to_blob();
+        const int count[3] = {static_cast<int>(blob[5]), static_cast<int>(blob[6]),
+                              static_cast<int>(blob[7])};
+        const auto index_base = static_cast<std::size_t>(blob[8]);
+        const auto data_base = static_cast<std::size_t>(blob[10]);
+        const auto offset = [&](int x, int y, int z) {
+            return static_cast<std::int32_t>(
+                blob[index_base + static_cast<std::size_t>((z * count[1] + y) * count[0] + x)]);
+        };
+        constexpr int n = field::kBrickDim + 1;
+        const auto sample = [&](std::int32_t brick, int x, int y, int z) {
+            return blob[data_base + static_cast<std::size_t>(brick) +
+                        static_cast<std::size_t>((z * n + y) * n + x)];
+        };
+        std::size_t faces = 0, mismatched = 0;
+        for (int z = 0; z < count[2]; ++z)
+            for (int y = 0; y < count[1]; ++y)
+                for (int x = 0; x < count[0]; ++x) {
+                    const std::int32_t here = offset(x, y, z);
+                    if (here < 0) continue;
+                    for (int axis = 0; axis < 3; ++axis) {
+                        const int next[3] = {x + (axis == 0), y + (axis == 1), z + (axis == 2)};
+                        if (next[axis] >= count[axis]) continue;
+                        const std::int32_t there = offset(next[0], next[1], next[2]);
+                        if (there < 0) continue;
+                        ++faces;
+                        for (int a = 0; a < n; ++a)
+                            for (int b = 0; b < n; ++b) {
+                                // `here`'s far face against `there`'s near one.
+                                int p[3], q[3];
+                                p[axis] = field::kBrickDim;
+                                q[axis] = 0;
+                                p[(axis + 1) % 3] = q[(axis + 1) % 3] = a;
+                                p[(axis + 2) % 3] = q[(axis + 2) % 3] = b;
+                                const float u = sample(here, p[0], p[1], p[2]);
+                                const float w = sample(there, q[0], q[1], q[2]);
+                                if (std::memcmp(&u, &w, sizeof(float)) != 0) ++mismatched;
+                            }
+                    }
+                }
+        CHECK(faces > 0);
+        CHECK(mismatched == 0);
+    }
+}
+
+TEST_CASE("mask extrude: the source is called about once a sample") {
+    // Counted, not timed. Per lattice sample rather than per stored one, so
+    // sparsity cannot flatter it: #667's formula was exactly 7 here (the
+    // distance and a six-tap gradient), and the extrude before it exactly 1.
+    const MaskField mask = dabbed_shell_mask();
+    const auto shell = sphere_field(kShellRadius);
+    std::size_t calls = 0;
+    const std::function<float(cfloat3)> counted = [&](cfloat3 p) {
+        ++calls;
+        return shell(p);
+    };
+    const std::optional<FieldVolume> v =
+        brush::mask_extrude(counted, mask, with(0.05f, ExtrudeSide::Outward, 0.0f, 0.04f));
+    REQUIRE(v.has_value());
+    const double per_sample = static_cast<double>(calls) / lattice_samples(*v);
+    CAPTURE(calls);
+    CAPTURE(per_sample);
+    MESSAGE("source calls per lattice sample: " << per_sample);
+    CHECK(per_sample >= 1.0);
+    CHECK(per_sample <= 1.5);
+}
+

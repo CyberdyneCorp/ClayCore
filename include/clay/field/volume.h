@@ -111,6 +111,13 @@ class FieldVolume {
         // them from the world position would be inverting arithmetic that is
         // right here.
         void sample_cell(std::size_t slot, int i, int out[3]) const;
+        // The world point of a GLOBAL cell coordinate: the one expression every
+        // position above goes through. A fill that needs a lattice point no
+        // brick handed it (a neighbour across the window's edge) calls this
+        // rather than rebuilding the arithmetic, so the point is the one the
+        // brick that owns it samples, bit for bit, whatever the compiler
+        // contracts.
+        kernel::cfloat3 cell_position(const int cell[3]) const;
 
         // The box the brick's samples span, halo face included.
         math::Aabb brick_box(std::size_t slot) const;
