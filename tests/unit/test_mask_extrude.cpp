@@ -8,8 +8,10 @@
 #include <cmath>
 #include <cstring>
 #include <functional>
+#include <string>
 #include <vector>
 
+#include "../../src/brush/mask_extrude_internal.h"
 #include "clay/brush/mask_extrude.h"
 #include "clay/field/volume.h"
 #include "clay/voxel/grid.h"
@@ -687,6 +689,50 @@ MaskExtrudeSettings with(float thickness, ExtrudeSide side, float round, float c
     return s;
 }
 
+// A fixture tight on the bound's REACH. The bound must cover every point the
+// projection can land on, |distance| from the sample; one that looked only half
+// as far would pass most fixtures. This one has a masked volume BURIED under
+// the surface: it starts `top` below it, runs to near the centre under a
+// 0.6-radius column, and nothing is painted on the surface above it. A sample
+// D deep in an inward wall of thickness t (shell D - t once D > t/2) sits
+// inside that volume. Everything within D/2 of it reads as masked once
+// 1.5 D > t + top, so a half-reach bound skips it. But its projection lands on
+// the unmasked surface D above, where the region decides the stored value. A
+// small cap painted on the surface elsewhere keeps the extrude from being
+// refused.
+//
+// Catching the half-reach error at all depends on lattice alignment. The
+// pyramid reads up to twice the span it is asked for, which absorbs most of a
+// halved reach. A quarter reach fails on most variants; a half reach fails on
+// some. The two variants in identity_cases are ones measured to fail at half
+// reach.
+constexpr float kBuriedRadius = 1.2f;
+
+MaskField buried_mask(float top, float cell) {
+    MaskField m(cell);
+    // The column runs along +Y, a lattice axis: the bound reads an axis-aligned
+    // box, and a diagonal column would let the box's corners reach the
+    // unmasked surface early and hide the defect this fixture exists for.
+    const cfloat3 column = cf3(0.0f, 1.0f, 0.0f);
+    const cfloat3 cap_pole = cf3(-1.0f, 0.0f, 0.0f) * kBuriedRadius;
+    const auto to_cell = [cell](float w) { return static_cast<std::int32_t>(std::floor(w / cell)); };
+    const std::int32_t n = to_cell(kBuriedRadius) + 2;
+    for (std::int32_t z = -n; z <= n; ++z)
+        for (std::int32_t y = -n; y <= n; ++y)
+            for (std::int32_t x = -n; x <= n; ++x) {
+                const cfloat3 c = cf3(static_cast<float>(x) + 0.5f, static_cast<float>(y) + 0.5f,
+                                      static_cast<float>(z) + 0.5f) *
+                                  cell;
+                const float depth = kBuriedRadius - kernel::clength(c);
+                const float along = kernel::cdot(c, column);
+                const float lateral = kernel::clength(c - column * along);
+                const bool buried = depth >= top && depth <= 1.15f && along > 0.0f && lateral <= 0.6f;
+                const bool cap = kernel::clength(c - cap_pole) <= 0.25f && std::abs(depth) <= 0.06f;
+                if (buried || cap) m.set({x, y, z}, 1.0f);
+            }
+    return m;
+}
+
 std::vector<Case> identity_cases() {
     std::vector<Case> cases;
     const MaskField cap = cap_mask();
@@ -710,6 +756,10 @@ std::vector<Case> identity_cases() {
                      with(0.05f, ExtrudeSide::Outward, 0.0f, 0.04f)});
     cases.push_back({"device shell rounded inward", sphere_field(kShellRadius),
                      dabbed_shell_mask(), with(0.05f, ExtrudeSide::Inward, 0.02f, 0.04f)});
+    cases.push_back({"buried mask, 0.6 inward wall", sphere_field(kBuriedRadius),
+                     buried_mask(0.06f, 0.02f), with(0.6f, ExtrudeSide::Inward, 0.0f, 0.02f)});
+    cases.push_back({"buried mask, 0.45 inward wall", sphere_field(kBuriedRadius),
+                     buried_mask(0.06f, 0.04f), with(0.45f, ExtrudeSide::Inward, 0.0f, 0.04f)});
     return cases;
 }
 
@@ -717,12 +767,13 @@ std::vector<Case> identity_cases() {
 
 TEST_CASE("mask extrude: skipping the projection changes no stored bit") {
     for (const Case& c : identity_cases()) {
-        CAPTURE(c.name);
+        const std::string name = c.name;
+        CAPTURE(name);
         CAPTURE(static_cast<int>(c.settings.side));
         CAPTURE(c.settings.border_round);
         const std::optional<FieldVolume> fast = brush::mask_extrude(c.source, c.mask, c.settings);
         const std::optional<FieldVolume> reference =
-            brush::detail::mask_extrude_unculled(c.source, c.mask, c.settings);
+            brush::detail::mask_extrude_field(c.source, c.mask, c.settings, false);
         REQUIRE(fast.has_value() == reference.has_value());
         if (!fast) continue;
         // The whole serialized volume: lattice, index, far bounds, every stored
@@ -732,13 +783,63 @@ TEST_CASE("mask extrude: skipping the projection changes no stored bit") {
     }
 }
 
+TEST_CASE("mask extrude: the skip fires where it is meant to") {
+    // The skip is exact, so a volume cannot show whether it ran; a skip that
+    // silently stopped firing would cost the device gate and pass every
+    // identity test. The tally says what the fill did, and the unculled
+    // reference must report no skips of either kind.
+    using brush::detail::MaskExtrudeTally;
+    const auto tally = [](const std::function<float(cfloat3)>& source, const MaskField& mask,
+                          const MaskExtrudeSettings& s, bool cull) {
+        MaskExtrudeTally t;
+        REQUIRE(brush::detail::mask_extrude_field(source, mask, s, cull, &t).has_value());
+        return t;
+    };
+
+    SUBCASE("bricks wholly beyond the band, on the device fixture") {
+        // The device's dabs are small, so its interior is thin and almost all
+        // of what is skipped there is whole bricks far from the wall.
+        const MaskField mask = dabbed_shell_mask();
+        const MaskExtrudeSettings s = with(0.05f, ExtrudeSide::Outward, 0.0f, 0.04f);
+        const MaskExtrudeTally culled = tally(sphere_field(kShellRadius), mask, s, true);
+        const MaskExtrudeTally unculled = tally(sphere_field(kShellRadius), mask, s, false);
+        CAPTURE(culled.samples);
+        CAPTURE(culled.bricks_beyond_band);
+        CAPTURE(culled.projected);
+        CHECK(culled.bricks_beyond_band > 0);
+        // Most of the lattice never projects: that is where the time went back.
+        CHECK(static_cast<double>(culled.projected) < 0.6 * static_cast<double>(culled.samples));
+        CHECK(unculled.bricks_beyond_band == 0);
+        CHECK(unculled.projected == unculled.samples);
+        CHECK(culled.samples == unculled.samples);
+    }
+
+    SUBCASE("stored samples under the painted interior, on the sphere cap") {
+        // A wide painted cap: inside the wall and well in from the rim, the
+        // mask reads deeply inside everywhere the projection could land, so
+        // the shell beats the bound on samples the volume STORES.
+        const MaskField mask = cap_mask();
+        const MaskExtrudeSettings s = with(0.12f, ExtrudeSide::Outward, 0.0f);
+        const MaskExtrudeTally culled = tally(sphere_field(), mask, s, true);
+        const MaskExtrudeTally unculled = tally(sphere_field(), mask, s, false);
+        CAPTURE(culled.bound_skips);
+        CAPTURE(culled.bound_skips_in_band);
+        CAPTURE(culled.projected);
+        // 631 here when written; an order of magnitude under it, so a change to
+        // the bound's slack does not trip it and a bound that stopped firing does.
+        CHECK(culled.bound_skips_in_band > 60);
+        CHECK(unculled.bound_skips == 0);
+    }
+}
+
 TEST_CASE("mask extrude: neighbouring bricks agree on every sample they share") {
     // The projection's gradient is a lattice difference, and a sample on a brick
     // face takes its outside neighbour from the source rather than from the
     // brick. Both bricks must still store the same bits there, or the halo that
     // makes a brick self-contained becomes a seam.
     for (const Case& c : identity_cases()) {
-        CAPTURE(c.name);
+        const std::string name = c.name;
+        CAPTURE(name);
         const std::optional<FieldVolume> v = brush::mask_extrude(c.source, c.mask, c.settings);
         REQUIRE(v.has_value());
         const std::vector<float> blob = v->to_blob();

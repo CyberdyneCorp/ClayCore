@@ -117,16 +117,6 @@ std::optional<field::FieldVolume> mask_extrude(const std::function<float(kernel:
                                         const MaskExtrudeSettings& settings,
                                         parallel::CancelToken* token = nullptr);
 
-namespace detail {
-// The field extrude with every sample projected onto the source and nothing
-// skipped. mask_extrude projects only where the mask can change a stored
-// value, and must produce a volume bit-identical to this one; tests hold it to
-// that. Not for hosts — it exists only as the reference.
-std::optional<field::FieldVolume> mask_extrude_unculled(
-    const std::function<float(kernel::cfloat3)>& source, const voxel::MaskField& mask,
-    const MaskExtrudeSettings& settings);
-}  // namespace detail
-
 // The same verb on a voxel grid, in CELL space rather than by sampling a field.
 // A grid already knows which of its cells are on its surface, so going through a
 // volume would cost a conversion and lose the palette for nothing.

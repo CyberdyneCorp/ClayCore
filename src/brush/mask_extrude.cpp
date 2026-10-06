@@ -3,6 +3,7 @@
 // measuring a mask as a distance, and why the mask needs no region parameter.
 
 #include "clay/brush/mask_extrude.h"
+#include "mask_extrude_internal.h"
 
 #include <algorithm>
 #include <array>
@@ -269,9 +270,20 @@ class RegionCeiling {
         // Trilinear interpolation in float can land a few ulps above its
         // largest corner; this covers it with two orders of magnitude to spare.
         slack_ = largest * 1e-5f;
-        levels_.push_back(Level{md.nx, md.ny, md.nz, md.d});
-        while (levels_.back().nx > 1 || levels_.back().ny > 1 || levels_.back().nz > 1)
-            levels_.push_back(halve(levels_.back()));
+        // Level 0 IS the dense distances, read in place rather than copied:
+        // this verb has been killed for memory on the tablet, and a copy would
+        // double the largest array it holds while sampling. The coarser levels
+        // together add about a seventh of it.
+        levels_.push_back(Level{md.nx, md.ny, md.nz, md.d.data()});
+        while (levels_.back().nx > 1 || levels_.back().ny > 1 || levels_.back().nz > 1) {
+            const Level fine = levels_.back();
+            Level coarse{(fine.nx + 1) / 2, (fine.ny + 1) / 2, (fine.nz + 1) / 2, nullptr};
+            // A vector's buffer survives the outer vector growing, so the
+            // pointer taken here stays valid.
+            owned_.push_back(halve(fine, coarse));
+            coarse.m = owned_.back().data();
+            levels_.push_back(coarse);
+        }
     }
 
     // An upper bound on md.eval(q) for every q within `reach` of p. Infinite
@@ -299,26 +311,28 @@ class RegionCeiling {
     }
 
   private:
+    // One level of the pyramid, as a view: level 0 points into the
+    // MaskDistance, the rest into owned_.
     struct Level {
         int nx, ny, nz;
-        std::vector<float> m;
+        const float* m;
         float at(int x, int y, int z) const {
             return m[(static_cast<std::size_t>(z) * ny + y) * nx + x];
         }
     };
 
-    static Level halve(const Level& fine) {
-        Level coarse{(fine.nx + 1) / 2, (fine.ny + 1) / 2, (fine.nz + 1) / 2, {}};
-        coarse.m.assign(static_cast<std::size_t>(coarse.nx) * coarse.ny * coarse.nz,
-                        -std::numeric_limits<float>::infinity());
+    // The maxima of `fine` over 2x2x2 blocks, laid out as `coarse` describes.
+    static std::vector<float> halve(const Level& fine, const Level& coarse) {
+        std::vector<float> m(static_cast<std::size_t>(coarse.nx) * coarse.ny * coarse.nz,
+                             -std::numeric_limits<float>::infinity());
         for (int z = 0; z < fine.nz; ++z)
             for (int y = 0; y < fine.ny; ++y)
                 for (int x = 0; x < fine.nx; ++x) {
                     const std::size_t at =
                         (static_cast<std::size_t>(z / 2) * coarse.ny + y / 2) * coarse.nx + x / 2;
-                    coarse.m[at] = std::max(coarse.m[at], fine.at(x, y, z));
+                    m[at] = std::max(m[at], fine.at(x, y, z));
                 }
-        return coarse;
+        return m;
     }
 
     // The lattice indices eval's corners can take for a coordinate anywhere in
@@ -334,6 +348,7 @@ class RegionCeiling {
 
     const MaskDistance& md_;
     std::vector<Level> levels_;
+    std::vector<std::vector<float>> owned_;  // levels 1.., which have no other home
     float slack_ = 0.0f;
 };
 
@@ -387,26 +402,34 @@ class ExtrudeFill {
             }
         for (std::size_t s = 0; s < count; ++s)
             project_brick(grid, s, out + s * field::kBrickSamples);
+        tally_.samples += count * field::kBrickSamples;
     }
+
+    const detail::MaskExtrudeTally& tally() const { return tally_; }
 
   private:
     static constexpr int kSide = field::kBrickDim + 1;
     static constexpr int kStride[3] = {1, kSide, kSide * kSide};
 
-    void project_brick(const field::FieldVolume::BrickGrid& grid, std::size_t s,
-                       float* block) const {
+    void project_brick(const field::FieldVolume::BrickGrid& grid, std::size_t s, float* block) {
         // A brick whose every shell lies beyond the band is dropped by the
         // volume whatever the region says, because the stored value is never
         // below the shell, and all that survives of it is a sign the shell
         // already has.
         if (cull_ && std::all_of(block, block + field::kBrickSamples,
-                                 [&grid](float shell) { return shell > grid.band; }))
+                                 [&grid](float shell) { return shell > grid.band; })) {
+            ++tally_.bricks_beyond_band;
             return;
+        }
         const float* distance = distance_.data() + s * field::kBrickSamples;
         for (int i = 0; i < field::kBrickSamples; ++i) {
             const cfloat3 p = grid.sample_position(first_ + s, i);
-            if (cull_ && shell_decides(block[i], ceiling_.above(p, std::abs(distance[i])), round_))
+            if (cull_ && shell_decides(block[i], ceiling_.above(p, std::abs(distance[i])), round_)) {
+                ++tally_.bound_skips;
+                if (std::abs(block[i]) <= grid.band) ++tally_.bound_skips_in_band;
                 continue;
+            }
+            ++tally_.projected;
             const cfloat3 q = project_to_surface(p, gradient(grid, s, i), distance[i]);
             block[i] = extrude_value(block[i], md_.eval(q), round_);
         }
@@ -448,14 +471,12 @@ class ExtrudeFill {
             return distance_[brick_at * field::kBrickSamples +
                              static_cast<std::size_t>(i + (there - local[axis]) * kStride[axis])];
         }
-        // Outside the window: the source, at the expression sample_position
-        // uses, so the value is the one the neighbouring brick's fill takes.
+        // Outside the window: the source, at the position the neighbouring
+        // brick's own fill is handed, through the one function that makes it.
         int g[3];
         grid.sample_cell(slot, i, g);
         g[axis] += step;
-        return source_(grid.origin + cf3(static_cast<float>(g[0]), static_cast<float>(g[1]),
-                                         static_cast<float>(g[2])) *
-                                         grid.cell_size);
+        return source_(grid.cell_position(g));
     }
 
     const std::function<float(cfloat3)>& source_;
@@ -467,6 +488,7 @@ class ExtrudeFill {
     bool cull_;
     std::size_t first_ = 0, count_ = 0;
     std::vector<float> distance_;  // the window's source distances, brick-major
+    detail::MaskExtrudeTally tally_;
 };
 
 }  // namespace
@@ -492,7 +514,8 @@ namespace {
 std::optional<field::FieldVolume> extrude_field(const std::function<float(cfloat3)>& source,
                                                 const voxel::MaskField& mask,
                                                 const MaskExtrudeSettings& settings,
-                                                parallel::CancelToken* token, bool cull) {
+                                                parallel::CancelToken* token, bool cull,
+                                                detail::MaskExtrudeTally* tally) {
     if (!(settings.thickness > 0.0f) || mask.empty() || !source) return std::nullopt;
     const float cell = settings.cell_size > 0.0f ? settings.cell_size : mask.cell_size();
     if (!(cell > 0.0f)) return std::nullopt;
@@ -516,9 +539,9 @@ std::optional<field::FieldVolume> extrude_field(const std::function<float(cfloat
 
     // The same positions, windows and cancel checkpoints FieldVolume::sample
     // would use; only the fill is the extrude's own, so it can see a window of
-    // bricks at a time. A culled brick holds shells rather than exact values, but every
-    // one of them is above the band and so above zero, which is all `deepest`
-    // is asked about.
+    // bricks at a time. A culled brick holds shells rather than exact values,
+    // but every one of them is above the band and so above zero, which is all
+    // `deepest` is asked about.
     const RegionCeiling ceiling(*md);
     ExtrudeFill fill(source, *md, ceiling, settings, round, cull);
     float deepest = kInf;
@@ -531,6 +554,7 @@ std::optional<field::FieldVolume> extrude_field(const std::function<float(cfloat
                 deepest = std::min(deepest, values[i]);
         },
         md->bounds(), cell, band, token, &cancelled);
+    if (tally) *tally = fill.tally();
 
     // A cancel and "the mask never reached the surface" both return nullopt,
     // and a host must not be shown the second when the user did the first —
@@ -556,15 +580,15 @@ std::optional<field::FieldVolume> mask_extrude(const std::function<float(cfloat3
                                                const voxel::MaskField& mask,
                                                const MaskExtrudeSettings& settings,
                                                parallel::CancelToken* token) {
-    return extrude_field(source, mask, settings, token, true);
+    return extrude_field(source, mask, settings, token, true, nullptr);
 }
 
 namespace detail {
 
-std::optional<field::FieldVolume> mask_extrude_unculled(
+std::optional<field::FieldVolume> mask_extrude_field(
     const std::function<float(cfloat3)>& source, const voxel::MaskField& mask,
-    const MaskExtrudeSettings& settings) {
-    return extrude_field(source, mask, settings, nullptr, false);
+    const MaskExtrudeSettings& settings, bool cull, MaskExtrudeTally* tally) {
+    return extrude_field(source, mask, settings, nullptr, cull, tally);
 }
 
 }  // namespace detail

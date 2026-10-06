@@ -103,9 +103,13 @@ cfloat3 FieldVolume::BrickGrid::sample_position(std::size_t slot, int i) const {
     // is how that stops being true.
     int g[3];
     sample_cell(slot, i, g);
-    return origin +
-           cf3(static_cast<float>(g[0]), static_cast<float>(g[1]), static_cast<float>(g[2])) *
-               cell_size;
+    return cell_position(g);
+}
+
+cfloat3 FieldVolume::BrickGrid::cell_position(const int cell[3]) const {
+    return origin + cf3(static_cast<float>(cell[0]), static_cast<float>(cell[1]),
+                        static_cast<float>(cell[2])) *
+                        cell_size;
 }
 
 void FieldVolume::BrickGrid::sample_positions(std::size_t first, std::size_t count,
@@ -119,10 +123,8 @@ void FieldVolume::BrickGrid::sample_positions(std::size_t first, std::size_t cou
                 for (int x = 0; x <= kBrickDim; ++x) {
                     // Add in integer cell space before converting, as the scalar
                     // path does. A rounded world-space brick origin is not exact.
-                    const cfloat3 p =
-                        origin + cf3(static_cast<float>(base[0] + x),
-                                     static_cast<float>(base[1] + y),
-                                     static_cast<float>(base[2] + z)) * cell_size;
+                    const int cell[3] = {base[0] + x, base[1] + y, base[2] + z};
+                    const cfloat3 p = cell_position(cell);
                     out_xyz[at++] = p.x;
                     out_xyz[at++] = p.y;
                     out_xyz[at++] = p.z;
