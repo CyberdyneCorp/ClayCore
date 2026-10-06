@@ -1006,6 +1006,19 @@ thin: the wall still reaches the requested thickness along the surface normal.
 The SDF path reads the mask at the source surface under each wall sample; the
 voxel path grows from masked surface cells for the requested number of layers.
 
+Finding "the surface under a sample" needs the source's gradient, and it is
+taken from the lattice the extrude already samples: a central difference of the
+distances one cell either side. It costs no source evaluations of its own,
+except for a neighbour outside the window of bricks being filled. The extrude
+also skips the projection wherever the shell alone decides the stored value.
+That is wherever the shell exceeds the largest distance the mask could report
+within reach of the sample (by the smooth rim's support when `border_round` is
+set), and in any brick lying wholly beyond the band. The skip is exact: the
+volume is bit-identical to projecting every sample. The SDF path therefore
+evaluates the source about once a sample, as it did before the surface anchor
+was added. The first version of the anchor used six extra taps a sample, and the
+v0.126.0 device gate measured `mask_extrude` 5-7x slower for it.
+
 The one thing it needed that did not already exist is `brush::mask_to_field`. A
 mask is a `[0,1]` scalar on a lattice and **not a distance field**: composing one
 into a field expression directly puts a near-vertical step in the result and the
