@@ -1214,7 +1214,11 @@ forward-refuse).
    **`clay_item_volume_move_topological` sub-steps a drag past half its reach**
    (#681 -- issue #657): anchor height 0.939 -> 1.116 on the issue's probe; a
    one-slice drag is bit-identical. **Mask extrude reaches the requested
-   thickness** (#667 -- issue #660): a 0.6 wall stopped near 0.11. **The six
+   thickness** (#667 -- issue #660): a 0.6 wall stopped near 0.11. #667 alone made the field
+   extrude 5-7x slower on the iPad (the first v0.126.0 gate failed on it);
+   **#691 restores the cost**: source calls per sample 7 -> 1.009, 10 stamps
+   395.5 -> 69.1 ms against 73.1 before #667 (Apple M2 Max), with stored values
+   moving up to 0.010 cells on smooth fixtures. **The six
    mesh frame verbs move along an area-weighted normal** (#677 -- issue #631):
    fin tilt 11.47 -> 0.15 degrees, the adaptive stamp 1-8% dearer (arm64
    macOS, `cpu-only` Release).
