@@ -1245,12 +1245,22 @@ forward-refuse).
    bump, and ship here. The other merges carry the line they landed on: #674-#680
    0.121.0, #683 and #684 0.123.0, #686 0.124.0.
 
-   **The device gate for 0.126.0 has not run**; it is pending with the iPad
-   team, and `tests/device/last-gate.json` is still v0.120.1's (`7f6cf38f`). The
-   four hardware gates are carried as waivers at `4401b354`: the only
-   kernel-relevant change since `59e42ccf` is `include/clay/eval/bake_volume.h`
-   (#680, `8d015258`), which passes the band into the per-brick cull and
-   changes no kernel arithmetic, and `tests/unit/test_parity.cpp` is unchanged.
+   **0.126.0's device gate passed on a re-recorded baseline.** The reference
+   iPad moved to iOS 27.0.1 (24A446) on 2026-10-04 and #690 re-baselined from
+   v0.120.1's engine (`7f6cf38f`) on that OS, so the gate compares v0.120.1 to
+   v0.126.0 on the same OS rather than a run against itself. It passed at
+   `7049e19c`: iPad15,5, 75 cases, 1800 s cooldowns, nominal throughout, canary
+   steady at x1.18, **median ratio 0.996 against the baseline, none above both
+   the 1.4 tolerance and the 0.125 ms floor**, largest rise 1.04x. The first run,
+   at `7406eb1d` before #691, failed: `mask_extrude` x4.97 (26992 ms at 1000
+   stamps, budget 8154) and `mask_extract` x6.26, both through #667's extrude;
+   with #691 they read 1.01x and 1.04x. The run needed Wi-Fi off and an air
+   conditioner; post-update on-device inference heat-killed four sessions
+   before that. The four hardware gates are carried as waivers at `4401b354`:
+   the only kernel-relevant change since `59e42ccf` is
+   `include/clay/eval/bake_volume.h` (#680, `8d015258`), which passes the band
+   into the per-brick cull and changes no kernel arithmetic, and
+   `tests/unit/test_parity.cpp` is unchanged.
 
    **0.113.0 stops decimation breaking a manifold it was given** (#567).
    meshoptimizer chooses its own collapses and does not apply the link condition
